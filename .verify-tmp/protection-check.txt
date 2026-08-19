@@ -1,0 +1,7 @@
+Disposable artifact for the main-protection ruleset verification (task #24).
+
+This file exists only to give the verification PR a non-empty diff. It must
+never reach main. The PR that carries it is expected to be refused at merge
+for lack of an approving review, then closed unmerged and its branch deleted.
+
+Nothing in the factory depends on this path.
