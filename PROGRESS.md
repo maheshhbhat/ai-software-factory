@@ -5,8 +5,8 @@
 ## Current Position
 
 - **Current phase:** Phase 1 — State schema and touch log
-- **Current status:** NOT STARTED
-- **Next action:** Begin Phase 1 deliverables — author `spec/state-schema.md` (issue types, label state machines, transition table), issue templates for roadmap commitment / project / story, and `touchlog/` append-only log + script.
+- **Current status:** IN PROGRESS
+- **Next action:** Verify Phase 1 — create one project + three story issues from templates, walk all legal Project/Story transitions manually, log touches via `factory/touchlog/append.py`.
 - **Blocker:** None
 - **Last verified milestone:** None — no phase has been verified yet.
 
@@ -16,7 +16,7 @@ States are limited to `NOT STARTED` | `IN PROGRESS` | `VERIFYING` | `VERIFIED`.
 
 | Phase | State | Verification / Proof Required |
 |---|---|---|
-| **Phase 1 — State schema and touch log** (no AI, no automation) | NOT STARTED | Create one project + three story issues by hand from the templates; manually walk every legal Project transition (`queued → ready-for-planning → planning → awaiting-ready → active → awaiting-acceptance → accepted`) and Story transition (`blocked → ready → claimed → in-review → merged`, plus `blocked:poison` / `blocked:scope`); log touches. Pass = transitions and touch log match `spec/state-schema.md`. |
+| **Phase 1 — State schema and touch log** (no AI, no automation) | IN PROGRESS | Create one project + three story issues by hand from the templates; manually walk every legal Project transition (`queued → ready-for-planning → planning → awaiting-ready → active → awaiting-acceptance → accepted`) and Story transition (`blocked → ready → claimed → in-review → merged`, plus `blocked:poison` / `blocked:scope`); log touches. Pass = transitions and touch log match `spec/state-schema.md`. |
 | **Phase 2 — Deterministic rails** (no AI) | NOT STARTED | With a fake worker script (opens trivial PR on invoke, no AI): prove dispatch is idempotent per artifact + state version (once and only once per transition); merge gate blocks without exact-head review-approval label; hazard-path edit blocks without human ack label from allowed identity; 3 failed attempts → `blocked:poison` + human notification; tests-green, scope, and `test-change` label checks enforce. |
 | **Phase 3 — Planning agent** | NOT STARTED | Run planning agent against a real module of the real product. Single gate: **is the plan digest one you would sign?** Must include ADR, stories with `phase:` labels + explicit `depends-on:` + hazard pre-flags, falsifiable acceptance criteria, expected-bells count, and human-readable digest (campaign vs. project altitude selected by trigger type). Iterate prompt until yes. Do not start Phase 4 on an unsigned plan. |
 | **Phase 4 — Workers and review** | NOT STARTED | One toy story `add a /health endpoint returning build SHA` through the full loop with zero manual steps between READY sign-off and merge. Worker reads spec+ADRs+findings, branches, PRs, exits with spend cap; review fires on PR-open in fresh context (diff+spec+ADRs only), posts findings→`ready` or approval label bound to head SHA; sampling hook applies 1-in-N lottery (start N=3); merge gate auto-merges. |
@@ -43,4 +43,4 @@ Captures only decisions already established by `architecture-v2.1.md` and `imple
 - **Measurement:** Instrument v1 baseline before migrating — touches classified, autonomous merge rate, rework/reopen rate, escaped defects, acceptance-catch rate, cost/wall-clock per accepted story, poison rate, stuck-work MTTR, sampling findings rate.
 
 ---
-*Last updated: 2026-08-19 · Position: Phase 1 / NOT STARTED · Source specs: `factory/spec/architecture-v2.1.md`, `factory/spec/implementation-plan-v1.md`*
+*Last updated: 2026-08-19 · Position: Phase 1 / IN PROGRESS · Source specs: `factory/spec/architecture-v2.1.md`, `factory/spec/implementation-plan-v1.md`*

@@ -1,0 +1,49 @@
+name: Roadmap commitment
+description: Direction pebble from CTO/CEO — input to planning. Human-authored.
+title: "[Commitment] "
+labels: ["type:roadmap-commitment"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Human-authored direction. This is one of the two human-authored artifacts (`product.md` + this issue). Planning will derive a Project and stories from it. No lifecycle labels apply (open/closed only).
+  - type: textarea
+    id: background
+    attributes:
+      label: Background
+      description: What problem are we solving and why now?
+      placeholder: Context, users, and why this is the next pebble.
+    validations:
+      required: true
+  - type: textarea
+    id: constraints
+    attributes:
+      label: Constraints
+      description: Standing constraints that bound the solution (reuse product.md where possible).
+      placeholder: e.g. Must not break existing API; budget / timeline bounds.
+    validations:
+      required: false
+  - type: textarea
+    id: non_goals
+    attributes:
+      label: Non-goals
+      description: Explicitly out of scope.
+      placeholder: What we are NOT doing in this commitment.
+    validations:
+      required: false
+  - type: textarea
+    id: success_hints
+    attributes:
+      label: Success hints
+      description: Hints for falsifiable acceptance criteria (planning will formalize).
+      placeholder: e.g. "A 50+ page report exports to valid PDF in <30s, respecting permissions."
+    validations:
+      required: false
+  - type: input
+    id: product_ref
+    attributes:
+      label: product.md ref
+      description: Link or commit SHA of the standing product constraints this commitment honors.
+      placeholder: "main:product.md or link"
+    validations:
+      required: false
