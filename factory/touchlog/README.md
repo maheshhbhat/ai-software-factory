@@ -30,7 +30,7 @@ This log is **measurement evidence only**. The decision itself is recorded as a 
 | `timestamp` | string | yes | ISO-8601 UTC, trailing `Z` or `+00:00`; `append.py` defaults to now if omitted and rejects naive, non-UTC, or unparseable values |
 | `project` | string | yes | Project issue ref, e.g. `"#12"` |
 | `story` | string \| null | yes (null allowed) | Story issue ref or `null` for project-level bells |
-| `bell_type` | string | yes | `plan-approval` \| `hazard-ack` \| `poison-rescue` \| `cutover-approval` \| `acceptance` \| `sampling` |
+| `bell_type` | string | yes | `plan-approval` \| `hazard-ack` \| `poison-rescue` \| `scope-decision` \| `cutover-approval` \| `acceptance` \| `sampling` |
 | `classification` | string | yes | `decision` \| `audit` \| `rescue` \| `relay` (exactly these four) |
 | `seconds_spent` | integer | yes | `>=0` |
 | `note` | string | yes (may be `""`) | Human-readable context |

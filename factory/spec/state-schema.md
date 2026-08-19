@@ -232,9 +232,9 @@ Both former self-loops (`awaiting-ready → awaiting-ready`, `awaiting-acceptanc
 | `story:in-review` | `story:ready` | review (manual in P1) / review skill | findings posted | **no `Attempt` change**; attach findings as a comment |
 | `story:ready` | `story:blocked:poison` | dispatcher (human in P1) | `Attempt >= 3` and another attempt would otherwise be dispatched | **raises** the `poison-rescue` bell; no dispatch occurs. No touch is logged here — the touch belongs to the rescue (§4.3.8) |
 | `story:blocked:poison` | `story:ready` | human | rescue per §4.3 | rescue comment + `Attempt` reset required; **yes** — the single `poison-rescue` / `rescue` touch is logged here (§4.3.8) |
-| `*` | `story:blocked:scope` | human | scope dispute raised | **yes** `decision` or `rescue` as appropriate |
-| `story:blocked:scope` | `story:blocked` | human | dispute resolved (scope amended or withdrawn) | re-enters normal flow |
-| `story:blocked:scope` | `story:ready` | human | dispute resolved and unblocked | allowed if deps already satisfied |
+| `*` | `story:blocked:scope` | human | scope dispute raised | **raises** the `scope-decision` bell; no touch here — the touch belongs to the resolution (§4.3.8 principle) |
+| `story:blocked:scope` | `story:blocked` | human | dispute resolved (scope amended or withdrawn) | **yes** `scope-decision` / `decision`, logged once here; re-enters normal flow |
+| `story:blocked:scope` | `story:ready` | human | dispute resolved and unblocked | **yes** `scope-decision` / `decision`, logged once here; allowed if deps already satisfied |
 
 ### 4.3 Attempt counter and poison — canonical rule
 
@@ -313,13 +313,13 @@ All pass → `project:accepted`. Any fail → `project:active`, with a new story
 
 ### 5.4 Story-level bells
 
-`poison-rescue` (§4.3.6), `hazard-ack`, `cutover-approval`, and `sampling` are recorded as comments on the affected story or PR, each stating the decision and the actor, and each accompanied by exactly one touch-log line.
+`poison-rescue` (§4.3.6), `scope-decision` (§4.2), `hazard-ack`, `cutover-approval`, and `sampling` are recorded as comments on the affected story or PR, each stating the decision and the actor, and each accompanied by exactly one touch-log line.
 
 ---
 
 ## 6. Touch log (substrate for measurement)
 
-Every human bell is logged to `factory/touchlog/touchlog.jsonl` via `factory/touchlog/append.py`. Classifications are exactly `decision | audit | rescue | relay`. Bell types: `plan-approval`, `hazard-ack`, `poison-rescue`, `cutover-approval`, `acceptance`, `sampling`. See `factory/touchlog/README.md` for the JSONL schema and helper usage. Only `relay` should trend to zero; other touches are expected.
+Every human bell is logged to `factory/touchlog/touchlog.jsonl` via `factory/touchlog/append.py`. Classifications are exactly `decision | audit | rescue | relay`. Bell types: `plan-approval`, `hazard-ack`, `poison-rescue`, `scope-decision`, `cutover-approval`, `acceptance`, `sampling`. This list is canonical and extends the six named in `implementation-plan-v1.md` core rule 6: `scope-decision` was added because §4.2 requires a bell for the `story:blocked:scope` decision and no existing type covered it. See `factory/touchlog/README.md` for the JSONL schema and helper usage. Only `relay` should trend to zero; other touches are expected.
 
 The touch log measures bells; §5 records what was decided. A bell with a touch-log line and no comment is an incomplete record, and so is a comment with no touch-log line.
 

@@ -28,6 +28,7 @@ VALID_BELL_TYPES = {
     "plan-approval",
     "hazard-ack",
     "poison-rescue",
+    "scope-decision",
     "cutover-approval",
     "acceptance",
     "sampling",
