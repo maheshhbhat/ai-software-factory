@@ -5,10 +5,9 @@
 ## Current Position
 
 - **Current phase:** Phase 1 — State schema and touch log
-- **Current status:** IN PROGRESS — repaired after independent review (issue #6); halted at the human re-approval gate.
-- **Next action:** **Human plan-approval bell on Project #1.** The acceptance criteria were corrected after approval, so the earlier approval was superseded and #1 was returned to `project:awaiting-ready`. A human must review the corrected criteria, post the `state-schema.md` §5.1 approval comment, log the `plan-approval` touch, and transition `project:awaiting-ready → project:active`. No agent may self-approve.
-- **After that gate:** recreate story fixtures #2–#4 **through the GitHub issue form** so their bodies match the §3.3 rendered contract (the existing bodies predate it), then walk the remaining Project and Story transitions and log each bell as comment + touch-log line.
-- **Blocker:** Awaiting human plan-approval on Project #1.
+- **Current status:** IN PROGRESS — Project #1 is approved and `project:active`; fixtures rebuilt to the canonical §3.3 contract. Plan approval is no longer blocking.
+- **Next action:** **Walk the remaining Phase 1 Story lifecycle** on fixtures #10 → #11 → #12 (`story:blocked` today): happy path `blocked → ready → claimed → in-review → merged`; the retry path with `Attempt` incrementing only on `ready → claimed`; poison at `Attempt = 3` and rescue per `state-schema.md` §4.3; and the `story:blocked:scope` detour. Then close the Project tail: `active → awaiting-acceptance` once all three are merged, and `awaiting-acceptance → accepted` after an acceptance comment recording pass/fail per criterion. Every bell needs both a §5 decision comment and exactly one `touchlog.jsonl` line.
+- **Blocker:** None.
 - **Last verified milestone:** None — no phase has been verified yet.
 
 ## Phase Tracker
@@ -35,6 +34,7 @@ Decisions established by `architecture-v2.1.md` and `implementation-plan-v1.md`,
 - **Attempt/poison is now single-sourced** in `state-schema.md` §4.3, resolving the schema-vs-plan contradiction: `Attempt` counts *dispatched worker attempts* and increments on `ready → claimed`; review findings return the story to `ready` with **no** increment; at dispatch time `Attempt >= 3` routes to `story:blocked:poison` instead of dispatching. Rescue requires a rescue comment + `Attempt` reset to `0` + a `poison-rescue` touch, and rescues are capped at 2 per story (counted from the issue timeline) — bounding a story at 9 dispatched attempts.
 - **Decision evidence lives in GitHub comments** (`state-schema.md` §5), not in the touch log: plan approval quotes the approved criteria verbatim (an approval is void once that section is edited), acceptance records pass/fail per criterion, and the touch log stays measurement-only. Every bell produces both a comment and exactly one touch-log line.
 - **The issue-form rendering is the body contract** (`state-schema.md` §3): forms write `### <label>` headings, bare dropdown values, `- [X]`-style checkboxes, and `_No response_` for empty optional fields. `Depends-on` is one bare `#N` per line or the single token `none`; `Phase` is the bare value mirrored as `phase:<value>`. Issues hand-written before this contract do not conform.
+- **Fixtures rebuilt to the contract (task #9):** stories #2/#3/#4 were superseded and closed as not planned — their bodies predate §3.3 — and replaced by #10 (no deps), #11 (depends on #10, hazard), #12 (depends on #11), each verified against the rendered-form contract. The hazard fixture now flags a dependency manifest inside the synthetic sandbox rather than `factory/spec/**`, so exercising the flag never writes into the factory's own governance paths.
 - **Both project self-loops were replaced by real edges** (`awaiting-ready → planning`, `awaiting-acceptance → active`) because a label edit ending on the same label emits no routable transition; a `project:active → project:awaiting-ready` correction edge exists for criteria amended after approval.
 
 **From the source specs:**
@@ -53,4 +53,4 @@ Decisions established by `architecture-v2.1.md` and `implementation-plan-v1.md`,
 - **Measurement:** Instrument v1 baseline before migrating — touches classified, autonomous merge rate, rework/reopen rate, escaped defects, acceptance-catch rate, cost/wall-clock per accepted story, poison rate, stuck-work MTTR, sampling findings rate.
 
 ---
-*Last updated: 2026-08-19 · Position: Phase 1 / IN PROGRESS — awaiting human plan-approval on Project #1 · Source specs: `factory/spec/architecture-v2.1.md`, `factory/spec/implementation-plan-v1.md`*
+*Last updated: 2026-08-19 · Position: Phase 1 / IN PROGRESS — Project #1 active; Story lifecycle walk pending on #10/#11/#12 · Source specs: `factory/spec/architecture-v2.1.md`, `factory/spec/implementation-plan-v1.md`*
