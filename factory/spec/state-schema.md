@@ -230,8 +230,8 @@ Both former self-loops (`awaiting-ready → awaiting-ready`, `awaiting-acceptanc
 | `story:claimed` | `story:in-review` | worker (human in P1) | PR opened referencing story | PR identity recorded in story comments |
 | `story:in-review` | `story:merged` | merge gate (human in P1) | PR merged | terminal success |
 | `story:in-review` | `story:ready` | review (manual in P1) / review skill | findings posted | **no `Attempt` change**; attach findings as a comment |
-| `story:ready` | `story:blocked:poison` | dispatcher (human in P1) | `Attempt >= 3` and another attempt would otherwise be dispatched | **yes** `poison-rescue` / `rescue` bell; no dispatch occurs |
-| `story:blocked:poison` | `story:ready` | human | rescue per §4.3 | rescue comment + `Attempt` reset required; log `rescue` |
+| `story:ready` | `story:blocked:poison` | dispatcher (human in P1) | `Attempt >= 3` and another attempt would otherwise be dispatched | **raises** the `poison-rescue` bell; no dispatch occurs. No touch is logged here — the touch belongs to the rescue (§4.3.8) |
+| `story:blocked:poison` | `story:ready` | human | rescue per §4.3 | rescue comment + `Attempt` reset required; **yes** — the single `poison-rescue` / `rescue` touch is logged here (§4.3.8) |
 | `*` | `story:blocked:scope` | human | scope dispute raised | **yes** `decision` or `rescue` as appropriate |
 | `story:blocked:scope` | `story:blocked` | human | dispute resolved (scope amended or withdrawn) | re-enters normal flow |
 | `story:blocked:scope` | `story:ready` | human | dispute resolved and unblocked | allowed if deps already satisfied |
@@ -244,9 +244,10 @@ This section is the single definition of attempt and poison behaviour. Where `im
 2. **Increment point.** `Attempt` increments by exactly 1 on `story:ready → story:claimed`, written into the issue body by the dispatching actor as part of that transition.
 3. **Findings do not increment.** `story:in-review → story:ready` returns the story for another attempt and leaves `Attempt` unchanged; the next dispatch is what increments it.
 4. **Infrastructure failures do not count.** If invocation fails before the worker starts, restore the previous `Attempt` value and return the story to `story:ready`. Only an attempt that actually started is counted.
-5. **Threshold.** `ATTEMPT_MAX = 3` for v1. The check runs **at dispatch time, before incrementing**: if `Attempt >= ATTEMPT_MAX`, do not dispatch — transition `story:ready → story:blocked:poison` and ring the `poison-rescue` bell. A story therefore gets exactly 3 dispatched attempts and reads `Attempt = 3` when poisoned.
+5. **Threshold.** `ATTEMPT_MAX = 3` for v1. The check runs **at dispatch time, before incrementing**: if `Attempt >= ATTEMPT_MAX`, do not dispatch — transition `story:ready → story:blocked:poison`, which raises the `poison-rescue` bell (no touch yet; §4.3.8). A story therefore gets exactly 3 dispatched attempts and reads `Attempt = 3` when poisoned.
 6. **Rescue.** Only a human may leave `story:blocked:poison`. A rescue requires all three, in this order: (a) a rescue comment on the story stating what changed (spec, scope, or dependencies amended), (b) `Attempt` reset to `0` in the body, (c) a `poison-rescue` touch logged. Then `story:blocked:poison → story:ready`.
 7. **Bounded forward progress.** Rescues per story are capped at **2**, counted as the number of times `story:blocked:poison` has been applied in the issue timeline (GitHub timeline is authoritative history). On the third poisoning the story is **not** rescued: it is closed and returned to planning as a re-planning input. A story therefore consumes at most 9 dispatched worker attempts in its lifetime, and the loop terminates by construction.
+8. **One bell, one touch.** Entering `story:blocked:poison` *raises* the bell — it routes the story to the human queue and no human time has been spent yet, so **no touch-log line is written at poisoning**. The single `poison-rescue` / `rescue` line is written exactly once, when the human actually performs or approves the rescue (§4.3.6c), and its `seconds_spent` measures that human's time. A poisoning that is never rescued therefore has no touch, which is correct: the KPI counts human touches, not queue entries.
 
 **Idempotency:** duplicate deliveries keyed on `artifact + state version` no-op; Phase 1 simulates this by not re-applying the same label transition twice.
 
@@ -329,6 +330,11 @@ The touch log measures bells; §5 records what was decided. A bell with a touch-
 Dispatcher (cron + routing table), merge gate (required CI check), hazard CODEOWNERS, planning/worker/review agents, sampling lottery, `factory/runs/` KPIs, Supervisor/webhook runtime, skills library, dashboards, multi-project concurrency, epic layer, event bus. None are defined or implemented here.
 
 Known open items deferred to the Phase 2 readiness pass, recorded so they are not lost: claim-expiry/recovery transition out of `story:claimed`; remaining template/schema field drift beyond §3; hazard fixture location; branch-protection availability for unforgeable gates.
+
+Two requirements the Phase 1 walk surfaced, to be satisfied **before** the dispatcher is implemented (requirements here, not implementations):
+
+* **Lifecycle label changes must be atomic.** A transition must replace the label set in one complete-label-set update, so no observer ever sees an issue carrying zero or two lifecycle labels. Adding the new label and removing the old one as two separate calls breaks the §2.1 invariant transiently — observed during the Phase 1 walk as a ~1s zero-label window on one transition, and as a momentary two-label state when the ordering flips. A poller reading mid-swap would see the issue in no state or two states and could mis-route or skip it.
+* **Terminal story issues need defined open/closed semantics.** `story:merged`, `story:blocked:poison` after the rescue cap, and any other terminal state must state whether the GitHub issue is closed and with what reason. Nothing defines this today, so a `story:merged` issue stays open — which matters because "open stories" is the obvious dispatcher query.
 
 ---
 
