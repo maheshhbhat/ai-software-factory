@@ -19,7 +19,7 @@ body:
     id: acceptance_criteria
     attributes:
       label: Falsifiable acceptance criteria
-      description: Checklist — each item is a yes/no test. Bad: "Export works well." Good: "A 50+ page report exports to valid PDF in <30s."
+      description: 'Checklist — each item is a yes/no test. Bad: "Export works well." Good: "A 50+ page report exports to valid PDF in <30s."'
       placeholder: |
         - [ ] A 50+ page report exports to valid PDF in <30s
         - [ ] Export respects document permissions

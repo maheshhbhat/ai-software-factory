@@ -11,6 +11,7 @@ Usage:
 Constraints:
   - File stays valid JSONL: one JSON object per line, UTF-8, no header/comment.
   - Exactly decision|audit|rescue|relay for classification.
+  - Timestamps are ISO-8601 UTC (trailing Z or +00:00); anything else is rejected.
   - No dependency on shell flock(1). Uses Python stdlib only; advisory lock via fcntl/msvcrt where available, else atomic append.
 """
 
@@ -59,6 +60,28 @@ def _validate(project: str, story: str | None, seconds_spent: int) -> str | None
         return "seconds-spent must be >= 0"
     if story is not None and story.strip() == "":
         return "story must be null/omitted or a non-empty ref"
+    return None
+
+
+def _validate_timestamp(ts: str) -> str | None:
+    """Return an error message if ts is not an ISO-8601 UTC timestamp, else None.
+
+    Accepts a trailing "Z" or an explicit "+00:00" offset. Rejects naive timestamps
+    and any non-zero offset: the touch log is UTC-only so cycle-time KPIs are
+    comparable across entries.
+    """
+    if ts is None or not ts.strip():
+        return "timestamp must be non-empty"
+    raw = ts.strip()
+    normalized = raw[:-1] + "+00:00" if raw.endswith(("Z", "z")) else raw
+    try:
+        parsed = datetime.datetime.fromisoformat(normalized)
+    except ValueError:
+        return f"timestamp is not ISO-8601: {ts!r}"
+    if parsed.tzinfo is None:
+        return f"timestamp must be UTC and carry an offset (trailing Z or +00:00): {ts!r}"
+    if parsed.utcoffset() != datetime.timedelta(0):
+        return f"timestamp must be UTC (offset +00:00): {ts!r}"
     return None
 
 
@@ -128,9 +151,9 @@ def main(argv: list[str]) -> int:
         print(f"error: {err}", file=sys.stderr)
         return 2
 
-    # Validate timestamp is roughly ISO-8601 (allow any non-empty; strict check is not required for append)
-    if not timestamp or not timestamp.strip():
-        print("error: timestamp must be non-empty", file=sys.stderr)
+    ts_err = _validate_timestamp(timestamp)
+    if ts_err is not None:
+        print(f"error: {ts_err}", file=sys.stderr)
         return 2
 
     record = {

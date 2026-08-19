@@ -5,9 +5,10 @@
 ## Current Position
 
 - **Current phase:** Phase 1 — State schema and touch log
-- **Current status:** IN PROGRESS
-- **Next action:** Verify Phase 1 — create one project + three story issues from templates, walk all legal Project/Story transitions manually, log touches via `factory/touchlog/append.py`.
-- **Blocker:** None
+- **Current status:** IN PROGRESS — repaired after independent review (issue #6); halted at the human re-approval gate.
+- **Next action:** **Human plan-approval bell on Project #1.** The acceptance criteria were corrected after approval, so the earlier approval was superseded and #1 was returned to `project:awaiting-ready`. A human must review the corrected criteria, post the `state-schema.md` §5.1 approval comment, log the `plan-approval` touch, and transition `project:awaiting-ready → project:active`. No agent may self-approve.
+- **After that gate:** recreate story fixtures #2–#4 **through the GitHub issue form** so their bodies match the §3.3 rendered contract (the existing bodies predate it), then walk the remaining Project and Story transitions and log each bell as comment + touch-log line.
+- **Blocker:** Awaiting human plan-approval on Project #1.
 - **Last verified milestone:** None — no phase has been verified yet.
 
 ## Phase Tracker
@@ -27,15 +28,24 @@ States are limited to `NOT STARTED` | `IN PROGRESS` | `VERIFYING` | `VERIFIED`.
 
 ## Decisions / Learnings
 
-Captures only decisions already established by `architecture-v2.1.md` and `implementation-plan-v1.md` — no build learnings yet.
+Decisions established by `architecture-v2.1.md` and `implementation-plan-v1.md`, plus build learnings from the Phase 1 repair (review issue #6, task #7).
+
+**Phase 1 repair (2026-08-19):**
+
+- **Attempt/poison is now single-sourced** in `state-schema.md` §4.3, resolving the schema-vs-plan contradiction: `Attempt` counts *dispatched worker attempts* and increments on `ready → claimed`; review findings return the story to `ready` with **no** increment; at dispatch time `Attempt >= 3` routes to `story:blocked:poison` instead of dispatching. Rescue requires a rescue comment + `Attempt` reset to `0` + a `poison-rescue` touch, and rescues are capped at 2 per story (counted from the issue timeline) — bounding a story at 9 dispatched attempts.
+- **Decision evidence lives in GitHub comments** (`state-schema.md` §5), not in the touch log: plan approval quotes the approved criteria verbatim (an approval is void once that section is edited), acceptance records pass/fail per criterion, and the touch log stays measurement-only. Every bell produces both a comment and exactly one touch-log line.
+- **The issue-form rendering is the body contract** (`state-schema.md` §3): forms write `### <label>` headings, bare dropdown values, `- [X]`-style checkboxes, and `_No response_` for empty optional fields. `Depends-on` is one bare `#N` per line or the single token `none`; `Phase` is the bare value mirrored as `phase:<value>`. Issues hand-written before this contract do not conform.
+- **Both project self-loops were replaced by real edges** (`awaiting-ready → planning`, `awaiting-acceptance → active`) because a label edit ending on the same label emits no routable transition; a `project:active → project:awaiting-ready` correction edge exists for criteria amended after approval.
+
+**From the source specs:**
 
 - **Substrate:** All authoritative state lives in GitHub (issues/labels = state, webhooks = change feed, identities = access, branch protection + required checks = unforgeable gates, git log + issue timeline = history). Any cache is derivable and disposable, never authoritative.
 - **No persistent AI:** Every AI component is invoked on a state transition, reads from GitHub, writes new state, and exits. No heartbeats, liveness, or daemon supervisors. Start with a 60s cron poll + static routing table; Supervisor/webhook runtime deferred until latency data demands it.
 - **Communication:** `write → transition → route → invoke → read → write`. Dispatcher is a pure `transition → role` lookup (~10 lines of config), passes only artifact identity. Components are mutually invisible; recovery is re-invocation from the same transition. Poller is the backstop for lost webhooks.
 - **Judgment checked:** Every AI-judgment box has an independent check it cannot influence — workers by review, review by PR-open trigger + human sampling, merges by deterministic CI the worker identity cannot affect, planning by outcome acceptance. Route on transitions, not states; record claims as state.
-- **Review & merge:** Review triggers only on PR-open in fresh context (diff + story spec + ADRs, never worker reasoning). Findings return story to `ready` with attempt counter increment. Merge gate is required CI checking: exact-head approval, tests green, diff within declared story scope, test deletion/weakening surfaced as distinct `test-change` class, hazard paths. Worker identities cannot merge/skip/re-run it.
+- **Review & merge:** Review triggers only on PR-open in fresh context (diff + story spec + ADRs, never worker reasoning). Findings return story to `ready`; the attempt counter increments on the next dispatch, not on the findings (canonical rule: `state-schema.md` §4.3). Merge gate is required CI checking: exact-head approval, tests green, diff within declared story scope, test deletion/weakening surfaced as distinct `test-change` class, hazard paths. Worker identities cannot merge/skip/re-run it.
 - **Hazard paths:** Enumerated — secrets/credentials, dependency manifests, CI/workflow files, branch protection, IAM, data migrations, destructive operations, and `factory/spec/**` + `factory/gates/**` (factory cannot modify its own rules). Enforced via CODEOWNERS with agent identities excluded; one human ack per hazard diff.
-- **Idempotency & poison:** Keyed on artifact + state version (at-least-once feed); duplicate deliveries no-op. Workers never self-claim — dispatcher assigns (no label-CAS race). Attempt counter with poison threshold at 3 → `blocked:poison` → human queue with full context. Infrastructure failures do not increment. WIP limits, spend caps, and finite dependency graphs guarantee termination.
+- **Idempotency & poison:** Keyed on artifact + state version (at-least-once feed); duplicate deliveries no-op. Workers never self-claim — dispatcher assigns (no label-CAS race). Attempt counter with poison threshold at 3 checked **at dispatch time** → `blocked:poison` → human queue with full context (`state-schema.md` §4.3). Infrastructure failures do not increment. WIP limits, spend caps, and finite dependency graphs guarantee termination.
 - **Human gates (bells only):** Humans appear only at `plan approval (READY)`, `hazard ack`, `poison rescue`, `cutover approval`, `outcome acceptance`, `sampling audit`. Zero stories human-reviewed in the happy path. Every bell logged to touch log as `decision | audit | rescue | relay` with time spent — only `relay` should trend to zero. Outcome acceptance is once per project (falsifiable criteria approved at READY, human tests pass/fail per criterion); failure creates a story or re-planning. Keep projects 5–10 stories; milestone-acceptance checkpoints are the only legitimate Sprint residue.
 - **Roles collapsed/deleted:** Planning agent merges Product Manager + Chief Architect (split only on evidence of ≥3 concurrent projects with genuine coupling); Sequencer (deterministic code) replaces Delivery Manager's mechanical half — dependencies must be explicitly declared at authoring; Sprints, Epic layer, Governance-as-skill, Supervisor, heartbeats deleted. Architecture judgment lives as ADR skill + human review for consequential decisions.
 - **Deferred until Phase 5 evidence:** Supervisor/webhook runtime, skills library, progress dashboards beyond the digest, multi-project concurrency, epic layer, event bus.
@@ -43,4 +53,4 @@ Captures only decisions already established by `architecture-v2.1.md` and `imple
 - **Measurement:** Instrument v1 baseline before migrating — touches classified, autonomous merge rate, rework/reopen rate, escaped defects, acceptance-catch rate, cost/wall-clock per accepted story, poison rate, stuck-work MTTR, sampling findings rate.
 
 ---
-*Last updated: 2026-08-19 · Position: Phase 1 / IN PROGRESS · Source specs: `factory/spec/architecture-v2.1.md`, `factory/spec/implementation-plan-v1.md`*
+*Last updated: 2026-08-19 · Position: Phase 1 / IN PROGRESS — awaiting human plan-approval on Project #1 · Source specs: `factory/spec/architecture-v2.1.md`, `factory/spec/implementation-plan-v1.md`*

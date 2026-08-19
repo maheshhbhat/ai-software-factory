@@ -27,7 +27,7 @@ body:
     id: phase
     attributes:
       label: Phase
-      description: Story phase (declared at authoring; also apply phase:<name> label).
+      description: 'Story phase. The form writes the bare option value; mirror it as the label "phase:<value>".'
       multiple: false
       options:
         - build
@@ -42,10 +42,10 @@ body:
     id: depends_on
     attributes:
       label: Depends-on
-      description: Explicit dependencies on other story issues in the same project. List as #N. Leave as "none" if unblocked.
+      description: 'Canonical form (state-schema.md §3.3): one issue reference per line, bare "#N", no bullets. The single token "none" means no dependencies.'
       placeholder: |
-        - #0
-        - #0
+        #12
+        #34
       value: "none"
     validations:
       required: true
