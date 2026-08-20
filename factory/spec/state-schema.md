@@ -79,6 +79,7 @@ exceptions:
 | `story:claimed` | Assigned to a worker (dispatcher-assigned, never self-claimed) |
 | `story:in-review` | PR open, awaiting review |
 | `story:merged` | PR merged; terminal success |
+| `story:cancelled` | Finished with no deliverable; terminal (§9.3). Human decision only — never applied by a component |
 | `story:blocked:poison` | Attempt budget exhausted; human rescue required; terminal until a human rescues per §4.3 |
 | `story:blocked:scope` | Scope dispute; human decision required |
 
@@ -388,10 +389,15 @@ Required behaviour:
 |---|---|---|
 | `story:merged` | closed | completed |
 | `story:blocked:poison` after the §4.3.7 rescue cap | closed | not planned |
+| `story:cancelled` | closed | not planned |
 | `project:accepted` | closed | completed |
 | every other state | open | — |
 
 Closure is part of the transition, written in the same operation wherever the API allows. The dispatcher's work queue is therefore **open issues carrying a `type:story` label**, which makes "is this story still live?" a single cheap query rather than a label scan.
+
+**`story:cancelled` — finished with no deliverable.** Added by #77. Some work legitimately ends without a pull request: a verification fixture that only had to prove something, a story overtaken by events, a spike whose answer was "don't build it". Before this state existed such stories had to masquerade as `story:merged` (nothing merged) or `story:blocked:poison` (nothing failed), and #64 sat closed-as-not-planned while still labelled `story:claimed` — honest about the outcome but unnamed by the contract.
+
+A cancellation is a human decision, recorded as a comment on the story saying what was decided and why. The dispatcher never cancels a story on its own; it only recognises the state, treats it as terminal, and stops offering it. Because a cancelled story is not `story:claimed`, it releases its WIP slot immediately.
 
 A closed issue is never reopened by a component; only a human reopens, which is itself a decision.
 
@@ -404,6 +410,18 @@ A closed issue is never reopened by a component; only a human reopens, which is 
 * **Expiry condition:** the lease has elapsed **and** no pull request links to the story per §9.5.
 * **Recovery:** transition `story:claimed → story:ready` and **decrement `Attempt` by 1**, restoring its pre-dispatch value. A worker that died without producing a PR consumed no attempt — this is §4.3.4 (infrastructure failures do not count) applied to the death case. Without the decrement, expiry silently burns the retry budget and a story can poison on infrastructure alone.
 * **Recovery is a transition** and obeys §9.2, so a second dispatcher pass observing `story:ready` simply finds nothing to expire.
+
+#### 9.4.1 Recovery budget — the bound
+
+`RECOVERY_MAX = 2` expiry recoveries per story.
+
+**Why a bound is required.** Recovery restores the attempt that dispatch consumed, so without a cap the pair (dispatch, expiry) cycles forever: `ready Attempt 0 → claimed Attempt 1 → expiry → ready Attempt 0 → …`. The counter never advances, the poison threshold is never reached, and a worker is woken every lease period indefinitely. `architecture-v2.1.md` §4 states that any loop without a bound is an architecture bug; this was one, and story #64 was a live instance of it (#65).
+
+**Why the policy is deliberately dumb.** Durable evidence **cannot** distinguish a worker that died before starting from one that ran correctly and produced no pull request — both leave an expired claim and no PR. Rather than infer which occurred, the dispatcher recovers a fixed number of times and then asks a human.
+
+**The rule.** Recoveries are counted from the issue timeline: a `story:claimed → story:ready` transition with no `story:in-review` between them is an expiry recovery, while a findings-driven return passes through review and is not counted. Nothing is stored — GitHub is the source of record and no local counter may contradict it (§9.12). When the count reaches `RECOVERY_MAX`, the next expiry transitions `story:claimed → story:blocked:poison` with reason `RECOVERY_BUDGET_EXHAUSTED` instead of recovering. `Attempt` is left untouched: the question for the human is why no PR ever appeared, not how many attempts remain.
+
+**The bound, stated as a number.** A story can be dispatched through the expiry path at most **`RECOVERY_MAX + 1` = 3 times** before reaching a terminal or human-queue state. The human's options are then explicit: rescue it per §4.3.6 if the failure was infrastructural, or cancel it per §9.3 if it legitimately produces no deliverable.
 
 **Duplicate-worker rule.** The claim is the mutex: only `story:ready` is dispatchable, so a claimed story is never dispatched twice. The residual race is a live-but-slow worker whose lease expires and whose story is re-dispatched. Both workers must therefore treat the story state as authoritative at the moment they act: a worker **must** re-read the story before opening its PR and **must abort without opening one** if the story is no longer `story:claimed`, or if it is claimed under a later lease than the one it was dispatched with. The late worker's branch is abandoned; nothing merges.
 

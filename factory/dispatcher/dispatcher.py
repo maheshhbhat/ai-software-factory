@@ -44,6 +44,21 @@ import merge_gate  # noqa: E402  — single source of truth for the §9.6 Scope 
 WIP_LIMIT = 2                      # §9.10 — a contract value, not a runtime tweak
 ATTEMPT_MAX = 3                    # §4.3.5 — checked at dispatch time, before incrementing
 CLAIM_LEASE = timedelta(minutes=60)  # §9.4
+
+# §9.4.1 — how many times a single story may be recovered from an expired claim
+# before the dispatcher stops trying and asks a human.
+#
+# This exists because durable evidence cannot distinguish a worker that died
+# before starting from one that ran correctly and produced no pull request:
+# both leave an expired claim and no PR. Recovery restores the attempt it
+# refunds, so without a cap the pair (dispatch, expiry) cycles forever and the
+# poison threshold is never reached — observed live on story #64 (#65).
+#
+# The policy is deliberately dumb rather than clever: recover a fixed number of
+# times, then stop and route to a human, instead of inferring which case
+# occurred. A story therefore reaches a terminal or human-queue state after at
+# most RECOVERY_MAX + 1 dispatches through the expiry path.
+RECOVERY_MAX = 2
 SUPPORTED_SCHEMA_MAJOR = merge_gate.SUPPORTED_SCHEMA_MAJOR
 
 # §9.9: only these author associations may have their issues treated as factory
@@ -54,7 +69,9 @@ STORY_LIFECYCLE = "story:"
 PROJECT_LIFECYCLE = "project:"
 READY = "story:ready"
 CLAIMED = "story:claimed"
+IN_REVIEW = "story:in-review"
 MERGED = "story:merged"
+CANCELLED = "story:cancelled"     # §9.3 — finished with no deliverable
 POISON = "story:blocked:poison"
 PROJECT_ACTIVE = "project:active"
 
@@ -84,6 +101,7 @@ class Reason:
     SCOPE_INVALID = "SCOPE_INVALID"
     ATTEMPT_INVALID = "ATTEMPT_INVALID"
     ATTEMPT_EXHAUSTED = "ATTEMPT_EXHAUSTED"
+    CANCELLED = "CANCELLED"
 
 
 @dataclass
@@ -137,6 +155,42 @@ def linked_delivery_prs(number: int, pull_requests: list[dict]) -> tuple[list[di
     return linked, None
 
 
+def count_expiry_recoveries(timeline: list[dict]) -> int:
+    """How many times this story has already been recovered from an expired claim.
+
+    Derived entirely from the issue timeline — GitHub is the source of record and
+    no local counter may contradict it (§9.12). A recovery leaves a distinctive
+    trace: `story:claimed` removed and `story:ready` applied, with no
+    `story:in-review` between them. A findings-driven return to ready goes
+    through `story:in-review` instead, so the two are distinguishable without
+    storing anything.
+    """
+    lifecycle = [
+        (event.get("created_at"), event.get("event"),
+         merge_gate.label_name(event.get("label", {})))
+        for event in timeline
+        if event.get("event") in ("labeled", "unlabeled")
+        and merge_gate.label_name(event.get("label", {})).startswith(STORY_LIFECYCLE)
+    ]
+    lifecycle.sort(key=lambda item: (item[0] or "", item[2]))
+
+    recoveries = 0
+    seen_claimed = False
+    seen_in_review = False
+    for _, event, label in lifecycle:
+        if event != "labeled":
+            continue
+        if label == CLAIMED:
+            seen_claimed, seen_in_review = True, False
+        elif label == IN_REVIEW:
+            seen_in_review = True
+        elif label == READY and seen_claimed and not seen_in_review:
+            # claimed -> ready without passing through review: an expiry recovery.
+            recoveries += 1
+            seen_claimed = False
+    return recoveries
+
+
 def recovery_decision(story: dict, timeline: list[dict], pull_requests: list[dict],
                       now: datetime) -> RecoveryDecision:
     """Reconcile one claim under §9.4; ambiguity always fails closed."""
@@ -179,8 +233,22 @@ def recovery_decision(story: dict, timeline: list[dict], pull_requests: list[dic
     if not attempt_raw.isdigit() or int(attempt_raw) < 1:
         return RecoveryDecision(number, "bell", "RECOVERY_ATTEMPT_INVALID",
                                 f"Attempt={attempt_raw!r}")
+
+    # §9.4.1 — the bound. Counted from the timeline, which is durable history
+    # no local state can contradict.
+    recoveries = count_expiry_recoveries(timeline)
+    if recoveries >= RECOVERY_MAX:
+        return RecoveryDecision(
+            number, "poison", "RECOVERY_BUDGET_EXHAUSTED",
+            f"{recoveries} expiry recoveries already used (max {RECOVERY_MAX}); "
+            f"the claim expired again with no linked PR. Either the worker keeps "
+            f"dying before it starts, or this story legitimately produces no PR "
+            f"and should be cancelled (§9.3). A human decides which — the "
+            f"dispatcher cannot tell them apart from durable evidence.")
+
     return RecoveryDecision(number, "ready", "CLAIM_LEASE_EXPIRED",
-                            f"claimed_at={claimed_at.isoformat()}; Attempt {attempt_raw} -> {int(attempt_raw) - 1}")
+                            f"claimed_at={claimed_at.isoformat()}; Attempt {attempt_raw} -> "
+                            f"{int(attempt_raw) - 1}; recovery {recoveries + 1}/{RECOVERY_MAX}")
 
 
 def reconcile_claims(stories: dict, timelines: dict[int, list[dict]],
@@ -268,6 +336,9 @@ def evaluate_story(story: dict, projects: dict, stories: dict,
     if lifecycle is None:
         return Decision(number, False, Reason.AMBIGUOUS_LIFECYCLE,
                         detail="zero or multiple story:* labels")
+    if lifecycle == CANCELLED:
+        return Decision(number, False, Reason.CANCELLED,
+                        detail="terminal: finished with no deliverable (§9.3)")
     if lifecycle != READY:
         return Decision(number, False, Reason.NOT_READY, detail=lifecycle)
 
@@ -413,7 +484,7 @@ def fetch_pull_requests(repo: str, token: str) -> list[dict]:
 def apply_recovery(repo: str, story: dict, decision: RecoveryDecision,
                    token: str) -> tuple[bool, str]:
     """Apply a recovery only if the claim is still authoritative."""
-    if decision.action not in {"ready", "merged"}:
+    if decision.action not in {"ready", "merged", "poison"}:
         return False, f"{decision.reason}: {decision.detail}".rstrip()
     fresh = fetch_issue(repo, story["number"], token)
     if fresh is None or lifecycle_of(fresh, STORY_LIFECYCLE) != CLAIMED:
@@ -431,6 +502,12 @@ def apply_recovery(repo: str, story: dict, decision: RecoveryDecision,
             lambda match: match.group(1) + str(int(attempt_raw) - 1) + match.group(3),
             body, count=1)
         labels.add(READY)
+    elif decision.action == "poison":
+        # §9.4.1 — the recovery budget is spent. Route to the human queue rather
+        # than recovering again; `Attempt` is left exactly as it is, because the
+        # question a human must answer is why no PR ever appeared, not how many
+        # attempts remain.
+        labels.add(POISON)
     else:
         labels.add(MERGED)
         payload.update({"state": "closed", "state_reason": "completed"})
@@ -586,7 +663,7 @@ def main(argv: list[str]) -> int:
         recoveries = reconcile_claims(
             stories, timelines, fetch_pull_requests(args.repo, token), datetime.now(timezone.utc))
         for decision in recoveries:
-            if decision.action in {"ready", "merged"}:
+            if decision.action in {"ready", "merged", "poison"}:
                 ok, note = apply_recovery(args.repo, stories[decision.number], decision, token)
                 recovery_notes.append(f"RECOVERY #{decision.number}: {'APPLIED' if ok else 'SKIP'} {note}")
             else:

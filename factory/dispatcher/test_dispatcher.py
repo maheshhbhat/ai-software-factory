@@ -10,6 +10,7 @@ plausible-looking story with a broken chain, cause the factory to run code".
 
 from __future__ import annotations
 
+import datetime as dt
 import unittest
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
@@ -362,3 +363,124 @@ class TestDispatchLine(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestRecoveryBudget(unittest.TestCase):
+    """§9.4.1 — the fix for the unbounded loop found live on story #64 (#65)."""
+
+    # Timestamps must be strictly increasing: count_expiry_recoveries walks the
+    # timeline in chronological order, so out-of-order fixtures test nothing real.
+    _clock = 0
+
+    @classmethod
+    def stamp(cls):
+        cls._clock += 1
+        return f"2026-08-20T{cls._clock // 60:02d}:{cls._clock % 60:02d}:00Z"
+
+    @classmethod
+    def event(cls, label, kind="labeled", at=None):
+        return {"event": kind, "created_at": at or cls.stamp(), "label": {"name": label}}
+
+    def setUp(self):
+        type(self)._clock = 0
+
+    def cycle(self, n):
+        """n complete dispatch/expiry cycles: claimed, then back to ready."""
+        events = [self.event("story:ready")]
+        for _ in range(n):
+            events.append(self.event("story:claimed"))
+            events.append(self.event("story:ready"))
+        return events
+
+    def test_counts_expiry_recoveries_from_timeline_alone(self):
+        for n in (0, 1, 2, 3):
+            self.assertEqual(dp.count_expiry_recoveries(self.cycle(n)), n, n)
+
+    def test_findings_return_is_not_an_expiry_recovery(self):
+        """claimed → in-review → ready is a review finding, not a dead worker."""
+        events = [self.event("story:claimed"),
+                  self.event("story:in-review", at="2026-08-20T10:30:00Z"),
+                  self.event("story:ready", at="2026-08-20T11:00:00Z")]
+        self.assertEqual(dp.count_expiry_recoveries(events), 0)
+
+    def test_within_budget_still_recovers(self):
+        expired = dt.datetime(2026, 8, 20, 12, 0, tzinfo=dt.timezone.utc)
+        story_issue = story(10, lifecycle="story:claimed", attempt="1")
+        timeline = self.cycle(1) + [self.event("story:claimed")]
+        decision = dp.recovery_decision(story_issue, timeline, [], expired)
+        self.assertEqual(decision.action, "ready")
+        self.assertEqual(decision.reason, "CLAIM_LEASE_EXPIRED")
+
+    def test_budget_exhausted_routes_to_poison_not_recovery(self):
+        """The loop terminates: after RECOVERY_MAX recoveries a human is asked."""
+        expired = dt.datetime(2026, 8, 20, 12, 0, tzinfo=dt.timezone.utc)
+        story_issue = story(10, lifecycle="story:claimed", attempt="1")
+        timeline = self.cycle(dp.RECOVERY_MAX) + [self.event("story:claimed")]
+        decision = dp.recovery_decision(story_issue, timeline, [], expired)
+        self.assertEqual(decision.action, "poison")
+        self.assertEqual(decision.reason, "RECOVERY_BUDGET_EXHAUSTED")
+
+    def test_the_loop_is_bounded_by_construction(self):
+        """Simulate the #64 failure mode and prove it terminates.
+
+        Before this fix the sequence below never left 'ready' — Attempt
+        oscillated 0→1→0 and poison was unreachable.
+        """
+        expired = dt.datetime(2026, 8, 20, 12, 0, tzinfo=dt.timezone.utc)
+        timeline = [self.event("story:ready")]
+        dispatches = 0
+        for _ in range(10):  # generous bound; must terminate well inside it
+            timeline.append(self.event("story:claimed"))
+            dispatches += 1
+            decision = dp.recovery_decision(
+                story(10, lifecycle="story:claimed", attempt="1"), timeline, [], expired)
+            if decision.action == "poison":
+                break
+            timeline.append(self.event("story:ready"))
+        else:
+            self.fail("recovery never terminated — the loop is still unbounded")
+        self.assertEqual(dispatches, dp.RECOVERY_MAX + 1,
+                         "the stated bound is RECOVERY_MAX + 1 dispatches")
+
+    def test_fresh_claim_is_untouched_regardless_of_budget(self):
+        fresh = dt.datetime(2026, 8, 20, 10, 5, tzinfo=dt.timezone.utc)
+        timeline = self.cycle(dp.RECOVERY_MAX) + [
+            self.event("story:claimed", at="2026-08-20T10:00:00Z")]
+        fresh = dt.datetime(2026, 8, 20, 10, 5, tzinfo=dt.timezone.utc)
+        decision = dp.recovery_decision(
+            story(10, lifecycle="story:claimed", attempt="1"), timeline, [], fresh)
+        self.assertEqual(decision.action, "none")
+        self.assertEqual(decision.reason, "CLAIM_FRESH")
+
+    def test_merged_pr_still_reconciles_regardless_of_budget(self):
+        """The budget must not interfere with provable merged delivery."""
+        expired = dt.datetime(2026, 8, 20, 12, 0, tzinfo=dt.timezone.utc)
+        prs = [{"number": 99, "body": "Story: #10\n", "merged_at": "2026-08-20T11:00:00Z"}]
+        timeline = self.cycle(dp.RECOVERY_MAX) + [self.event("story:claimed")]
+        decision = dp.recovery_decision(
+            story(10, lifecycle="story:claimed", attempt="1"), timeline, prs, expired)
+        self.assertEqual(decision.action, "merged")
+
+
+class TestCancelledTerminalState(unittest.TestCase):
+    """§9.3 — a canonical end for work that legitimately has no deliverable."""
+
+    def test_cancelled_story_is_never_dispatched(self):
+        cancelled = story(10, lifecycle="story:cancelled")
+        decision = dp.evaluate_story(cancelled, {901: project()}, {10: cancelled}, COMMITMENT)
+        self.assertFalse(decision.eligible)
+        self.assertEqual(decision.reason, R.CANCELLED)
+
+    def test_cancelled_story_releases_its_wip_slot(self):
+        """Terminal states must not hold capacity — that was the #53 defect."""
+        stories = {10: story(10, lifecycle="story:cancelled"), 11: story(11)}
+        plan = dp.plan_dispatch(stories, {901: project()}, COMMITMENT, wip_limit=2)
+        self.assertEqual(plan.wip_in_use, 0)
+        self.assertEqual([d.number for d in plan.selected], [11])
+
+    def test_replay_over_a_cancelled_story_is_inert(self):
+        stories = {10: story(10, lifecycle="story:cancelled")}
+        first = dp.plan_dispatch(stories, {901: project()}, COMMITMENT)
+        second = dp.plan_dispatch(stories, {901: project()}, COMMITMENT)
+        self.assertEqual(first.selected, second.selected)
+        self.assertEqual(first.selected, [])

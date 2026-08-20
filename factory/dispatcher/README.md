@@ -78,6 +78,31 @@ No spec, no scope, no business context — the worker reads the substrate itself
 (`architecture-v2.1.md` §4: the moment a queue item copies business context, the
 relay has been rebuilt as infrastructure).
 
+## The recovery bound (§9.4.1)
+
+Recovery restores the attempt that dispatch consumed. Without a cap that makes
+`(dispatch, expiry)` an infinite cycle — `ready Attempt 0 → claimed Attempt 1 →
+expiry → ready Attempt 0 → …` — in which the counter never advances, poison is
+never reached, and a worker is woken every lease period forever. Story #64 was a
+live instance.
+
+`RECOVERY_MAX = 2`. Recoveries are counted from the issue timeline: a
+`story:claimed → story:ready` transition with no `story:in-review` between them
+is an expiry recovery; a findings-driven return passes through review and does
+not count. Nothing is stored locally. On the next expiry after the budget is
+spent, the story goes to `story:blocked:poison` with `RECOVERY_BUDGET_EXHAUSTED`
+rather than recovering again.
+
+**The bound as a number: at most `RECOVERY_MAX + 1` = 3 dispatches** through the
+expiry path before a human is asked.
+
+The policy is deliberately dumb. Durable evidence cannot distinguish a worker
+that died before starting from one that ran correctly and produced no PR — both
+leave an expired claim and no pull request. Rather than infer which happened,
+the dispatcher recovers a fixed number of times and then stops. The human's
+options are named in the poison reason: rescue per §4.3.6 if the failure was
+infrastructural, or cancel per §9.3 if the story legitimately has no deliverable.
+
 ## Boundaries of this increment
 
 Implemented: authorization chain, eligibility, deterministic selection, atomic
