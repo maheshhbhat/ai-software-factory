@@ -49,6 +49,7 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import continuation  # noqa: E402  — decision-comment consumption (#71)
+import workers      # noqa: E402  — standard worker contract (#84)
 
 DISPATCHER = os.path.join(HERE, "..", "dispatcher", "dispatcher.py")
 
@@ -115,11 +116,12 @@ def run_dispatcher(repo: str, commitment: int, claim: bool,
 
 
 def worker_command(dispatch: dict) -> list[str]:
-    """Resolve the worker adapter for a dispatch.
+    """Resolve the single-worker adapter for a dispatch.
 
-    `FACTORY_WORKER_CMD` is the whole extension point: set it to a Codex or any
-    other launcher and dispatcher semantics do not change. Placeholders are
-    substituted by name so an adapter takes only what it needs.
+    Legacy single-worker path, kept for the simple case and for configurations
+    predating the worker contract. `FACTORY_WORKER_CMD` is its extension point.
+    When `FACTORY_WORKER_ORDER` declares workers, `wake_worker` routes through
+    `workers.py` instead and this is not used.
 
     Note what is *not* passed: no spec, no scope, no acceptance criteria. The
     worker reconstructs context from GitHub itself (`architecture-v2.1.md` §4 —
@@ -141,6 +143,30 @@ def worker_command(dispatch: dict) -> list[str]:
 
 
 def wake_worker(dispatch: dict) -> str:
+    """Hand one dispatch to a worker.
+
+    With workers declared (#84), routing goes through the standard contract:
+    health and capability decide eligibility, configured order decides
+    preference, and failover is sequential and stops at the first success. An
+    ambiguous launch outcome does **not** fall back — the worker may be running,
+    and a second worker on one Story is worse than a late one. The claim stays
+    in GitHub either way, and the bounded §9.4 lease recovers it if nothing
+    started.
+
+    With no workers declared, the legacy single-command path is used unchanged.
+    """
+    specs = workers.configured_workers()
+    if specs:
+        report, trail = workers.dispatch_to_worker(
+            specs, dispatch["story"], dispatch["project"])
+        for entry in trail:
+            reason = getattr(entry, "reason", None) or getattr(entry, "result", "")
+            print(f"[worker] {entry.worker}: {reason} {entry.detail}".rstrip(), flush=True)
+        if report is None:
+            raise WorkerLaunchFailed(
+                "no worker accepted the assignment; see the [worker] trail above")
+        return f"{report.worker}: {report.detail}".strip()
+
     cmd = worker_command(dispatch)
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)

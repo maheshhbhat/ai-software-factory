@@ -83,6 +83,61 @@ The runtime never edits lifecycle to compensate for its own failure. A claimed
 story with a dead worker is recovered by the dispatcher's §9.4 lease expiry,
 which is the component that owns that decision.
 
+## Worker contract (#84)
+
+Workers are execution engines behind one factory-owned contract
+(`workers.py`). **The factory owns policy; workers execute.** No adapter holds
+authorization, lifecycle, WIP, retry, or terminal-state logic — a test asserts
+that by inspecting the module, because a policy check smuggled into an adapter
+is invisible in behavioural tests until it disagrees with GitHub.
+
+A worker declares four things: a name (a valid `Agent-ID`), a launch command, an
+optional health probe, and its capabilities. Configuration only:
+
+```sh
+export FACTORY_WORKER_ORDER=claude-delivery,codex-delivery
+
+export FACTORY_WORKER_CLAUDE_DELIVERY_LAUNCH='/path/wake-claude {story}'
+export FACTORY_WORKER_CLAUDE_DELIVERY_HEALTH='/path/claude-probe'
+export FACTORY_WORKER_CLAUDE_DELIVERY_CAPABILITIES=delivery
+
+export FACTORY_WORKER_CODEX_DELIVERY_LAUNCH='/path/wake-codex {story}'
+export FACTORY_WORKER_CODEX_DELIVERY_HEALTH='/path/codex-probe'
+export FACTORY_WORKER_CODEX_DELIVERY_CAPABILITIES=delivery
+```
+
+Swapping the preferred engine is a change to `FACTORY_WORKER_ORDER` and nothing
+else. With no workers declared, the legacy single-command path
+(`FACTORY_WORKER_CMD`) is used unchanged.
+
+### Selection is configuration, not judgment
+
+Capability is declared, not inferred; health is probed; the configured order
+decides preference. Same configuration and same probe results give the same
+answer every time — no scoring, no tie-breaking, no model judgment.
+
+Health and capability are **routing** observations. They decide which engine
+gets a Story. They never decide whether a Story is authorized, how much WIP is
+in use, how much retry budget remains, or whether anything is terminal — those
+live in GitHub (§9.12), and a local probe must not be able to contradict them.
+
+### The property that makes failover safe
+
+Failover is the first mechanism in the factory that could put **two workers on
+one Story**. Two rules prevent it:
+
+1. **Launch sequentially, stop at the first success** — at most one launch can
+   succeed, so at most one worker starts.
+2. **A definite failure is not an ambiguous outcome.** `command not found` or a
+   non-zero exit *proves* the worker did not start, so falling back is safe. A
+   timeout proves nothing — the worker may be running right now — so it fails
+   closed with **no fallback**, and the bounded §9.4 lease recovers the claim.
+
+Rule 2 is the one to defend in review. Treating "I don't know" as "it failed" is
+exactly how a system ends up with two workers writing to one branch. A Story
+claimed with no worker running is a bounded, recoverable inconvenience; two
+workers on one Story is a corruption.
+
 ## Worker adapter
 
 `FACTORY_WORKER_CMD` is the whole extension point — point it at Codex or any

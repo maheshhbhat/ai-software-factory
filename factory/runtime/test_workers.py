@@ -1,0 +1,281 @@
+#!/usr/bin/env python3
+"""Tests for the standard worker contract. Standard library only.
+
+Run: python3 -m unittest discover -s factory/runtime -p 'test_*.py' -v
+
+`TestFailoverSafety` is the class that matters. Failover is the first mechanism
+in the factory that could put two workers on one Story, and the property
+defending against that — a definite failure permits fallback, an ambiguous
+outcome does not — is easy to "simplify" away later. These tests exist to make
+that regression loud.
+
+`TestAdaptersShareTheContract` runs Claude and Codex through identical
+assertions, which is what "swappable" has to mean if it means anything.
+"""
+
+from __future__ import annotations
+
+import os
+import subprocess
+import unittest
+
+import workers as w
+
+
+def spec(name="claude-delivery", launch="/usr/bin/true", health="",
+         caps=("delivery",)):
+    return w.WorkerSpec(name=name, launch=launch, health=health,
+                        capabilities=frozenset(caps))
+
+
+def runner_returning(code=0, stdout="", stderr="", raises=None):
+    """A fake subprocess.run with a fixed outcome."""
+    def _run(cmd, **kwargs):
+        if raises is not None:
+            raise raises
+        return subprocess.CompletedProcess(cmd, code, stdout, stderr)
+    return _run
+
+
+def runner_by_command(mapping, default_code=0):
+    """Outcome chosen by the first token of the command — lets one fake stand in
+    for several different workers in the same test."""
+    calls = []
+
+    def _run(cmd, **kwargs):
+        calls.append(cmd)
+        key = cmd[0]
+        outcome = mapping.get(key, default_code)
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return subprocess.CompletedProcess(cmd, outcome, "", "")
+    _run.calls = calls
+    return _run
+
+
+class TestWorkerSpec(unittest.TestCase):
+    def test_valid_spec(self):
+        self.assertIsNone(spec().validate())
+
+    def test_name_must_be_a_valid_agent_id(self):
+        for bad in ("", "X", "Claude-Delivery", "claude delivery", "a" * 40):
+            self.assertIsNotNone(spec(name=bad).validate(), bad)
+
+    def test_launch_is_required(self):
+        self.assertIsNotNone(spec(launch="").validate())
+
+
+class TestHealth(unittest.TestCase):
+    def test_no_probe_means_assumed_healthy(self):
+        report = w.check_health(spec(health=""))
+        self.assertTrue(report.healthy)
+        self.assertEqual(report.reason, "NO_PROBE_CONFIGURED")
+
+    def test_zero_exit_is_healthy(self):
+        report = w.check_health(spec(health="/bin/probe"), runner=runner_returning(0))
+        self.assertTrue(report.healthy)
+
+    def test_nonzero_exit_is_unhealthy(self):
+        report = w.check_health(spec(health="/bin/probe"),
+                                runner=runner_returning(1, stderr="no auth"))
+        self.assertFalse(report.healthy)
+        self.assertEqual(report.reason, "PROBE_FAILED")
+
+    def test_missing_probe_binary_is_unhealthy_not_an_error(self):
+        report = w.check_health(spec(health="/nope/probe"),
+                                runner=runner_returning(raises=OSError("no such file")))
+        self.assertFalse(report.healthy)
+        self.assertEqual(report.reason, "PROBE_UNRUNNABLE")
+
+    def test_slow_probe_is_unhealthy_not_ambiguous(self):
+        """A probe runs nothing, so a timeout is safe to treat as unusable."""
+        report = w.check_health(
+            spec(health="/bin/probe"),
+            runner=runner_returning(raises=subprocess.TimeoutExpired("probe", 20)))
+        self.assertFalse(report.healthy)
+        self.assertEqual(report.reason, "PROBE_TIMEOUT")
+
+
+class TestCapability(unittest.TestCase):
+    def test_declared_capability_is_required(self):
+        self.assertTrue(w.is_capable(spec(caps=("delivery",)), "delivery"))
+        self.assertFalse(w.is_capable(spec(caps=("review",)), "delivery"))
+
+    def test_empty_declaration_claims_nothing(self):
+        self.assertFalse(w.is_capable(spec(caps=()), "delivery"))
+
+
+class TestSelection(unittest.TestCase):
+    """§84 item 4 — deterministic, from configuration, no judgment."""
+
+    def test_preference_order_is_configuration_not_scoring(self):
+        specs = [spec("claude-delivery"), spec("codex-delivery")]
+        eligible, _ = w.select(specs, runner=runner_returning(0))
+        self.assertEqual([s.name for s in eligible], ["claude-delivery", "codex-delivery"])
+
+        reversed_specs = [spec("codex-delivery"), spec("claude-delivery")]
+        eligible, _ = w.select(reversed_specs, runner=runner_returning(0))
+        self.assertEqual([s.name for s in eligible], ["codex-delivery", "claude-delivery"])
+
+    def test_incapable_worker_is_excluded_with_a_reason(self):
+        specs = [spec("claude-delivery", caps=("review",)), spec("codex-delivery")]
+        eligible, reports = w.select(specs, runner=runner_returning(0))
+        self.assertEqual([s.name for s in eligible], ["codex-delivery"])
+        self.assertEqual(reports[0].reason, w.Result.INCAPABLE)
+
+    def test_unhealthy_worker_is_excluded(self):
+        specs = [spec("claude-delivery", health="/bin/a"), spec("codex-delivery", health="/bin/b")]
+        eligible, _ = w.select(specs, runner=runner_by_command({"/bin/a": 1, "/bin/b": 0}))
+        self.assertEqual([s.name for s in eligible], ["codex-delivery"])
+
+    def test_selection_is_reproducible(self):
+        specs = [spec("claude-delivery"), spec("codex-delivery")]
+        first, _ = w.select(specs, runner=runner_returning(0))
+        second, _ = w.select(specs, runner=runner_returning(0))
+        self.assertEqual([s.name for s in first], [s.name for s in second])
+
+
+class TestFailoverSafety(unittest.TestCase):
+    """The correctness property. At most one worker per Story, ever."""
+
+    def setUp(self):
+        self.claude = spec("claude-delivery", launch="/bin/claude {story}")
+        self.codex = spec("codex-delivery", launch="/bin/codex {story}")
+
+    def test_healthy_preferred_worker_wins_and_nobody_else_runs(self):
+        run = runner_by_command({"/bin/claude": 0, "/bin/codex": 0})
+        report, trail = w.dispatch_to_worker([self.claude, self.codex], 64, 55, runner=run)
+        self.assertEqual(report.worker, "claude-delivery")
+        launched = [r for r in trail if isinstance(r, w.LaunchReport)]
+        self.assertEqual(len(launched), 1, "only the selected worker may be launched")
+
+    def test_definite_failure_falls_back(self):
+        """Non-zero exit proves the worker did not start, so fallback is safe."""
+        run = runner_by_command({"/bin/claude": 3, "/bin/codex": 0})
+        report, trail = w.dispatch_to_worker([self.claude, self.codex], 64, 55, runner=run)
+        self.assertEqual(report.worker, "codex-delivery")
+        self.assertEqual([r.result for r in trail if isinstance(r, w.LaunchReport)],
+                         [w.Result.FAILED, w.Result.LAUNCHED])
+
+    def test_missing_binary_falls_back(self):
+        run = runner_by_command({"/bin/claude": FileNotFoundError("no claude"),
+                                 "/bin/codex": 0})
+        report, _ = w.dispatch_to_worker([self.claude, self.codex], 64, 55, runner=run)
+        self.assertEqual(report.worker, "codex-delivery")
+
+    def test_ambiguous_outcome_never_falls_back(self):
+        """THE test. A timeout means the worker may be running; starting a second
+        would put two workers on one Story. Fail closed instead."""
+        run = runner_by_command({"/bin/claude": subprocess.TimeoutExpired("claude", 60),
+                                 "/bin/codex": 0})
+        report, trail = w.dispatch_to_worker([self.claude, self.codex], 64, 55, runner=run)
+        self.assertIsNone(report, "must not report success")
+        launched = [r for r in trail if isinstance(r, w.LaunchReport)]
+        self.assertEqual([r.result for r in launched], [w.Result.AMBIGUOUS])
+        self.assertNotIn("/bin/codex", [c[0] for c in run.calls],
+                         "the fallback worker must never be launched after an ambiguity")
+
+    def test_ambiguous_report_does_not_permit_fallback(self):
+        self.assertFalse(w.LaunchReport("x", w.Result.AMBIGUOUS).may_fall_back)
+        self.assertTrue(w.LaunchReport("x", w.Result.FAILED).may_fall_back)
+
+    def test_all_workers_failing_launches_nobody(self):
+        run = runner_by_command({"/bin/claude": 1, "/bin/codex": 1})
+        report, trail = w.dispatch_to_worker([self.claude, self.codex], 64, 55, runner=run)
+        self.assertIsNone(report)
+        self.assertEqual(len([r for r in trail if isinstance(r, w.LaunchReport)]), 2)
+
+    def test_no_eligible_worker_launches_nothing(self):
+        run = runner_by_command({})
+        unhealthy = spec("claude-delivery", launch="/bin/claude", health="/bin/probe")
+        report, trail = w.dispatch_to_worker(
+            [unhealthy], 64, 55, runner=runner_by_command({"/bin/probe": 1}))
+        self.assertIsNone(report)
+        self.assertEqual([r for r in trail if isinstance(r, w.LaunchReport)], [])
+
+    def test_every_attempt_is_recorded_for_audit(self):
+        run = runner_by_command({"/bin/claude": 1, "/bin/codex": 1})
+        _, trail = w.dispatch_to_worker([self.claude, self.codex], 64, 55, runner=run)
+        self.assertTrue(all(r.detail or r.reason for r in trail),
+                        "a Story that ran nowhere must say why, per engine")
+
+
+class TestAdaptersShareTheContract(unittest.TestCase):
+    """Claude and Codex under identical assertions — that is what swappable means."""
+
+    def setUp(self):
+        self._env = dict(os.environ)
+        for key in list(os.environ):
+            if key.startswith("FACTORY_WORKER"):
+                del os.environ[key]
+
+    def tearDown(self):
+        os.environ.clear()
+        os.environ.update(self._env)
+
+    def configure_both(self):
+        os.environ["FACTORY_WORKER_ORDER"] = "claude-delivery,codex-delivery"
+        os.environ["FACTORY_WORKER_CLAUDE_DELIVERY_LAUNCH"] = "/bin/claude-wake {story}"
+        os.environ["FACTORY_WORKER_CLAUDE_DELIVERY_HEALTH"] = "/bin/claude-probe"
+        os.environ["FACTORY_WORKER_CODEX_DELIVERY_LAUNCH"] = "/bin/codex-wake {story}"
+        os.environ["FACTORY_WORKER_CODEX_DELIVERY_HEALTH"] = "/bin/codex-probe"
+
+    def test_both_adapters_load_and_validate(self):
+        self.configure_both()
+        specs = w.configured_workers()
+        self.assertEqual([s.name for s in specs], ["claude-delivery", "codex-delivery"])
+        for s in specs:
+            self.assertIsNone(s.validate(), s.name)
+            self.assertTrue(w.is_capable(s, "delivery"), s.name)
+
+    def test_both_adapters_pass_the_same_health_assertions(self):
+        self.configure_both()
+        for s in w.configured_workers():
+            self.assertTrue(w.check_health(s, runner=runner_returning(0)).healthy, s.name)
+            self.assertFalse(w.check_health(s, runner=runner_returning(1)).healthy, s.name)
+
+    def test_both_adapters_receive_routing_identity_only(self):
+        self.configure_both()
+        for s in w.configured_workers():
+            cmd = " ".join(w.launch_command(s, 64, 55))
+            self.assertIn("64", cmd, s.name)
+            for leaked in ("Spec", "Scope", "Acceptance", "Depends-on", "criteria"):
+                self.assertNotIn(leaked, cmd, f"{s.name} received business context")
+
+    def test_either_worker_can_be_preferred_without_code_change(self):
+        self.configure_both()
+        os.environ["FACTORY_WORKER_ORDER"] = "codex-delivery,claude-delivery"
+        self.assertEqual([s.name for s in w.configured_workers()],
+                         ["codex-delivery", "claude-delivery"])
+
+    def test_unconfigured_worker_is_simply_absent(self):
+        os.environ["FACTORY_WORKER_ORDER"] = "claude-delivery,ghost-delivery"
+        os.environ["FACTORY_WORKER_CLAUDE_DELIVERY_LAUNCH"] = "/bin/claude {story}"
+        self.assertEqual([s.name for s in w.configured_workers()], ["claude-delivery"])
+
+
+class TestNoPolicyInAdapters(unittest.TestCase):
+    """#84 item 1: the factory owns policy; workers execute. Asserted by
+    inspection, because a policy check smuggled into an adapter is invisible in
+    behavioural tests until it disagrees with GitHub."""
+
+    def test_module_contains_no_lifecycle_or_authorization_logic(self):
+        with open(w.__file__, encoding="utf-8") as handle:
+            source = handle.read()
+        body = source.split('"""', 2)[-1]
+        for leaked in ("story:ready", "story:claimed", "project:active", "type:story",
+                       "author_association", "WIP", "Attempt", "RECOVERY_MAX",
+                       "story:blocked", "merge-gate"):
+            self.assertNotIn(leaked, body,
+                             f"worker contract must not contain factory policy ({leaked})")
+
+    def test_module_makes_no_github_calls(self):
+        with open(w.__file__, encoding="utf-8") as handle:
+            body = handle.read().split('"""', 2)[-1]
+        for leaked in ("api.github.com", "urllib", "GITHUB_TOKEN", "gh "):
+            self.assertNotIn(leaked, body,
+                             f"worker contract must not touch GitHub ({leaked})")
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
