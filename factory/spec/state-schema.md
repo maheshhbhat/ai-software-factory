@@ -551,6 +551,13 @@ A human action that merely conveys "begin" is a **relay touch** — the class `a
 3. **Separately authorized task, one atomic ruleset edit.** Add the proven check as **required** *and* set `required_approving_review_count: 0` in the same operation.
 4. Never step 3 before step 2 is proven, never as two edits, and never by adding `bypass_actors` — bypass would hand the exemption to the same credential the agent holds, making the gate decorative for exactly the actor it constrains.
 
+**Prerequisites before step 3 (added by #39, delivered in #40).** Making `merge-gate` required while it also failed on gate changes would freeze the gate at its migration-time version, with no human action able to land a fix — including a fix for a gate bug. Both must be in place first:
+
+* the verdict is computed by the **trusted `main` copy** of the gate logic, so a gate-logic PR can pass on its merits (§9.14);
+* enforcement-surface detection lives on the separate advisory check `merge-gate-surface`, which is **never** made required.
+
+**Break-glass, for a totally broken required gate.** If `main`'s gate wrongly fails everything, it also blocks its own fix. The narrowest recovery: an admin removes `merge-gate` from the ruleset's required checks, lands the fix, and restores it immediately. This is a ruleset edit — timestamped in ruleset history, therefore auditable — and it never adds a bypass actor and never weakens the gate's own rules. It requires a post-hoc `hazard-ack` recording what was landed while the check was off. It is a procedure of last resort, not an option: the reflex "turn the gate off" is exactly what a governance system must not make easy.
+
 **Why step 3 is needed at all.** With one identity, an agent PR is authored by the only account with write access, and GitHub refuses an approving review from a PR's own author. Agent PRs are therefore not merely unreviewed — they are **unmergeable** — until the approval requirement is replaced by the deterministic check (#27). Until step 3, a human lands factory PRs manually; that is an accepted interim cost, not the target state.
 
 ### 9.14 Gate trust inputs
@@ -562,7 +569,7 @@ Under a shared credential the gate must derive its verdict **only** from inputs 
 * the **diff itself** — changed paths, additions and deletions
 * the **`### Scope` contract** of the linked story (§9.5, §9.6), read from the story issue
 * **check outputs produced by CI**, not by an actor — test results computed in the workflow run
-* the **workflow boundary** — that the agent's credential cannot modify `.github/workflows/**`, so the gate's own definition is outside the agent's reach
+* the **trusted gate copy** — the verdict is computed by the version of the gate already on `main`, never by the version inside the pull request, so a proposed change cannot weaken the rules it is judged by (#39, #40)
 * **repository configuration** — ruleset state, CODEOWNERS
 
 **Prohibited as trust anchors** (all forgeable by the credential):
@@ -572,6 +579,19 @@ Under a shared credential the gate must derive its verdict **only** from inputs 
 * assertions in the PR body about what was done or verified
 
 `Agent-ID` and labels may be used for **routing and reporting** inside the gate — deciding what to check — but never as the evidence that a check passed.
+
+**Correction (#39, #40): the enforcement surface is not uniformly protectable.** An earlier version of this section listed "the workflow boundary" as a trust input, on the grounds that the agent's credential cannot modify `.github/workflows/**`. That was a circumstance, not a property of the design, and it does not hold:
+
+| Class | Paths | Protection |
+|---|---|---|
+| Gate **logic** | `factory/gates/**` | **Mechanical.** The trusted `main` copy computes the verdict, so a change cannot judge itself. Reported as `neutral` on `merge-gate-surface`; it does **not** block. |
+| Gate **runner** | `.github/workflows/merge-gate.yml` | **None mechanical.** For same-repo `pull_request` events GitHub executes the workflow file from the PR head, so a PR that rewrites the runner runs its own rewrite. No check can protect the file that defines the check. |
+
+The runner is covered by human review, a `hazard-ack` bell naming the diff (§5.4), and the audit trail. Under the shared credential that is a **convention, not an enforcement** — the ack is forgeable, so its evidential value is asymmetric: a *missing* ack on a landed runner change is unforgeable evidence that no one reviewed it, while a *present* ack proves only that the text exists. Design for the missing case.
+
+**`merge-gate-surface` must never become a required check.** A required check that fails on gate changes, combined with `bypass_actors: []`, makes the gate permanently unmodifiable — no human action turns it green. That is strictly worse than the problem the required gate solves.
+
+**Internal errors fail closed.** A gate that cannot complete an evaluation reports `INTERNAL_ERROR` with a readable reason and a non-zero exit. It never passes on an error, and never fails as an opaque crash.
 
 *Consequence, recorded as a correction:* the Phase 2 readiness review (#20) proposed a review-approval artifact bound to the head SHA as the gate's trust anchor. Under the single-identity decision that artifact is forgeable, so it is **withdrawn**. The gate rests on diff, scope, CI-computed results, and the workflow boundary instead — a simplification the identity decision makes available.
 

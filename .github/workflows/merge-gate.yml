@@ -1,13 +1,25 @@
 name: merge-gate
 
-# Deterministic merge gate (factory/spec/state-schema.md §9).
+# Deterministic merge gate (factory/spec/state-schema.md §9, as corrected by #39).
 #
-# NOT a required status check yet. §9.13 fixes the migration order: prove this
-# green/red first, then in one atomic ruleset edit make it required and set
-# required approvals to 0. Do not do half of that.
+# Two checks, deliberately:
 #
-# `pull_request` — never `pull_request_target` — so a fork PR's code runs
-# without repository secrets and cannot influence the judgement of itself.
+#   merge-gate          the contract verdict. Computed by the copy of the gate
+#                       already on `main`, never by the copy inside the PR, so a
+#                       proposed change cannot weaken the rules it is judged by.
+#                       This is the check intended to become required (§9.13).
+#
+#   merge-gate-surface  advisory classification of the enforcement surface.
+#                       Never required, and it must stay that way: a required
+#                       check that fails on gate changes would make the gate
+#                       permanently unmodifiable once `bypass_actors` is empty.
+#
+# `pull_request` — never `pull_request_target` — so fork code runs without
+# repository secrets. Note the limit this cannot escape: for same-repo events
+# GitHub executes THIS FILE from the PR head, so a PR rewriting the runner runs
+# its own rewrite. Nothing mechanical protects the runner; human review and the
+# audit trail are the only controls, and under a shared credential that is a
+# convention rather than an enforcement (§9.7).
 
 on:
   pull_request:
@@ -23,25 +35,35 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Stable check name — this is the string selected as a required check later.
   gate:
     name: merge-gate
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: Check out the PR head
+      - name: Check out the PR head (evaluated, never trusted)
         uses: actions/checkout@v4
+        with:
+          path: pr
+
+      # The trusted gate. Fetched from `main`, not from the PR, so the code
+      # deciding the verdict is always a version that already landed.
+      - name: Check out the trusted gate from main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          path: trusted
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      # The test result is computed here, in this run, from the checked-out
-      # code. It is never read from a label, comment, or PR body — §9.14.
-      - name: Run gate tests
+      # Tests come from the PR head — they are evidence about the proposed code,
+      # which is what the verdict needs. The result is computed here, in this
+      # run; it is never read from a label, comment, or PR body (§9.14).
+      - name: Run gate tests from the PR head
         id: tests
-        working-directory: factory/gates
+        working-directory: pr/factory/gates
         continue-on-error: true
         run: python3 -m unittest discover -p 'test_*.py' -v
 
@@ -54,29 +76,98 @@ jobs:
             echo "passed=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Evaluate merge gate
+      - name: Evaluate merge gate using the trusted main copy
         # `shell: bash` and an explicit pipefail are load-bearing: the default
         # run shell is `bash -e` WITHOUT pipefail, so a pipe into tee would
         # report the exit status of tee and the gate would go green while
-        # failing. Observed on this very PR before the fix.
+        # failing. Observed for real on PR #32 before the fix (#30).
         shell: bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -o pipefail
-          python3 factory/gates/merge_gate.py \
+          python3 trusted/factory/gates/merge_gate.py \
             --repo "${{ github.repository }}" \
             --pr "${{ github.event.pull_request.number }}" \
             --tests-passed "${{ steps.result.outputs.passed }}" \
             | tee gate-report.txt
 
-      - name: Publish report to the run summary
+      - name: Publish verdict to the run summary
         if: always()
         run: |
           {
-            echo '### Merge gate'
+            echo '### merge-gate'
             echo
             echo '```'
             cat gate-report.txt 2>/dev/null || echo 'gate produced no report'
             echo '```'
+            echo
+            echo '_Verdict computed by the trusted copy of the gate on `main`._'
           } >> "$GITHUB_STEP_SUMMARY"
+
+  surface:
+    name: merge-gate-surface
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out the trusted gate from main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          path: trusted
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Classify the enforcement surface
+        id: scan
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          python3 trusted/factory/gates/merge_gate.py \
+            --mode surface \
+            --repo "${{ github.repository }}" \
+            --pr "${{ github.event.pull_request.number }}" \
+            | tee surface-report.txt
+
+      # Conclusions, all advisory because this check is never required:
+      #   ordinary PR      -> success
+      #   gate-logic PR    -> success + warning annotation (NEUTRAL in the report)
+      #   runner PR        -> FAILURE + error annotation, so it is impossible to
+      #                       miss on the PR page. Safe precisely because nothing
+      #                       gates on it; making it required would recreate the
+      #                       freeze this design removes.
+      - name: Annotate and report
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo '### merge-gate-surface (advisory — never required)'
+            echo
+            echo '```'
+            cat surface-report.txt 2>/dev/null || echo 'surface scan produced no report'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # Branch on the report's own verdict, not merely on the exit status,
+          # so "the scan could not run" is never silently reported as "clean" or
+          # confused with "runner changed".
+          if grep -q '^FAILURE' surface-report.txt 2>/dev/null; then
+            echo "::error title=Gate runner changed::This PR modifies .github/workflows/merge-gate.yml. For same-repo pull_request events GitHub runs the workflow from the PR head, so no check can protect it — including this one. A human hazard-ack naming this diff is required before landing."
+            exit 1
+          elif grep -q '^NEUTRAL' surface-report.txt 2>/dev/null; then
+            echo "::warning title=Gate logic changed::This PR changes factory/gates/**. The verdict came from the trusted main copy, so the change could not judge itself. A human hazard-ack is expected before landing."
+          elif grep -q '^SUCCESS' surface-report.txt 2>/dev/null; then
+            echo "Enforcement surface untouched."
+          else
+            # The trusted copy on main could not produce a classification — for
+            # example while this feature is still landing and main's gate has no
+            # --mode flag. Advisory, but never silently green.
+            echo "::error title=Surface scan unavailable::The trusted gate on main could not classify this PR's enforcement surface. Treat the surface as unknown and review the diff by hand."
+            exit 1
+          fi
