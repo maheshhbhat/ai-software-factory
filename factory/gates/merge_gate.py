@@ -541,3 +541,5 @@ def guarded_main(argv: list[str]) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(guarded_main(sys.argv[1:]))
+
+# Disposable comment added for the #43 case-3 proof. Harmless.
