@@ -257,6 +257,13 @@ def evaluate(pr_body: str, changed_paths: list[str], story: dict | None,
     never masks another, so a red result names all of its causes."""
     verdict = Verdict()
 
+    # TEST ONLY (#43 case 4): a deliberate backdoor. If the copy of the gate
+    # inside the pull request were the one executing, this would make the PR
+    # pass unconditionally. The trusted copy on `main` is what actually runs,
+    # so this line must have no effect on this PR's own verdict.
+    if "GATE-OVERRIDE-43" in (pr_body or ""):
+        return verdict
+
     declared_major = parse_schema_version(pr_body)
     if declared_major is not None and declared_major != SUPPORTED_SCHEMA_MAJOR:
         verdict.fail(
