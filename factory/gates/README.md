@@ -41,7 +41,7 @@ test result computed inside the workflow run, and the workflow boundary itself.
 | Check | Required? | What it says |
 |---|---|---|
 | `merge-gate` | intended (§9.13) | the contract verdict, computed by the **trusted `main` copy** of this file |
-| `merge-gate-surface` | **never** | advisory classification of the enforcement surface |
+| `merge-gate-surface` | **never** | advisory classification: success / success+warning / **failure** for a runner change |
 
 **The trusted-main rule.** The workflow checks out `main` into `trusted/` and runs
 *that* copy against the PR's data. The code deciding a verdict is therefore always

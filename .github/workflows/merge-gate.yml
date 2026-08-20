@@ -135,18 +135,17 @@ jobs:
             --pr "${{ github.event.pull_request.number }}" \
             | tee surface-report.txt
 
-      # Advisory by construction: a runner change is reported loudly and
-      # annotated, but this job still succeeds, because blocking here is exactly
-      # what would freeze the gate once merge-gate is required.
+      # Conclusions, all advisory because this check is never required:
+      #   ordinary PR      -> success
+      #   gate-logic PR    -> success + warning annotation (NEUTRAL in the report)
+      #   runner PR        -> FAILURE + error annotation, so it is impossible to
+      #                       miss on the PR page. Safe precisely because nothing
+      #                       gates on it; making it required would recreate the
+      #                       freeze this design removes.
       - name: Annotate and report
         if: always()
         shell: bash
         run: |
-          if [ "${{ steps.scan.outcome }}" != "success" ]; then
-            echo "::error title=Gate runner changed::This PR modifies .github/workflows/merge-gate.yml. No check can protect the file that defines the check — a human hazard-ack naming this diff is required before landing."
-          elif grep -q '^NEUTRAL' surface-report.txt 2>/dev/null; then
-            echo "::warning title=Gate logic changed::This PR changes factory/gates/**. The verdict came from the trusted main copy, so the change could not judge itself. A human hazard-ack is expected before landing."
-          fi
           {
             echo '### merge-gate-surface (advisory — never required)'
             echo
@@ -154,3 +153,11 @@ jobs:
             cat surface-report.txt 2>/dev/null || echo 'surface scan produced no report'
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "${{ steps.scan.outcome }}" != "success" ]; then
+            echo "::error title=Gate runner changed::This PR modifies .github/workflows/merge-gate.yml. For same-repo pull_request events GitHub runs the workflow from the PR head, so no check can protect it — including this one. A human hazard-ack naming this diff is required before landing."
+            exit 1
+          fi
+          if grep -q '^NEUTRAL' surface-report.txt 2>/dev/null; then
+            echo "::warning title=Gate logic changed::This PR changes factory/gates/**. The verdict came from the trusted main copy, so the change could not judge itself. A human hazard-ack is expected before landing."
+          fi
