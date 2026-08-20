@@ -34,13 +34,16 @@ bound that protects *this invocation* is the prompt and the timeout.
 from __future__ import annotations
 
 import argparse
+import email.utils
 import json
 import os
+import shlex
 import subprocess
 import sys
 import time
 import urllib.error
 import urllib.request
+from datetime import timezone
 
 # How long the engine may take to accept and complete the bounded task. Exceeding
 # it is reported as a timeout, which `workers.py` treats as AMBIGUOUS — never as
@@ -59,16 +62,24 @@ ACK_HEADING = "## Worker acknowledgement"
 # GitHub is read-your-writes in practice but not by contract, and calling a
 # worker's success a failure would hand the same Story to a second engine — so
 # the check is patient before it is decisive.
+#
+# Every value here is spent inside `workers.LAUNCH_TIMEOUT_SECONDS` (60s), which
+# kills this process. The whole check must therefore cost far less than the
+# launch budget, or a slow engine would be killed mid-check and reported as
+# AMBIGUOUS — which suppresses failover and makes the FAILED verdict this module
+# exists to produce unreachable exactly when it is needed. Worst case below is
+# one 8s read before launch and 26s after it.
+ACK_HTTP_TIMEOUT_SECONDS = 8
 ACK_CHECK_ATTEMPTS = 3
-ACK_CHECK_DELAY_SECONDS = 2
+ACK_CHECK_DELAY_SECONDS = 1
 
-# The commands the Claude engine may run, and nothing else. The prompt names one
-# action; the permission surface is that action plus the read it is allowed to
-# do for context. `--permission-mode acceptEdits` was the original grant and was
-# strictly wrong in both directions: it authorised file edits the prompt
-# forbids, while leaving Bash — where the whole assignment lives — behind an
-# approval prompt no unattended run can ever answer (#96).
-CLAUDE_ALLOWED_TOOLS = "Bash(gh issue comment:*),Bash(gh issue view:*)"
+# `date` is on the list because the prompt requires the acknowledgement to carry
+# the current UTC time. An engine that cannot read the clock either invents a
+# timestamp — a false time in the factory's audit trail — or treats the denial as
+# a blocker and posts nothing. Grant every value the prompt demands, or stop
+# demanding it.
+CLAUDE_ALLOWED_TOOLS = ("Bash(gh issue comment:*),Bash(gh issue view:*),"
+                       "Bash(date:*)")
 
 
 def task_prompt(repo: str, story: int, project: int) -> str:
@@ -116,61 +127,110 @@ def engine_command(engine: str, prompt: str) -> list[str]:
                      f"direct launch command")
 
 
-def acknowledgement_ids(repo: str, story: int) -> set | None:
-    """Ids of the acknowledgement comments currently on the Story.
+def _api_get(url: str) -> tuple | None:
+    """GET one API page. Returns (payload, headers), or `None` when the question
+    could not be answered at all — no network, an API error, unreadable JSON.
 
-    `None` means the question could not be answered — no token, no network, an
-    API error. That is deliberately distinct from "none found": one is ignorance
-    and the other is evidence, and this module must never spend the first as if
-    it were the second.
+    `None` means *ignorance*, which this module keeps strictly separate from the
+    evidence of an empty result. One is not knowing; the other is knowing.
     """
     token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or ""
     headers = {"Accept": "application/vnd.github+json",
                "User-Agent": "ai-software-factory-bridge"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
-    url = (f"https://api.github.com/repos/{repo}/issues/{story}"
-           f"/comments?per_page=100")
     try:
-        with urllib.request.urlopen(
-                urllib.request.Request(url, headers=headers), timeout=20) as response:
-            payload = json.load(response)
+        with urllib.request.urlopen(urllib.request.Request(url, headers=headers),
+                                    timeout=ACK_HTTP_TIMEOUT_SECONDS) as response:
+            return json.load(response), dict(response.headers)
     except (urllib.error.URLError, OSError, ValueError) as exc:
-        print(f"[bridge] WARN: cannot read comments on #{story}: {exc}", flush=True)
+        print(f"[bridge] WARN: GitHub read failed: {exc}", flush=True)
         return None
+
+
+def server_now(repo: str, story: int) -> str | None:
+    """GitHub's clock, as an ISO-8601 `Z` string, or `None` if unreadable.
+
+    The launch instant is taken from the *server* deliberately. The check that
+    follows asks "did a comment appear after this moment", and comparing GitHub's
+    timestamps against a local clock makes the answer depend on machine skew: a
+    fast local clock silently hides the acknowledgement, which reads as a
+    definite failure and invites a second engine onto the Story.
+    """
+    result = _api_get(f"https://api.github.com/repos/{repo}/issues/{story}"
+                      f"/comments?per_page=1")
+    if result is None:
+        return None
+    date_header = result[1].get("Date") or result[1].get("date")
+    if not date_header:
+        return None
+    try:
+        parsed = email.utils.parsedate_to_datetime(date_header)
+    except (TypeError, ValueError):
+        return None
+    return parsed.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def acknowledged_since(repo: str, story: int, since: str) -> bool | None:
+    """Has an acknowledgement been posted at or after `since`?
+
+    `True` / `False` are evidence; `None` is ignorance.
+
+    Asking GitHub for only the comments in this invocation's window is what keeps
+    the check cheap and correct. Reading the whole comment list instead would
+    inherit two defects: it is paginated, so past 100 comments a new
+    acknowledgement lands on page 2 and every worker that did post would be
+    called a failure — failover, duplicate acknowledgement, two workers on one
+    Story; and it grows without bound on exactly the busy issues where the check
+    has the least time to spare.
+
+    `since` filters on *update* time, so an edited old comment can come back in
+    the response. `created_at` is re-checked here, which is the question actually
+    being asked.
+    """
+    result = _api_get(f"https://api.github.com/repos/{repo}/issues/{story}"
+                      f"/comments?per_page=100&since={since}")
+    if result is None:
+        return None
+    payload = result[0]
     if not isinstance(payload, list):
         print(f"[bridge] WARN: unexpected comments payload for #{story}", flush=True)
         return None
-    return {comment.get("id") for comment in payload
-            if (comment.get("body") or "").lstrip().startswith(ACK_HEADING)}
+    return any((comment.get("body") or "").lstrip().startswith(ACK_HEADING)
+               and (comment.get("created_at") or "") >= since
+               for comment in payload)
 
 
-def worker_acted(repo: str, story: int, before: set | None) -> bool:
-    """Did *this* invocation produce a new acknowledgement?
+def worker_acted(repo: str, story: int, since: str | None) -> bool:
+    """Did *this* invocation produce an acknowledgement?
 
-    The check compares against a snapshot taken before launch, so an
-    acknowledgement left by an earlier run is not counted as proof that this
-    engine did anything.
+    Patient, then decisive: a read that fails is retried, because the pre-launch
+    read already proved the token and the network work, so a failure here is far
+    more likely a blip than an inability to see. Only when every attempt fails is
+    the answer unknowable.
 
-    When the answer is unknowable the verdict is `True` — the pre-#96 behaviour,
-    stated as a limitation rather than hidden: an unverifiable launch is
-    reported as it always was. The runtime refuses to poll without a token, so
-    the blind path is not the normal one.
+    An unknowable answer returns `True` — the pre-#97 behaviour, kept as a stated
+    limitation rather than a hidden one: an unverifiable launch is reported
+    exactly as it always was. Ignorance must not be spent as evidence, because
+    the failure verdict it would produce puts a second engine on the Story.
     """
-    if before is None:
+    if since is None:
         print("[bridge] WARN: acknowledgement unverifiable; reporting the engine's "
               "own exit status", flush=True)
         return True
+    saw_evidence = False
     for attempt in range(ACK_CHECK_ATTEMPTS):
-        current = acknowledgement_ids(repo, story)
-        if current is None:
-            print("[bridge] WARN: acknowledgement unverifiable; reporting the engine's "
-                  "own exit status", flush=True)
+        answer = acknowledged_since(repo, story, since)
+        if answer:
             return True
-        if current - before:
-            return True
+        if answer is False:
+            saw_evidence = True
         if attempt + 1 < ACK_CHECK_ATTEMPTS:
             time.sleep(ACK_CHECK_DELAY_SECONDS)
+    if not saw_evidence:
+        print("[bridge] WARN: acknowledgement unverifiable; reporting the engine's "
+              "own exit status", flush=True)
+        return True
     return False
 
 
@@ -196,14 +256,17 @@ def main(argv: list[str]) -> int:
     printable = [("<prompt>" if part is prompt else part) for part in cmd]
     print(f"[bridge] engine={args.engine} story=#{args.story} project=#{args.project}",
           flush=True)
-    print(f"[bridge] exec: {' '.join(printable)}", flush=True)
+    # shlex.join, not ' '.join: an allowlist like `Bash(gh issue comment:*)` is a
+    # shell parse error unquoted, and #90's requirement is that a human can
+    # reproduce the handoff from this line, not merely read it.
+    print(f"[bridge] exec: {shlex.join(printable)}", flush=True)
 
     if args.dry_run:
         return 0
 
-    # Snapshot first: the question this bridge answers afterwards is whether a
-    # *new* acknowledgement appeared, not whether one exists.
-    before = acknowledgement_ids(args.repo, args.story)
+    # The launch instant, by GitHub's clock. Everything after this asks one
+    # question: did an acknowledgement appear *after* this moment.
+    since = server_now(args.repo, args.story)
 
     try:
         completed = subprocess.run(cmd, capture_output=True, text=True,
@@ -224,6 +287,17 @@ def main(argv: list[str]) -> int:
     for line in tail:
         print(f"[bridge] {line}", flush=True)
     if completed.returncode != 0:
+        # An exit code proves the process ended — in this direction too. An
+        # engine that posted the acknowledgement and then died in teardown has
+        # done the work, and reporting it as a definite failure would send a
+        # second engine to post a second acknowledgement on the same Story.
+        # Only *evidence* overrides the exit code here: an unverifiable answer
+        # leaves the engine's own non-zero verdict standing.
+        if since is not None and acknowledged_since(args.repo, args.story, since):
+            print(f"[bridge] {args.engine} exited {completed.returncode} but the "
+                  f"acknowledgement is on #{args.story}; the work was done.",
+                  flush=True)
+            return 0
         print(f"[bridge] FAIL: engine exited {completed.returncode}: "
               f"{(completed.stderr or '').strip()[-300:]}", flush=True)
         return 1
@@ -234,7 +308,7 @@ def main(argv: list[str]) -> int:
     # so failover was correctly suppressed and the no-op became terminal. The
     # check below is what makes "did nothing" a *definite failure* instead, which
     # is the one verdict that lets another engine try.
-    if not worker_acted(args.repo, args.story, before):
+    if not worker_acted(args.repo, args.story, since):
         print(f"[bridge] FAIL: {args.engine} exited 0 without posting an "
               f"acknowledgement on #{args.story}; it did not do the work. "
               f"Treat as a definite failure — another engine may try.", flush=True)

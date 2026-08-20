@@ -185,25 +185,63 @@ Two changes close that:
 - The Claude engine is granted exactly the commands the prompt names
   (`--allowedTools`), not a blanket permission mode. A command that is not
   listed is a command it cannot run.
-- After a clean exit the bridge checks GitHub for a **new** acknowledgement,
-  compared against a snapshot taken before launch. No new comment means the
-  engine did not do the work, and the bridge exits non-zero — a definite
-  failure, which is the one verdict that lets another engine try.
+- The bridge asks GitHub whether an acknowledgement appeared **after this
+  invocation's launch instant**, and that instant is GitHub's own clock, not the
+  local one. No acknowledgement means the engine did not do the work, and the
+  bridge exits non-zero — a definite failure, which is the one verdict that lets
+  another engine try.
 
-Three outcomes, three meanings, and they must stay distinct:
+Four outcomes, four meanings, and they must stay distinct:
 
 | Outcome | Verdict | Why |
 |---|---|---|
-| New acknowledgement | success | the work is durable in GitHub |
+| Acknowledgement in the window | success | the work is durable in GitHub |
 | Clean exit, no acknowledgement | definite failure | proven not done; failover is safe |
+| Non-zero exit, acknowledgement present | success | the work was done; the crash came after |
 | Timeout | ambiguous | the engine may be mid-task; never fall back |
 
-A fourth case is a stated limitation rather than a hidden one: if the comment
-read itself fails — no token, no network — the bridge cannot tell the two apart,
-warns, and reports the engine's own exit status, which is the pre-#97 behaviour.
-Ignorance is not evidence, and spending it as evidence is what puts two workers
-on one Story. The poller refuses to run without a token, so this is not the
-normal path.
+The third row is the thesis applied in the other direction. An engine that posts
+and then dies in teardown *did the work*, and calling that a definite failure
+sends a second engine to post a second acknowledgement. Only evidence overrides
+the engine's own verdict there — an unverifiable answer leaves the non-zero exit
+standing.
+
+### Three things the check must not confuse
+
+**Ignorance is not evidence.** A read that fails is retried; only when every
+attempt fails is the answer unknowable, and an unknowable answer reports the
+engine's own exit status — the pre-#97 behaviour, kept as a stated limitation.
+Spending ignorance as evidence produces a failure verdict, and a failure verdict
+is what puts a second worker on a Story. The poller refuses to run without a
+token, so the blind path is not the normal one.
+
+**The clock belongs to the server.** Comparing GitHub's timestamps against a
+local clock makes the verdict depend on machine skew, and a fast local clock
+hides the acknowledgement — which reads as a definite failure and invites the
+duplicate.
+
+**The window is the invocation, not the issue.** Asking only for comments since
+the launch instant is what keeps the check cheap and correct. Reading the whole
+comment list would be paginated: past 100 comments the new acknowledgement lands
+on page two, unseen, and every worker that *did* post would be called a failure.
+
+### Two limits worth naming
+
+**The check spends the launch budget.** All of it runs inside
+`workers.LAUNCH_TIMEOUT_SECONDS`, which kills this process. If the check could
+outlast that, a slow engine would be killed mid-check and reported `AMBIGUOUS` —
+suppressing failover and making the `FAILED` verdict unreachable exactly when it
+matters. The constants are sized so the worst case is a small fraction of the
+budget, and a test pins that relationship rather than trusting the numbers to
+stay small.
+
+**Attribution inside the window is by time, not by author.** Under the
+single-credential model every comment has the same author, so an acknowledgement
+that lands during this invocation's window is credited to this invocation. A
+straggler from an earlier engine — killed at the launch cap, still alive, posting
+late — can therefore be credited to its successor. The consequence is a
+misattributed audit line, not a duplicate or a lost Story, and it is recorded
+here rather than papered over.
 
 ## Worker adapter
 
