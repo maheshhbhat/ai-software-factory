@@ -1,0 +1,1 @@
+deliberately outside synthetic/** to prove OUT_OF_SCOPE
