@@ -138,6 +138,38 @@ exactly how a system ends up with two workers writing to one branch. A Story
 claimed with no worker running is a bounded, recoverable inconvenience; two
 workers on one Story is a corruption.
 
+## The launch bridge (#90)
+
+`bridge.py` is the factory's own handoff to a real CLI engine — the thing a
+worker declaration points at:
+
+```sh
+export FACTORY_WORKER_CODEX_DELIVERY_LAUNCH='python3 factory/runtime/bridge.py \
+    --engine codex --story {story} --project {project}'
+```
+
+Before it existed, the runtime printed a `WAKE` line and a human-configured
+standing CLI session picked it up. That session was not a factory-owned
+launcher, so swappability was proven in tests and not in the world.
+
+The bridge is an *implementation*, not another orchestrator: `workers.py` still
+chooses the engine and enforces the failover rules. The bridge only turns
+`(engine, story, project)` into a CLI invocation, and prints the exact command
+so the handoff is observable.
+
+**What the engine is told:** repository, story number, project number. Nothing
+else — no spec, no scope, no criteria. It reads the substrate itself (§4).
+
+**Why the prompt is narrow:** an engine invoked here runs unattended. The prompt
+states one bounded task and says to do nothing else. Widening it is not a
+convenience, it is handing an autonomous agent an open mandate with no human in
+the loop. The bounds protecting the repository are upstream — authorization
+chain, WIP, merge gate; the bounds protecting *this invocation* are the prompt
+and the timeout.
+
+A bridge timeout exits non-zero and says the engine may still be running;
+`workers.py` maps its own timeout to `AMBIGUOUS` and refuses to fall back.
+
 ## Worker adapter
 
 `FACTORY_WORKER_CMD` is the whole extension point — point it at Codex or any

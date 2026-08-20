@@ -212,7 +212,11 @@ def poll_once(repo: str, commitment: int, seen: set[int], claim: bool = True) ->
             continue
         output = wake_worker(dispatch)
         seen.add(dispatch["story"])
-        print(f"[poller] woke {dispatch['agent']} for story #{dispatch['story']} "
+        # Report the engine that actually ran, not the agent named on the
+        # DISPATCH line. Under failover those differ, and an audit trail that
+        # says Claude ran when Codex did is worse than no trail at all.
+        engine = output.split(":", 1)[0].strip() if ":" in output else dispatch["agent"]
+        print(f"[poller] woke {engine} for story #{dispatch['story']} "
               f"(project #{dispatch['project']})", flush=True)
         if output:
             print(output, flush=True)
