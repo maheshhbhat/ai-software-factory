@@ -100,10 +100,25 @@ class TestPollOnce(unittest.TestCase):
     def setUp(self):
         self._env = dict(os.environ)
         os.environ["FACTORY_WORKER_CMD"] = "/usr/bin/true"
+        # Continuation is a separate concern with its own tests; stub it so
+        # these exercise dispatch only and make no network call.
+        self._continuation = mock.patch.object(poller, "run_continuation",
+                                               return_value=[])
+        self._continuation.start()
 
     def tearDown(self):
+        self._continuation.stop()
         os.environ.clear()
         os.environ.update(self._env)
+
+    def test_continuation_failure_does_not_block_dispatch(self):
+        """A malformed decision comment must not halt authorized work."""
+        seen: set[int] = set()
+        with mock.patch.object(poller, "run_continuation",
+                               side_effect=RuntimeError("boom")), \
+             mock.patch.object(poller, "run_dispatcher", return_value=REPORT):
+            woken = poller.poll_once("o/r", 54, seen)
+        self.assertEqual([d["story"] for d in woken], [64])
 
     def test_dispatch_wakes_the_worker_once(self):
         seen: set[int] = set()
@@ -179,7 +194,8 @@ class TestNoLocalAuthority(unittest.TestCase):
         """A fresh process re-derives behaviour from the dispatcher alone: if the
         story is claimed, the dispatcher stops offering it, so a restart is
         latency, not a duplicate."""
-        with mock.patch.object(poller, "run_dispatcher",
+        with mock.patch.object(poller, "run_continuation", return_value=[]), \
+             mock.patch.object(poller, "run_dispatcher",
                                return_value="Dispatcher — no eligible work"):
             self.assertEqual(poller.poll_once("o/r", 54, set()), [])
 
