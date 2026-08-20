@@ -9,6 +9,41 @@ number and typed `work #N`. The labels had already made the decision, so that
 touch carried no judgment — a *relay* touch, the one class
 `architecture-v2.1.md` §7 requires to trend to zero.
 
+## Two passes per cycle
+
+**1 · Continuation** (`continuation.py`) — consume human decision comments on
+projects sitting at `project:awaiting-ready` or `project:awaiting-acceptance`.
+This exists because a bell is rung as a *comment on an existing issue*, which
+new-issue discovery cannot see. Observed live three times (#55, #61, #66): a
+valid approval sat in GitHub while the lifecycle waited for someone to type
+`work #N`.
+
+**2 · Dispatch** (`poller.py` + the dispatcher) — claim and wake, as below.
+
+Continuation runs first, so an approval and the work it unblocks can land in the
+same cycle. Its failures are isolated: a malformed decision comment reports and
+is skipped, and dispatch still runs. Coupling them would let one bad comment
+halt the whole factory.
+
+### What continuation can and cannot prove
+
+Under the single-credential threat model (§9.7) the agent writes through the
+CTO's account, so **every comment this factory posts is `OWNER`-authored too**.
+Author association cannot distinguish a human decision from an agent-written
+one. What separates them is a **heading convention** — a decision carries the
+exact §5 heading (`## Plan approval`, `## Acceptance`) while recording comments
+use different ones (`## Approval recorded`, `## Approval superseded`) — and a
+test pins the real recording format so a future edit cannot quietly turn it into
+a self-approval.
+
+The one check that holds regardless of who typed what is the **§5.1 binding
+rule**: an approval is valid only while the project's criteria section still
+matches what the approval quoted. Criteria edited after approval fail closed.
+Ticking a checkbox does not count as an amendment; changing the wording does.
+
+Everything ambiguous — conflicting owner decisions, an unreadable decision line,
+an unrecognized verdict — fails closed with a named reason and no transition.
+
 ## The design rule that keeps it small
 
 **The runtime holds no judgment.** It does not decide what is authorized,

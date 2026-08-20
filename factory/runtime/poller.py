@@ -16,9 +16,15 @@ a policy decision, that is the bug.
 
 What it does, per poll:
 
-    1. run the dispatcher with claiming enabled
-    2. read only canonical `DISPATCH story=#N project=#P agent=<id>` lines
-    3. launch the configured worker once per line
+    1. consume any human decision comment sitting on a project at a bell
+    2. run the dispatcher with claiming enabled
+    3. read only canonical `DISPATCH story=#N project=#P agent=<id>` lines
+    4. launch the configured worker once per line
+
+Step 1 exists because a bell is rung as a *comment on an existing issue*, which
+new-issue discovery cannot see — observed live three times (#55, #61, #66),
+each needing a human to type `work #N` to continue work already approved. It
+runs before dispatch so an approval and the work it unblocks land in one cycle.
 
 Idempotency comes from GitHub, not from here. A claimed story is no longer
 `story:ready`, so the next poll's dispatcher simply does not emit it. The
@@ -41,6 +47,9 @@ import sys
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+import continuation  # noqa: E402  — decision-comment consumption (#71)
+
 DISPATCHER = os.path.join(HERE, "..", "dispatcher", "dispatcher.py")
 
 # The canonical dispatch line, and nothing else. Anchored at both ends and
@@ -143,8 +152,29 @@ def wake_worker(dispatch: dict) -> str:
     return (result.stdout or "").strip()
 
 
+def run_continuation(repo: str, claim: bool = True) -> list:
+    """Consume human decisions on projects waiting at bells.
+
+    Kept in its own module: continuation reads §5 decision comments, which is a
+    different question from dispatch eligibility, and it is worker-neutral —
+    advancing a lifecycle is not work assigned to anyone.
+    """
+    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or ""
+    return continuation.run(repo, token, apply=claim)
+
+
 def poll_once(repo: str, commitment: int, seen: set[int], claim: bool = True) -> list[dict]:
     """One cycle. Returns the dispatches that produced a wake-up."""
+    # A decision consumed now can unblock work the same cycle. Isolated: a
+    # continuation failure must not stop already-authorized work from
+    # dispatching — the two answer different questions, and coupling their
+    # failure modes would let a malformed comment halt the whole factory.
+    try:
+        run_continuation(repo, claim)
+    except Exception as exc:  # noqa: BLE001 — reported, never fatal to dispatch
+        print(f"[poller] continuation pass failed, dispatch continues: "
+              f"{type(exc).__name__}: {exc}", flush=True)
+
     stdout = run_dispatcher(repo, commitment, claim)
     woken = []
     for dispatch in parse_dispatches(stdout):
