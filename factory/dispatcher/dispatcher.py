@@ -36,12 +36,14 @@ import sys
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "gates"))
 import merge_gate  # noqa: E402  — single source of truth for the §9.6 Scope dialect
 
 WIP_LIMIT = 2                      # §9.10 — a contract value, not a runtime tweak
 ATTEMPT_MAX = 3                    # §4.3.5 — checked at dispatch time, before incrementing
+CLAIM_LEASE = timedelta(minutes=60)  # §9.4
 SUPPORTED_SCHEMA_MAJOR = merge_gate.SUPPORTED_SCHEMA_MAJOR
 
 # §9.9: only these author associations may have their issues treated as factory
@@ -53,6 +55,7 @@ PROJECT_LIFECYCLE = "project:"
 READY = "story:ready"
 CLAIMED = "story:claimed"
 MERGED = "story:merged"
+POISON = "story:blocked:poison"
 PROJECT_ACTIVE = "project:active"
 
 ISSUE_REF_RE = re.compile(r"^#(\d+)$")
@@ -103,6 +106,91 @@ class Plan:
 
     def eligible(self) -> list[Decision]:
         return [d for d in self.decisions if d.eligible]
+
+
+@dataclass(frozen=True)
+class RecoveryDecision:
+    """A deterministic reconciliation derived only from durable evidence."""
+
+    number: int
+    action: str
+    reason: str
+    detail: str = ""
+
+
+def _parse_time(value: str) -> datetime:
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def linked_delivery_prs(number: int, pull_requests: list[dict]) -> tuple[list[dict], str | None]:
+    """Return valid §9.5 links, failing closed on duplicate canonical lines."""
+    pattern = re.compile(rf"(?m)^Story: #{number}$")
+    linked = []
+    for pr in pull_requests:
+        body = (pr.get("body") or "").replace("\r\n", "\n")
+        count = len(pattern.findall(body))
+        if count > 1:
+            return [], f"PR #{pr.get('number')} has {count} Story: #{number} lines"
+        if count == 1:
+            linked.append(pr)
+    return linked, None
+
+
+def recovery_decision(story: dict, timeline: list[dict], pull_requests: list[dict],
+                      now: datetime) -> RecoveryDecision:
+    """Reconcile one claim under §9.4; ambiguity always fails closed."""
+    number = story.get("number", 0)
+    if lifecycle_of(story, STORY_LIFECYCLE) != CLAIMED:
+        return RecoveryDecision(number, "none", "NOT_CLAIMED")
+
+    prs, link_error = linked_delivery_prs(number, pull_requests)
+    if link_error:
+        return RecoveryDecision(number, "bell", "INVALID_PR_LINK", link_error)
+    if len(prs) > 1:
+        return RecoveryDecision(number, "bell", "AMBIGUOUS_LINKED_PRS",
+                                f"{len(prs)} PRs carry Story: #{number}")
+    if prs:
+        pr = prs[0]
+        if pr.get("merged_at") or pr.get("merged") is True:
+            return RecoveryDecision(number, "merged", "MERGED_DELIVERY_PR",
+                                    f"PR #{pr.get('number')}")
+        return RecoveryDecision(number, "none", "LINKED_PR_EXISTS",
+                                f"PR #{pr.get('number')} state={pr.get('state')}")
+
+    claimed_events = [
+        event for event in timeline
+        if event.get("event") == "labeled"
+        and merge_gate.label_name(event.get("label", {})) == CLAIMED
+        and event.get("created_at")
+    ]
+    if not claimed_events:
+        return RecoveryDecision(number, "bell", "CLAIM_EVENT_MISSING")
+    try:
+        claimed_at = max(_parse_time(event["created_at"]) for event in claimed_events)
+    except (TypeError, ValueError):
+        return RecoveryDecision(number, "bell", "CLAIM_EVENT_TIME_INVALID")
+    now = now if now.tzinfo else now.replace(tzinfo=timezone.utc)
+    if now - claimed_at < CLAIM_LEASE:
+        return RecoveryDecision(number, "none", "CLAIM_FRESH",
+                                f"claimed_at={claimed_at.isoformat()}")
+
+    attempt_raw = (merge_gate.parse_section(story.get("body") or "", "Attempt") or "").strip()
+    if not attempt_raw.isdigit() or int(attempt_raw) < 1:
+        return RecoveryDecision(number, "bell", "RECOVERY_ATTEMPT_INVALID",
+                                f"Attempt={attempt_raw!r}")
+    return RecoveryDecision(number, "ready", "CLAIM_LEASE_EXPIRED",
+                            f"claimed_at={claimed_at.isoformat()}; Attempt {attempt_raw} -> {int(attempt_raw) - 1}")
+
+
+def reconcile_claims(stories: dict, timelines: dict[int, list[dict]],
+                     pull_requests: list[dict], now: datetime) -> list[RecoveryDecision]:
+    """Pure recovery pass. Call before \`plan_dispatch\`, never after it."""
+    return [
+        recovery_decision(stories[number], timelines.get(number, []), pull_requests, now)
+        for number in sorted(stories)
+        if lifecycle_of(stories[number], STORY_LIFECYCLE) == CLAIMED
+    ]
 
 
 # --------------------------------------------------------------------------
@@ -303,6 +391,69 @@ def fetch_issue(repo: str, number: int, token: str) -> dict | None:
         raise
 
 
+def fetch_pages(url: str, token: str) -> list[dict]:
+    items, page = [], 1
+    while True:
+        separator = "&" if "?" in url else "?"
+        batch = _api(f"{url}{separator}per_page=100&page={page}", token)
+        items.extend(batch)
+        if len(batch) < 100:
+            return items
+        page += 1
+
+
+def fetch_timeline(repo: str, number: int, token: str) -> list[dict]:
+    return fetch_pages(f"https://api.github.com/repos/{repo}/issues/{number}/timeline", token)
+
+
+def fetch_pull_requests(repo: str, token: str) -> list[dict]:
+    return fetch_pages(f"https://api.github.com/repos/{repo}/pulls?state=all", token)
+
+
+def apply_recovery(repo: str, story: dict, decision: RecoveryDecision,
+                   token: str) -> tuple[bool, str]:
+    """Apply a recovery only if the claim is still authoritative."""
+    if decision.action not in {"ready", "merged"}:
+        return False, f"{decision.reason}: {decision.detail}".rstrip()
+    fresh = fetch_issue(repo, story["number"], token)
+    if fresh is None or lifecycle_of(fresh, STORY_LIFECYCLE) != CLAIMED:
+        return False, "STALE_RECOVERY_PLAN: story is no longer story:claimed"
+
+    labels = labels_of(fresh) - {CLAIMED}
+    payload: dict = {}
+    if decision.action == "ready":
+        attempt_raw = (merge_gate.parse_section(fresh.get("body") or "", "Attempt") or "").strip()
+        if not attempt_raw.isdigit() or int(attempt_raw) < 1:
+            return False, f"RECOVERY_ATTEMPT_INVALID: Attempt={attempt_raw!r}"
+        body = (fresh.get("body") or "").replace("\r\n", "\n")
+        payload["body"] = re.sub(
+            r"(### Attempt\n\n)(\d+)(\n)",
+            lambda match: match.group(1) + str(int(attempt_raw) - 1) + match.group(3),
+            body, count=1)
+        labels.add(READY)
+    else:
+        labels.add(MERGED)
+        payload.update({"state": "closed", "state_reason": "completed"})
+    payload["labels"] = sorted(labels)
+    _api(f"https://api.github.com/repos/{repo}/issues/{story['number']}", token,
+         method="PATCH", payload=payload)
+    return True, f"{decision.reason}: {decision.detail}".rstrip()
+
+
+def poison(repo: str, story: dict, token: str) -> tuple[bool, str]:
+    """§4.3.5: the fourth dispatch opportunity terminates at Attempt 3."""
+    fresh = fetch_issue(repo, story["number"], token)
+    if fresh is None or lifecycle_of(fresh, STORY_LIFECYCLE) != READY:
+        return False, "story no longer ready"
+    attempt_raw = (merge_gate.parse_section(fresh.get("body") or "", "Attempt") or "").strip()
+    if attempt_raw != str(ATTEMPT_MAX):
+        return False, f"Attempt changed to {attempt_raw!r}"
+    labels = sorted((labels_of(fresh) - {READY}) | {POISON})
+    _api(f"https://api.github.com/repos/{repo}/issues/{story['number']}", token,
+         method="PATCH", payload={"labels": labels, "state": "closed", "state_reason": "not_planned"})
+    return True, f"ATTEMPT_EXHAUSTED: Attempt remains {ATTEMPT_MAX}; terminal poison"
+
+
 def claim(repo: str, story: dict, token: str) -> tuple[bool, str]:
     """Claim a story: bump `Attempt`, then replace the label set atomically.
 
@@ -423,17 +574,45 @@ def main(argv: list[str]) -> int:
     stories = {n: i for n, i in issues.items() if "type:story" in labels_of(i)}
     projects = {n: i for n, i in issues.items() if "type:project" in labels_of(i)}
 
+    # §9.4: recovery precedes WIP accounting and selection. The mutated issue
+    # snapshot is fetched again so capacity is calculated from durable state.
+    recovery_notes: list[str] = []
+    if args.claim:
+        timelines = {
+            number: fetch_timeline(args.repo, number, token)
+            for number, story in stories.items()
+            if lifecycle_of(story, STORY_LIFECYCLE) == CLAIMED
+        }
+        recoveries = reconcile_claims(
+            stories, timelines, fetch_pull_requests(args.repo, token), datetime.now(timezone.utc))
+        for decision in recoveries:
+            if decision.action in {"ready", "merged"}:
+                ok, note = apply_recovery(args.repo, stories[decision.number], decision, token)
+                recovery_notes.append(f"RECOVERY #{decision.number}: {'APPLIED' if ok else 'SKIP'} {note}")
+            else:
+                recovery_notes.append(
+                    f"RECOVERY #{decision.number}: {decision.action.upper()} {decision.reason} {decision.detail}".rstrip())
+        issues = fetch_issues(args.repo, token)
+        stories = {n: i for n, i in issues.items() if "type:story" in labels_of(i)}
+        projects = {n: i for n, i in issues.items() if "type:project" in labels_of(i)}
+
     plan = plan_dispatch(stories, projects, args.commitment, args.wip_limit)
 
     claimed: list[tuple[int, str]] = []
     dispatched: list[Decision] = []
     if args.claim:
+        for decision in plan.decisions:
+            if decision.reason == Reason.ATTEMPT_EXHAUSTED:
+                ok, note = poison(args.repo, stories[decision.number], token)
+                recovery_notes.append(f"POISON #{decision.number}: {'APPLIED' if ok else 'SKIP'} {note}")
         for decision in plan.selected:
             ok, note = claim(args.repo, stories[decision.number], token)
             claimed.append((decision.number, note if ok else f"NOT claimed — {note}"))
             if ok:
                 dispatched.append(decision)
 
+    if recovery_notes:
+        print("\n".join(recovery_notes))
     print(render(plan, claimed, dry_run=not args.claim))
     for decision in dispatched:
         print(dispatch_line(decision.number, decision.project))
