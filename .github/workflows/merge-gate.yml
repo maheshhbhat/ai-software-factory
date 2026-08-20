@@ -55,9 +55,15 @@ jobs:
           fi
 
       - name: Evaluate merge gate
+        # `shell: bash` and an explicit pipefail are load-bearing: the default
+        # run shell is `bash -e` WITHOUT pipefail, so a pipe into tee would
+        # report the exit status of tee and the gate would go green while
+        # failing. Observed on this very PR before the fix.
+        shell: bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -o pipefail
           python3 factory/gates/merge_gate.py \
             --repo "${{ github.repository }}" \
             --pr "${{ github.event.pull_request.number }}" \

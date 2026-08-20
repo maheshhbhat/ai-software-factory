@@ -44,6 +44,16 @@ vouch for a change to itself; that is what makes the workflow boundary a usable
 trust anchor rather than a circular one. Such PRs need human review, which is
 correct: they are hazard-path changes in the sense of `architecture-v2.1.md` §5.
 
+## A note on the runner shell
+
+The workflow's evaluate step sets `shell: bash` and `set -o pipefail`
+explicitly. GitHub's default `run:` shell on Linux is `bash -e` **without**
+pipefail, so piping the gate into `tee` reports `tee`'s exit status and the
+check goes green while the gate is failing. That happened on the gate's own
+first CI run and was caught by comparing the reported check result against the
+gate's printed verdict. A control that cannot fail is worse than no control,
+so this is not a stylistic preference.
+
 ## Running it
 
 ```sh
