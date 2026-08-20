@@ -170,6 +170,41 @@ and the timeout.
 A bridge timeout exits non-zero and says the engine may still be running;
 `workers.py` maps its own timeout to `AMBIGUOUS` and refuses to fall back.
 
+### Proof of action, not proof of exit (#97)
+
+An exit code proves the process ended. It does not prove the assignment was
+carried out — and the difference is not academic. The first unattended Claude
+run (#96) ended cleanly having posted nothing, because `--permission-mode
+acceptEdits` authorises file edits the prompt forbids while leaving Bash, where
+the whole assignment lives, behind an approval prompt no unattended run can
+answer. The runtime recorded `LAUNCHED`, which is a *definite success*, so
+failover was correctly suppressed and the silent no-op became terminal.
+
+Two changes close that:
+
+- The Claude engine is granted exactly the commands the prompt names
+  (`--allowedTools`), not a blanket permission mode. A command that is not
+  listed is a command it cannot run.
+- After a clean exit the bridge checks GitHub for a **new** acknowledgement,
+  compared against a snapshot taken before launch. No new comment means the
+  engine did not do the work, and the bridge exits non-zero — a definite
+  failure, which is the one verdict that lets another engine try.
+
+Three outcomes, three meanings, and they must stay distinct:
+
+| Outcome | Verdict | Why |
+|---|---|---|
+| New acknowledgement | success | the work is durable in GitHub |
+| Clean exit, no acknowledgement | definite failure | proven not done; failover is safe |
+| Timeout | ambiguous | the engine may be mid-task; never fall back |
+
+A fourth case is a stated limitation rather than a hidden one: if the comment
+read itself fails — no token, no network — the bridge cannot tell the two apart,
+warns, and reports the engine's own exit status, which is the pre-#97 behaviour.
+Ignorance is not evidence, and spending it as evidence is what puts two workers
+on one Story. The poller refuses to run without a token, so this is not the
+normal path.
+
 ## Worker adapter
 
 `FACTORY_WORKER_CMD` is the whole extension point — point it at Codex or any
