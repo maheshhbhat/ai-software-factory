@@ -1,0 +1,82 @@
+name: merge-gate
+
+# Deterministic merge gate (factory/spec/state-schema.md §9).
+#
+# NOT a required status check yet. §9.13 fixes the migration order: prove this
+# green/red first, then in one atomic ruleset edit make it required and set
+# required approvals to 0. Do not do half of that.
+#
+# `pull_request` — never `pull_request_target` — so a fork PR's code runs
+# without repository secrets and cannot influence the judgement of itself.
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: read
+  issues: read
+
+concurrency:
+  group: merge-gate-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  # Stable check name — this is the string selected as a required check later.
+  gate:
+    name: merge-gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out the PR head
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # The test result is computed here, in this run, from the checked-out
+      # code. It is never read from a label, comment, or PR body — §9.14.
+      - name: Run gate tests
+        id: tests
+        working-directory: factory/gates
+        continue-on-error: true
+        run: python3 -m unittest discover -p 'test_*.py' -v
+
+      - name: Record CI-computed test result
+        id: result
+        run: |
+          if [ "${{ steps.tests.outcome }}" = "success" ]; then
+            echo "passed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "passed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Evaluate merge gate
+        # `shell: bash` and an explicit pipefail are load-bearing: the default
+        # run shell is `bash -e` WITHOUT pipefail, so a pipe into tee would
+        # report the exit status of tee and the gate would go green while
+        # failing. Observed on this very PR before the fix.
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -o pipefail
+          python3 factory/gates/merge_gate.py \
+            --repo "${{ github.repository }}" \
+            --pr "${{ github.event.pull_request.number }}" \
+            --tests-passed "${{ steps.result.outputs.passed }}" \
+            | tee gate-report.txt
+
+      - name: Publish report to the run summary
+        if: always()
+        run: |
+          {
+            echo '### Merge gate'
+            echo
+            echo '```'
+            cat gate-report.txt 2>/dev/null || echo 'gate produced no report'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
