@@ -171,3 +171,5 @@ jobs:
             echo "::error title=Surface scan unavailable::The trusted gate on main could not classify this PR's enforcement surface. Treat the surface as unknown and review the diff by hand."
             exit 1
           fi
+
+# Disposable comment added for the #43 case-5 surface-detection proof. Harmless; not merged.
