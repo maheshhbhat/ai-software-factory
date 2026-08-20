@@ -83,13 +83,27 @@ relay has been rebuilt as infrastructure).
 Implemented: authorization chain, eligibility, deterministic selection, atomic
 claim, dispatch trigger.
 
-**Not implemented, deliberately:** lease-expiry recovery (§9.4). A story stuck
-in `story:claimed` stays there and consumes WIP until a human moves it; the
-dispatcher never expires a claim. That is the next increment, and until it
-exists, stale claims are the expected failure mode — visible as `WIP n/2` in
-every dry run.
+Before WIP selection the claim-recovery pass reconciles durable evidence:
+
+* a claim younger than the 60-minute §9.4 lease remains claimed;
+* an expired claim with no §9.5-linked PR returns to `story:ready` and restores
+  the pre-dispatch Attempt value;
+* one mechanically linked merged PR closes the story as `story:merged`;
+* missing, duplicate, or contradictory evidence fails closed with a named bell.
+
+The dispatcher then re-fetches GitHub state and calculates WIP. Replaying a
+completed transition is a no-op because only `story:claimed` is recoverable.
 
 Also out of scope: worker execution, reviewer, notifications, auto-merge.
+
+## Observed monitor gap
+
+Project #55 already had an owner-authored plan approval, but generic `poll` and
+`poll #55` did not consume it; a manual `work #55` relay was needed to move
+`project:awaiting-ready` to `project:active`. Claim recovery does not broaden
+into general bell consumption. Follow-up: make the monitor reconcile approved
+project bells before routing, using the same durable-evidence and idempotency
+rules as this recovery pass.
 
 ## Tests
 
