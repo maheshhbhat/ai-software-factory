@@ -154,10 +154,20 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-          if [ "${{ steps.scan.outcome }}" != "success" ]; then
+          # Branch on the report's own verdict, not merely on the exit status,
+          # so "the scan could not run" is never silently reported as "clean" or
+          # confused with "runner changed".
+          if grep -q '^FAILURE' surface-report.txt 2>/dev/null; then
             echo "::error title=Gate runner changed::This PR modifies .github/workflows/merge-gate.yml. For same-repo pull_request events GitHub runs the workflow from the PR head, so no check can protect it — including this one. A human hazard-ack naming this diff is required before landing."
             exit 1
-          fi
-          if grep -q '^NEUTRAL' surface-report.txt 2>/dev/null; then
+          elif grep -q '^NEUTRAL' surface-report.txt 2>/dev/null; then
             echo "::warning title=Gate logic changed::This PR changes factory/gates/**. The verdict came from the trusted main copy, so the change could not judge itself. A human hazard-ack is expected before landing."
+          elif grep -q '^SUCCESS' surface-report.txt 2>/dev/null; then
+            echo "Enforcement surface untouched."
+          else
+            # The trusted copy on main could not produce a classification — for
+            # example while this feature is still landing and main's gate has no
+            # --mode flag. Advisory, but never silently green.
+            echo "::error title=Surface scan unavailable::The trusted gate on main could not classify this PR's enforcement surface. Treat the surface as unknown and review the diff by hand."
+            exit 1
           fi
