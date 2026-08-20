@@ -1,0 +1,5 @@
+Disposable artifact for the live green merge-gate proof (#35).
+
+One harmless file inside the story's declared scope (synthetic/**). It exists
+only so the verification PR has a non-empty, fully in-scope diff. The PR is
+closed unmerged and this branch deleted once the check conclusion is recorded.
