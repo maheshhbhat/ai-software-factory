@@ -4,6 +4,8 @@
 > This document decides label names, issue fields, and legal transitions.
 > All state lives in GitHub (issues + labels + PRs + issue comments). Any cache is derivable and disposable.
 > No component other than GitHub is authoritative. Ref: `architecture-v2.1.md` §1, §4; `implementation-plan-v1.md` Phase 1.
+>
+> **`SCHEMA_VERSION = 2.0.0`** — §1–§8 are the Phase 1 state model, verified and unchanged in substance. §9 freezes the executable contracts Phase 2 implements (§9.1 defines versioning and compatibility).
 
 ---
 
@@ -27,7 +29,7 @@ Issues that are not one of these three types (e.g. build-task or review issues) 
 
 ### 2.1 Lifecycle labels — exactly one per issue
 
-Every `type:project` issue carries exactly one `project:*` label. Every `type:story` issue carries exactly one `story:*` label. The lifecycle label is the issue's state. No issue may carry zero or two lifecycle labels. A transition is applied as one paired unlabel/label edit.
+Every `type:project` issue carries exactly one `project:*` label. Every `type:story` issue carries exactly one `story:*` label. The lifecycle label is the issue's state. No issue may carry zero or two lifecycle labels. A transition is applied as **one complete label-set replacement** — see §9.2, which is binding for every automated actor. (Phase 1 applied transitions by hand as paired unlabel/label edits; that is what produced the transient windows §9.2 now prohibits.)
 
 **Project lifecycle:**
 
@@ -191,7 +193,7 @@ Parsing rules — one canonical form per field, no alternates:
 * **`### Hazard`** — the single checkbox option `Touches hazard path`, rendered `- [ ]` or `- [X]`. Checked → also apply the `hazard` label.
 * **`### Attempt`** — integer, starts `0`. Semantics and the poison threshold are defined in §4.3; nothing else in this document may redefine them.
 * **`### Spend cap`** — amount plus unit (e.g. `$40`, `60 min`, `200k tokens`). Enforced per worker invocation in Phase 4; informational in Phase 1.
-* **`### Scope`** — path globs, one per line, `- ` bullets permitted (free-form textarea). Future merge gate checks the diff is within scope.
+* **`### Scope`** — path globs, one per line. Under `SCHEMA_VERSION 2.0.0` the dialect is machine-readable and bullets are **not** permitted: see §9.6, which is the contract the merge gate consumes. (Phase 1 stories were authored under `1.x`, where a leading `- ` was accepted.)
 * **`### Project`** — `#N` link to the parent project issue.
 
 `Attempt` and `Scope` are updated by editing the issue body in place; history is preserved by the GitHub issue timeline.
@@ -217,7 +219,7 @@ All transitions are effected by editing the single lifecycle label (Phase 1: by 
 | `project:active` | `project:awaiting-acceptance` | human (manual in P1) / sequencer | every story reached `story:merged` | no | human queue |
 | `project:awaiting-acceptance` | `project:accepted` | human | acceptance comment records **pass for every criterion** (§5.3) | **yes** `acceptance` / `decision` | terminal |
 | `project:awaiting-acceptance` | `project:active` | human | acceptance comment records **any criterion failed** (§5.3) | **yes** `acceptance` / `rescue` or `decision` | new story or re-planning spawned; returns to `awaiting-acceptance` when merged |
-| `project:accepted` | — | — | terminal | — | — |
+| `project:accepted` | — | — | terminal — issue **closed as completed** (§9.3) | — | — |
 
 Both former self-loops (`awaiting-ready → awaiting-ready`, `awaiting-acceptance → awaiting-acceptance`) are replaced by real edges above: a label edit that ends on the same label emits no transition and therefore cannot be routed (`architecture-v2.1.md` §4, "route on transitions, not states").
 
@@ -227,8 +229,9 @@ Both former self-loops (`awaiting-ready → awaiting-ready`, `awaiting-acceptanc
 |---|---|---|---|---|
 | `story:blocked` | `story:ready` | human (manual in P1) / sequencer | dependencies satisfied, WIP allows | explicit `depends-on` already declared |
 | `story:ready` | `story:claimed` | human (manual in P1) / dispatcher assigns | worker attempt dispatched | workers never self-claim; **`Attempt` increments here** (§4.3) |
-| `story:claimed` | `story:in-review` | worker (human in P1) | PR opened referencing story | PR identity recorded in story comments |
-| `story:in-review` | `story:merged` | merge gate (human in P1) | PR merged | terminal success |
+| `story:claimed` | `story:in-review` | worker (human in P1) | PR opened referencing story | PR links to the story per §9.5 |
+| `story:claimed` | `story:ready` | dispatcher | **claim lease expired** with no linked PR | **`Attempt` decrements by 1** (restores the pre-dispatch value); see §9.4 |
+| `story:in-review` | `story:merged` | merge gate (human in P1) | PR merged | terminal success; the issue is **closed as completed** (§9.3) |
 | `story:in-review` | `story:ready` | review (manual in P1) / review skill | findings posted | **no `Attempt` change**; attach findings as a comment |
 | `story:ready` | `story:blocked:poison` | dispatcher (human in P1) | `Attempt >= 3` and another attempt would otherwise be dispatched | **raises** the `poison-rescue` bell; no dispatch occurs. No touch is logged here — the touch belongs to the rescue (§4.3.8) |
 | `story:blocked:poison` | `story:ready` | human | rescue per §4.3 | rescue comment + `Attempt` reset required; **yes** — the single `poison-rescue` / `rescue` touch is logged here (§4.3.8) |
@@ -246,7 +249,7 @@ This section is the single definition of attempt and poison behaviour. Where `im
 4. **Infrastructure failures do not count.** If invocation fails before the worker starts, restore the previous `Attempt` value and return the story to `story:ready`. Only an attempt that actually started is counted.
 5. **Threshold.** `ATTEMPT_MAX = 3` for v1. The check runs **at dispatch time, before incrementing**: if `Attempt >= ATTEMPT_MAX`, do not dispatch — transition `story:ready → story:blocked:poison`, which raises the `poison-rescue` bell (no touch yet; §4.3.8). A story therefore gets exactly 3 dispatched attempts and reads `Attempt = 3` when poisoned.
 6. **Rescue.** Only a human may leave `story:blocked:poison`. A rescue requires all three, in this order: (a) a rescue comment on the story stating what changed (spec, scope, or dependencies amended), (b) `Attempt` reset to `0` in the body, (c) a `poison-rescue` touch logged. Then `story:blocked:poison → story:ready`.
-7. **Bounded forward progress.** Rescues per story are capped at **2**, counted as the number of times `story:blocked:poison` has been applied in the issue timeline (GitHub timeline is authoritative history). On the third poisoning the story is **not** rescued: it is closed and returned to planning as a re-planning input. A story therefore consumes at most 9 dispatched worker attempts in its lifetime, and the loop terminates by construction.
+7. **Bounded forward progress.** Rescues per story are capped at **2**, counted as the number of times `story:blocked:poison` has been applied in the issue timeline (GitHub timeline is authoritative history). On the third poisoning the story is **not** rescued: the issue is closed as *not planned* (§9.3) and returned to planning as a re-planning input. A story therefore consumes at most 9 dispatched worker attempts in its lifetime, and the loop terminates by construction.
 8. **One bell, one touch.** Entering `story:blocked:poison` *raises* the bell — it routes the story to the human queue and no human time has been spent yet, so **no touch-log line is written at poisoning**. The single `poison-rescue` / `rescue` line is written exactly once, when the human actually performs or approves the rescue (§4.3.6c), and its `seconds_spent` measures that human's time. A poisoning that is never rescued therefore has no touch, which is correct: the KPI counts human touches, not queue entries.
 
 **Idempotency:** duplicate deliveries keyed on `artifact + state version` no-op; Phase 1 simulates this by not re-applying the same label transition twice.
@@ -331,10 +334,7 @@ Dispatcher (cron + routing table), merge gate (required CI check), hazard CODEOW
 
 Known open items deferred to the Phase 2 readiness pass, recorded so they are not lost: claim-expiry/recovery transition out of `story:claimed`; remaining template/schema field drift beyond §3; hazard fixture location; branch-protection availability for unforgeable gates.
 
-Two requirements the Phase 1 walk surfaced, to be satisfied **before** the dispatcher is implemented (requirements here, not implementations):
-
-* **Lifecycle label changes must be atomic.** A transition must replace the label set in one complete-label-set update, so no observer ever sees an issue carrying zero or two lifecycle labels. Adding the new label and removing the old one as two separate calls breaks the §2.1 invariant transiently — observed during the Phase 1 walk as a ~1s zero-label window on one transition, and as a momentary two-label state when the ordering flips. A poller reading mid-swap would see the issue in no state or two states and could mis-route or skip it.
-* **Terminal story issues need defined open/closed semantics.** `story:merged`, `story:blocked:poison` after the rescue cap, and any other terminal state must state whether the GitHub issue is closed and with what reason. Nothing defines this today, so a `story:merged` issue stays open — which matters because "open stories" is the obvious dispatcher query.
+Both requirements the Phase 1 walk surfaced are now **specified** in §9 rather than pending: atomic lifecycle-label replacement (§9.2) and terminal open/closed semantics (§9.3). The claim-expiry transition is §9.4. Remaining deferrals: template/schema field drift beyond §3, hazard fixture location.
 
 ---
 
@@ -343,3 +343,245 @@ Two requirements the Phase 1 walk surfaced, to be satisfied **before** the dispa
 * Label names are lowercase, colon-separated, no spaces.
 * A cache over GitHub (if any) is derivable and disposable; GitHub remains authoritative.
 * `product.md` and roadmap-commitment issues are the only human-authored artifacts; all other issues are planning-generated (simulated by hand in Phase 1).
+
+---
+
+## 9. Phase 2 execution contracts
+
+Frozen under Phase 2 Increment 1 (#28) so Increment 2 implements policy rather than inventing it. This section is **specification only** — no component described here exists yet.
+
+Nothing in §9 rewrites Phase 1: artifacts created before it (Project #1, stories #10/#11/#12, the five touch-log lines, their timelines) remain valid evidence exactly as recorded, and where a rule below would have applied differently, §9.12 says so explicitly.
+
+### 9.1 Schema version and compatibility
+
+This document is the contract, so the contract carries the version:
+
+```
+SCHEMA_VERSION = 2.0.0
+```
+
+Semantics: **major** changes break a component that has not been updated (a lifecycle label renamed, a field's meaning changed); **minor** adds contract that older components can ignore; **patch** is editorial. Phase 1 was authored under an implicit `1.x`.
+
+Every Phase 2 component pins the major version it implements and, on encountering state written under a different major version, **halts and routes to the human queue** — it must never guess. Fail-closed is the rule wherever §9 is silent.
+
+Version is asserted, not stamped on every issue: issue bodies are rendered forms and carry no room for a marker. The dispatcher records the pinned version in its own run log, and any artifact it writes that has a free-text field carries `schema-version: 2.0.0`.
+
+### 9.2 Atomic lifecycle transitions
+
+A transition **must** replace the issue's entire label set in a single API call:
+
+```
+PATCH /repos/{owner}/{repo}/issues/{number}   {"labels": [<complete final set>]}
+```
+
+The array carries **every** label the issue should end with — lifecycle, `type:*`, `phase:*`, `hazard`, `agent:*` — not just the one changing. Add-then-remove as two calls is prohibited: the Phase 1 walk produced a ~1s window with zero lifecycle labels on one transition, and a momentary two-label state when the call order flipped, either of which a poller can observe and mis-route.
+
+Required behaviour:
+
+* **Precondition check.** Read the current label set, verify the expected `from` state, then write. If the observed state is not the expected `from`, abort and re-derive — another actor moved it.
+* **Idempotent.** Writing a label set identical to the current one is a no-op and must not be treated as a transition.
+* **Reads prefer events.** Routing decisions read the issue timeline's `labeled`/`unlabeled` events, not a label snapshot, so a read that races a write cannot fabricate a state that never settled.
+
+### 9.3 Terminal states and issue closure
+
+| Terminal state | Issue | Reason |
+|---|---|---|
+| `story:merged` | closed | completed |
+| `story:blocked:poison` after the §4.3.7 rescue cap | closed | not planned |
+| `project:accepted` | closed | completed |
+| every other state | open | — |
+
+Closure is part of the transition, written in the same operation wherever the API allows. The dispatcher's work queue is therefore **open issues carrying a `type:story` label**, which makes "is this story still live?" a single cheap query rather than a label scan.
+
+A closed issue is never reopened by a component; only a human reopens, which is itself a decision.
+
+### 9.4 Claim lease and expiry
+
+`story:claimed` is a lease, not a permanent assignment.
+
+* **Lease duration:** `CLAIM_LEASE = 60 minutes`, measured from the `labeled` timeline event that applied `story:claimed`. The timeline is durable and needs no cache.
+* **Invariant:** `CLAIM_LEASE` **must exceed** the maximum wall-clock any worker invocation can consume under its `### Spend cap`. If a spend cap ever allows a longer run, the lease rises with it — otherwise expiry races live workers by construction.
+* **Expiry condition:** the lease has elapsed **and** no pull request links to the story per §9.5.
+* **Recovery:** transition `story:claimed → story:ready` and **decrement `Attempt` by 1**, restoring its pre-dispatch value. A worker that died without producing a PR consumed no attempt — this is §4.3.4 (infrastructure failures do not count) applied to the death case. Without the decrement, expiry silently burns the retry budget and a story can poison on infrastructure alone.
+* **Recovery is a transition** and obeys §9.2, so a second dispatcher pass observing `story:ready` simply finds nothing to expire.
+
+**Duplicate-worker rule.** The claim is the mutex: only `story:ready` is dispatchable, so a claimed story is never dispatched twice. The residual race is a live-but-slow worker whose lease expires and whose story is re-dispatched. Both workers must therefore treat the story state as authoritative at the moment they act: a worker **must** re-read the story before opening its PR and **must abort without opening one** if the story is no longer `story:claimed`, or if it is claimed under a later lease than the one it was dispatched with. The late worker's branch is abandoned; nothing merges.
+
+### 9.5 PR ↔ Story linkage
+
+A pull request produced by the factory **must** carry, in its body, exactly one line:
+
+```
+Story: #<number>
+```
+
+Validation, all fail-closed:
+
+* absent, or more than one such line → invalid; the PR is not gate-eligible
+* the referenced issue does not carry `type:story` → invalid
+* the referenced story is not in `story:claimed`, or its `### Project` does not match → invalid
+
+The body line is canonical. Branch names are conventional only (`story/<number>-<slug>` is suggested) and are never parsed for authority. GitHub's own "closes #N" linkage is not used for this purpose: it mutates issue state on merge, which would bypass §9.2.
+
+### 9.6 Scope dialect
+
+`### Scope` becomes machine-readable. From `SCHEMA_VERSION 2.0.0` a story's Scope section is **one pattern per line, no bullets, no blank lines, no commentary**:
+
+```
+src/reports/**
+tests/reports/**
+```
+
+Matching rules, evaluated against repository-relative POSIX paths:
+
+* `*` matches any characters **except** `/`
+* `**` matches any number of path segments, including none
+* `?` matches a single character except `/`
+* everything else is literal; patterns are case-sensitive; no negation, no braces, no character classes in `2.0.0`
+* a pattern with no wildcard matches exactly that one path
+
+A diff satisfies scope when **every** changed path matches **at least one** pattern. Renames are two paths and both must match. An empty Scope section matches nothing, so an empty-scope story can never pass the gate — this is deliberate.
+
+*Phase 1 compatibility:* stories #10–#12 wrote `- synthetic/**` with a bullet, valid under `1.x` and left untouched. A `2.0.0` consumer encountering a leading `- ` must reject the story as malformed rather than silently stripping it, per fail-closed.
+
+### 9.7 Agent-ID — attribution, not authentication
+
+Every factory-produced artifact carries a stable logical agent identity.
+
+**Format.** `Agent-ID: <id>` where `<id>` matches `^[a-z0-9][a-z0-9-]{2,31}$`. Stable per logical role, not per invocation — the same worker role keeps its id across runs. The delivery worker's id is `claude-delivery`.
+
+**Where it must appear:**
+
+| Artifact | Placement |
+|---|---|
+| commit | an `Agent-ID: <id>` trailer in the message's **trailer block** — the final paragraph, with no blank line separating it from the other trailers, so `git log --format='%(trailers)'` parses it. A blank line above it makes it ordinary body text and it will not be read. |
+| pull request | an `Agent-ID: <id>` line in the body, beside the `Story:` line |
+| touch-log line | the `actor` field, when the actor is an agent rather than a human handle |
+| issue/PR routing (optional) | an `agent:<id>` label, for reporting and queue filtering |
+
+**Validation.** Malformed or missing where required → the artifact is flagged and routed to the human queue. Multiple conflicting `Agent-ID` values in one artifact → invalid.
+
+**Its limits, stated plainly.** The factory operates today under a **single GitHub credential** shared by the human and every agent (CTO decision, #27). Therefore:
+
+* `Agent-ID` is **attribution, not authentication.** Anything holding the credential can write any value.
+* `agent:*` labels, bell comments, and every other repository artifact are likewise **forgeable** by that credential — including artifacts that claim to record a human decision.
+* Repository data **cannot** distinguish "the CTO decided this" from "an agent wrote text saying the CTO decided this." No component may claim otherwise, and no security control may rest on that distinction.
+
+What `Agent-ID` does buy: legible audit reconstruction, per-agent metrics, and queue routing — real value for reporting and debugging, and **zero** resistance to a dishonest or malfunctioning holder of the credential. §9.8 and §9.14 are written to need no stronger assumption than this.
+
+### 9.8 Human authorization artifact
+
+A human decision is durable only as **an issue authored by the CTO account** or **a lifecycle label set by a collaborator** (§9.9). Both are recorded per §5; the touch log measures them per §6.
+
+**Recognition rule.** A component treats as authorization only:
+
+1. the **body of an issue** whose author is the CTO account — not a comment, since comments are where an agent naturally writes; and
+2. **collaborator-set structured state** — a lifecycle label, per §9.9.
+
+**Limitation, restated because it matters here most.** Under one shared credential this is a *convention*, not an enforcement: an agent holding the credential could file an issue as the CTO. It is chosen because it is the narrowest channel that an agent has no routine reason to use, which makes a violation conspicuous in the timeline rather than impossible. **Do not describe it as a security boundary.** The boundary that does hold — the one no repository artifact can forge — is §9.14.
+
+**Routine work needs no human.** Authorization for ordinary delivery is *already* carried by the story's lifecycle label. A human is required at the bells named in §5 and §6, and nowhere else. Waking a worker is not a bell.
+
+### 9.9 Public-repository trust boundary
+
+The repository is public, so **anyone can open issues and post comments.** This is now an input-validation problem, not a governance detail.
+
+| Input | Trust | May it authorize execution? |
+|---|---|---|
+| Lifecycle label set by a collaborator | trusted | **yes** — this is the only authorizing channel |
+| Issue body, author = CTO account | trusted per §9.8 | yes, for decisions |
+| Issue/PR free text from a non-collaborator | **untrusted** | **never** |
+| Issue creation as an event | **untrusted** | **never** |
+| Comment text, any author | untrusted for routing | never |
+
+Rules:
+
+* Dispatch keys on **state a collaborator can set**, never on issue creation and never on parsed free text.
+* Before treating any issue as factory state, verify its `author_association` is `OWNER` or `COLLABORATOR`; otherwise ignore it for routing (a human may still triage it).
+* Untrusted text may be *read* — for context, for a human's queue — but must never select a code path, name a file, or supply a parameter.
+
+### 9.10 WIP limit and claim selection
+
+```
+WIP_LIMIT = 2      concurrent stories in story:claimed, repository-wide
+```
+
+Chosen to match `architecture-v2.1.md` §8's "2–3 concurrent workers" at customer-zero scale; raising it is a contract change, not a runtime tweak.
+
+**Selection, fully deterministic.** Eligible stories are those that are open, `type:story`, `story:ready`, and whose every `### Depends-on` reference is `story:merged`. Order them by:
+
+1. parent project issue number, ascending;
+2. then story issue number, ascending.
+
+Dispatch from the head of that order until `WIP_LIMIT` claimed stories exist. The ordering is total — issue numbers are unique — so there are no ties and no randomness.
+
+**Idempotency.** A dispatch is keyed on `(story issue number, id of the timeline event that produced story:ready)`. A duplicate delivery of the same event re-derives the same decision and finds the story already `story:claimed`, so it no-ops. The state write is the duplicate suppressor; any cursor or cache is an optimisation whose loss costs latency, never correctness (`architecture-v2.1.md` §4).
+
+### 9.11 Live routes in Phase 2
+
+Executable from Increment 2 onward:
+
+| Transition | Action |
+|---|---|
+| `story:ready` → `story:claimed` | dispatch a worker, increment `Attempt` (§4.3.2) |
+| `story:ready` → `story:blocked:poison` | at the §4.3.5 threshold: do not dispatch, notify |
+| `story:claimed` → `story:ready` | claim expiry (§9.4) |
+| `project:awaiting-ready`, `project:awaiting-acceptance`, `story:blocked:poison`, `story:blocked:scope` | notify the human queue; take no other action |
+
+**Documentation-only** until their phase arrives: `project:ready-for-planning → project:planning` (planning agent, Phase 3); PR-open → review (review skill, Phase 4); `story:in-review → story:merged` (merge gate, Increment 2+, gated on §9.13).
+
+**No silent drops.** A transition with no live route is logged and surfaced, never discarded — an unrouted transition is a contract gap, and silence would hide it.
+
+### 9.12 Discovery implies dispatch
+
+Discovery of authorized executable work **starts that work**. No human types a command to wake a worker.
+
+* The dispatcher polls (60s cron), finds transitions, and acts on the live routes in §9.11 without further authorization.
+* Authorization is **intrinsic to the artifact**: a story carrying `story:ready`, set by a collaborator, *is* the authorization. Nothing else — not issue creation, not a comment, not free text — grants it (§9.9).
+* Human involvement remains at the §5/§6 bells. Those pause the affected artifact only; the dispatcher keeps servicing everything not behind them.
+
+A human action that merely conveys "begin" is a **relay touch** — the class `architecture-v2.1.md` §7 requires to trend to zero. This clause exists to delete it.
+
+### 9.13 Merge-gate migration contract
+
+`main` must never be without either the current approval rule or a proven required check. The ordering is mandatory:
+
+1. **Now.** `main-protection` keeps `required_approving_review_count: 1`, `bypass_actors: []`. Verified blocking in #24.
+2. **Increment 2.** Build the deterministic gate as an **ordinary, non-required** CI check. Prove it red on each violation class independently and green on a compliant PR. `main-protection` is untouched throughout.
+3. **Separately authorized task, one atomic ruleset edit.** Add the proven check as **required** *and* set `required_approving_review_count: 0` in the same operation.
+4. Never step 3 before step 2 is proven, never as two edits, and never by adding `bypass_actors` — bypass would hand the exemption to the same credential the agent holds, making the gate decorative for exactly the actor it constrains.
+
+**Why step 3 is needed at all.** With one identity, an agent PR is authored by the only account with write access, and GitHub refuses an approving review from a PR's own author. Agent PRs are therefore not merely unreviewed — they are **unmergeable** — until the approval requirement is replaced by the deterministic check (#27). Until step 3, a human lands factory PRs manually; that is an accepted interim cost, not the target state.
+
+### 9.14 Gate trust inputs
+
+Under a shared credential the gate must derive its verdict **only** from inputs the agent's token cannot fabricate.
+
+**Permitted:**
+
+* the **diff itself** — changed paths, additions and deletions
+* the **`### Scope` contract** of the linked story (§9.5, §9.6), read from the story issue
+* **check outputs produced by CI**, not by an actor — test results computed in the workflow run
+* the **workflow boundary** — that the agent's credential cannot modify `.github/workflows/**`, so the gate's own definition is outside the agent's reach
+* **repository configuration** — ruleset state, CODEOWNERS
+
+**Prohibited as trust anchors** (all forgeable by the credential):
+
+* `Agent-ID` values, `agent:*` labels, any label the agent can set
+* comments claiming review, approval, or human authorization
+* assertions in the PR body about what was done or verified
+
+`Agent-ID` and labels may be used for **routing and reporting** inside the gate — deciding what to check — but never as the evidence that a check passed.
+
+*Consequence, recorded as a correction:* the Phase 2 readiness review (#20) proposed a review-approval artifact bound to the head SHA as the gate's trust anchor. Under the single-identity decision that artifact is forgeable, so it is **withdrawn**. The gate rests on diff, scope, CI-computed results, and the workflow boundary instead — a simplification the identity decision makes available.
+
+### 9.15 Replay acceptance test
+
+Before the dispatcher is permitted to write anything, it must pass a replay of Phase 1's recorded history:
+
+* **Input:** the `labeled`/`unlabeled` timeline events of issues #1, #10, #11, and #12 — durable, already in GitHub, and the product of a walk verified under #19.
+* **Requirement:** every transition routes **exactly once** — no duplicates, no drops. Transitions whose routes are documentation-only (§9.11) must be surfaced as unrouted, not silently ignored.
+* **Restart safety:** replay from an empty cursor must produce the identical routing decisions, proving no authoritative state lives outside GitHub.
+* **Read-only:** the replay asserts decisions the dispatcher *would* make; it must not write to any issue.
+
+The events include the retry sequence, the poison threshold, the rescue, and the scope detour, so the replay exercises the exception paths and not merely the happy one.
