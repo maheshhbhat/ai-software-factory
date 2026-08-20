@@ -3,8 +3,9 @@
 This document is the build spec for an AI software delivery factory. It is written
 to be handed to Claude Code in a fresh repository. Build it in the phase order
 below; each phase ends with a runnable verification. The architecture reference is
-`ai_team_delivery_architecture_v2_1_proposal.md` (include it in the repo); where
-this plan is silent, that document decides.
+`factory/spec/architecture-v2.1.md`; where this plan is silent, that document
+decides — except where `factory/spec/state-schema.md` states a canonical rule,
+which overrides both (see §4.3, §9).
 
 ## Core design rules (bind every component)
 
@@ -24,7 +25,10 @@ this plan is silent, that document decides.
    duplicate deliveries must no-op. Route on transitions, not states. Workers
    never self-claim — the dispatcher assigns.
 6. **Humans appear only at bells.** Bell types: plan approval (READY), hazard ack,
-   poison rescue, cutover approval, acceptance, sampling. Everything else runs
+   poison rescue, scope decision, cutover approval, acceptance, sampling.
+   (`scope-decision` was added during Phase 1: `state-schema.md` §4.2 requires a
+   bell for the `story:blocked:scope` decision that the original six could not
+   express.) Everything else runs
    silent. Every bell is logged to the touch log with a classification.
 
 ## Repository layout
@@ -78,16 +82,32 @@ Deliverables:
   search), diffs against last-seen state versions, applies routing table:
   `ready-for-planning → invoke planning`, `story:ready → assign + invoke
   worker`, `PR opened → invoke review`, `awaiting-* → notify human`.
-  Idempotent per artifact + state version. Attempt counter increments on
-  dispatch; at 3, transition to `blocked:poison` and notify instead.
-  Infrastructure failures (invocation errors) do not increment the counter.
+  Idempotent per artifact + state version — both terms defined in
+  `state-schema.md` §9.10 and §9.1. Attempt counter increments on dispatch; the
+  threshold check runs **before** the increment, so poison fires when a fourth
+  dispatch would occur and `Attempt` reads 3. `state-schema.md` §4.3 is the
+  canonical rule and overrides any other wording, here or in the architecture.
+  Infrastructure failures (invocation errors) do not increment the counter, and
+  a lease expiry restores the pre-dispatch value (§9.4).
 - Bell notifications: a simple channel (email/Slack webhook) carrying the
   artifact link and required action.
 
 Verification (still no AI): a fake "worker" script that opens a trivial PR when
-invoked. Confirm: dispatch happens once and only once per transition; merge gate
-blocks without review-approval label; hazard file edit blocks without ack;
-3 failed attempts produce poison + notification.
+invoked. Confirm: dispatch happens once and only once per transition (proven by
+the §9.15 replay of Phase 1's recorded events); the merge gate blocks on each
+violation class independently; a hazard-path edit blocks without ack; and three
+*dispatched* attempts followed by a fourth dispatch attempt produce poison at
+`Attempt = 3` plus notification — per `state-schema.md` §4.3.5 the check precedes
+the increment, so asserting "3 failures then poison" without that distinction
+would pass against a wrong implementation.
+
+Trust and sequencing constraints, frozen in Increment 1 (#28): the gate derives
+its verdict only from inputs the agent's credential cannot fabricate — diff,
+story `### Scope`, CI-computed check output, and the workflow boundary — never
+from labels, `Agent-ID`, or comments (`state-schema.md` §9.14). `main-protection`
+is left untouched while the gate is built and proven as a non-required check;
+making it required, and dropping required approvals to zero, is a single atomic
+ruleset edit under separate authorization (§9.13).
 
 ## Phase 3 — Planning agent
 
