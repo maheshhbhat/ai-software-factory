@@ -202,3 +202,53 @@ class TestNoLocalAuthority(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestWorkerContractRouting(unittest.TestCase):
+    """#84 — the poller routes through the contract when workers are declared,
+    and keeps the legacy path when they are not."""
+
+    def setUp(self):
+        self._env = dict(os.environ)
+        for key in list(os.environ):
+            if key.startswith("FACTORY_WORKER"):
+                del os.environ[key]
+        self._continuation = mock.patch.object(poller, "run_continuation", return_value=[])
+        self._continuation.start()
+
+    def tearDown(self):
+        self._continuation.stop()
+        os.environ.clear()
+        os.environ.update(self._env)
+
+    def test_declared_workers_route_through_the_contract(self):
+        os.environ["FACTORY_WORKER_ORDER"] = "claude-delivery"
+        os.environ["FACTORY_WORKER_CLAUDE_DELIVERY_LAUNCH"] = "/usr/bin/true"
+        seen: set[int] = set()
+        with mock.patch.object(poller, "run_dispatcher", return_value=REPORT):
+            woken = poller.poll_once("o/r", 54, seen)
+        self.assertEqual([d["story"] for d in woken], [64])
+
+    def test_contract_failure_surfaces_as_a_launch_failure(self):
+        """A Story claimed with no worker started must be loud, not silent."""
+        os.environ["FACTORY_WORKER_ORDER"] = "claude-delivery"
+        os.environ["FACTORY_WORKER_CLAUDE_DELIVERY_LAUNCH"] = "/usr/bin/false"
+        with mock.patch.object(poller, "run_dispatcher", return_value=REPORT):
+            with self.assertRaises(poller.WorkerLaunchFailed):
+                poller.poll_once("o/r", 54, set())
+
+    def test_no_declared_workers_keeps_the_legacy_path(self):
+        os.environ["FACTORY_WORKER_CMD"] = "/usr/bin/true"
+        seen: set[int] = set()
+        with mock.patch.object(poller, "run_dispatcher", return_value=REPORT):
+            woken = poller.poll_once("o/r", 54, seen)
+        self.assertEqual([d["story"] for d in woken], [64])
+
+    def test_failover_reaches_the_secondary_worker(self):
+        os.environ["FACTORY_WORKER_ORDER"] = "claude-delivery,codex-delivery"
+        os.environ["FACTORY_WORKER_CLAUDE_DELIVERY_LAUNCH"] = "/usr/bin/false"
+        os.environ["FACTORY_WORKER_CODEX_DELIVERY_LAUNCH"] = "/usr/bin/true"
+        seen: set[int] = set()
+        with mock.patch.object(poller, "run_dispatcher", return_value=REPORT):
+            woken = poller.poll_once("o/r", 54, seen)
+        self.assertEqual([d["story"] for d in woken], [64])
