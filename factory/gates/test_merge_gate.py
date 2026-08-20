@@ -120,17 +120,35 @@ class TestSchemaVersion(unittest.TestCase):
         self.assertEqual(mg.parse_schema_version("Schema-Version: 3.1.4"), 3)
 
 
-class TestSelfProtection(unittest.TestCase):
-    """§9.14 workflow boundary."""
+class TestSurfaceClassification(unittest.TestCase):
+    """#39: the enforcement surface splits into a protectable half and a
+    non-protectable half, and neither blocks the merge-gate verdict."""
 
-    def test_detects_gate_and_workflow_edits(self):
-        for path in (".github/workflows/merge-gate.yml",
-                     "factory/gates/merge_gate.py",
-                     "factory/gates/nested/thing.py"):
-            self.assertEqual(mg.self_modifying_paths([path]), [path], path)
+    def test_ordinary_paths_are_clean(self):
+        verdict, runner, logic = mg.classify_surface(["src/a.py", "README.md"])
+        self.assertEqual((verdict, runner, logic), ("clean", [], []))
 
-    def test_ignores_unrelated_paths(self):
-        self.assertEqual(mg.self_modifying_paths(["src/a.py", "README.md"]), [])
+    def test_gate_logic_is_advisory(self):
+        for path in ("factory/gates/merge_gate.py", "factory/gates/nested/thing.py"):
+            verdict, runner, logic = mg.classify_surface([path])
+            self.assertEqual(verdict, "logic", path)
+            self.assertEqual(logic, [path])
+            self.assertEqual(runner, [])
+
+    def test_runner_change_is_loud(self):
+        verdict, runner, _ = mg.classify_surface([".github/workflows/merge-gate.yml"])
+        self.assertEqual(verdict, "runner")
+        self.assertEqual(runner, [".github/workflows/merge-gate.yml"])
+
+    def test_runner_outranks_logic(self):
+        verdict, runner, logic = mg.classify_surface(
+            ["factory/gates/merge_gate.py", ".github/workflows/merge-gate.yml"])
+        self.assertEqual(verdict, "runner")
+        self.assertEqual(logic, ["factory/gates/merge_gate.py"])
+
+    def test_other_workflows_are_not_the_runner(self):
+        verdict, _, _ = mg.classify_surface([".github/workflows/other.yml"])
+        self.assertEqual(verdict, "clean")
 
 
 class TestVerdict(unittest.TestCase):
@@ -177,9 +195,21 @@ class TestVerdict(unittest.TestCase):
         body = "Schema-Version: 3.0.0\n\nStory: #42\n"
         self.assertIn(V.SCHEMA_INCOMPATIBLE, self.evaluate(pr_body=body).codes())
 
-    def test_self_modification_fails(self):
-        verdict = self.evaluate(changed_paths=["factory/gates/merge_gate.py"])
-        self.assertIn(V.SELF_MODIFICATION, verdict.codes())
+    def test_gate_logic_change_no_longer_blocks(self):
+        """#39: the trusted main copy computes the verdict, so a gate-logic PR
+        that is otherwise compliant must PASS. This is the deadlock removal."""
+        story_covering_gate = story(scope_body("factory/gates/**"))
+        verdict = self.evaluate(changed_paths=["factory/gates/merge_gate.py"],
+                                story=story_covering_gate)
+        self.assertTrue(verdict.passed, verdict.codes())
+
+    def test_runner_change_no_longer_blocks_the_verdict(self):
+        """Reported loudly by merge-gate-surface, but never as a merge-gate
+        failure — blocking it would freeze the gate once the check is required."""
+        story_covering_runner = story(scope_body(".github/workflows/**"))
+        verdict = self.evaluate(changed_paths=[".github/workflows/merge-gate.yml"],
+                                story=story_covering_runner)
+        self.assertTrue(verdict.passed, verdict.codes())
 
     def test_failing_tests_fail(self):
         self.assertIn(V.TESTS_FAILED, self.evaluate(tests_passed=False).codes())
@@ -193,9 +223,9 @@ class TestVerdict(unittest.TestCase):
 
     def test_violations_are_independent(self):
         """A red result names every cause, so one failure cannot mask another."""
-        verdict = self.evaluate(changed_paths=["factory/gates/merge_gate.py"],
+        verdict = self.evaluate(changed_paths=["src/a.py", "elsewhere/b.py"],
                                 tests_passed=False)
-        self.assertIn(V.SELF_MODIFICATION, verdict.codes())
+        self.assertIn(V.OUT_OF_SCOPE, verdict.codes())
         self.assertIn(V.TESTS_FAILED, verdict.codes())
 
     def test_rename_both_paths_must_match(self):
@@ -221,6 +251,23 @@ class TestTrustBoundary(unittest.TestCase):
         verdict = mg.evaluate(boastful, ["evil/backdoor.py"],
                               story(scope_body("src/**")), True)
         self.assertIn(V.OUT_OF_SCOPE, verdict.codes())
+
+
+class TestFailClosed(unittest.TestCase):
+    """A gate that cannot evaluate must fail readably, never pass."""
+
+    def test_missing_fixture_is_a_clean_failure(self):
+        import contextlib
+        import io as _io
+
+        buffer = _io.StringIO()
+        with contextlib.redirect_stdout(buffer):
+            code = mg.guarded_main(["--fixture", "/nonexistent/fixture.json"])
+        output = buffer.getvalue()
+        self.assertEqual(code, 1)
+        self.assertIn(V.INTERNAL_ERROR, output)
+        self.assertIn("fails closed", output)
+        self.assertNotIn("PASS", output)
 
 
 if __name__ == "__main__":

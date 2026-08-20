@@ -5,6 +5,22 @@ Evaluates a pull request against the frozen contracts in
 `factory/spec/state-schema.md` §9. Fails closed: any input the gate cannot
 obtain or cannot parse is a violation, never a pass.
 
+Trusted-main rule (§9.14, as corrected by #39). The verdict is computed by the
+copy of this file already on `main`, never by the copy inside the pull request
+being judged. A PR therefore cannot weaken the rules it is evaluated against;
+a proposed change takes effect only after it lands. That makes "the gate never
+vouches for a modified copy of itself" a structural property rather than a rule
+the gate applies to itself — which is why `factory/gates/**` changes no longer
+have to be refused outright.
+
+The one thing this cannot protect is the workflow *runner*
+(`.github/workflows/merge-gate.yml`): for same-repo `pull_request` events GitHub
+executes the workflow file from the PR head, so a PR that rewrites the runner
+runs its own rewrite. No check can protect the file that defines the check. That
+path is covered by human review and audit only — a convention under the shared
+credential, not an enforcement (§9.7). `--mode surface` reports it loudly so a
+missing acknowledgement is detectable after the fact.
+
 Trust boundary (§9.14). The gate reads only inputs the agent's credential
 cannot fabricate:
 
@@ -38,13 +54,16 @@ from dataclasses import dataclass, field
 # The schema major this gate implements. §9.1: pin a major, halt on anything else.
 SUPPORTED_SCHEMA_MAJOR = 2
 
-# §9.14: the gate's own enforcement surface. A PR touching these cannot be
-# judged by the copy of the gate it is modifying, so it fails closed and goes
-# to a human.
-SELF_PROTECTED_PATTERNS = (
-    ".github/workflows/merge-gate.yml",
-    "factory/gates/**",
-)
+# The enforcement surface, split by whether CI can protect it (#39).
+#
+# Gate logic is protected by construction: the trusted `main` copy computes the
+# verdict, so a change here cannot influence its own evaluation. Advisory only.
+GATE_LOGIC_PATTERNS = ("factory/gates/**",)
+
+# The runner defines the check, so no check can protect it. Reported as a loud
+# advisory failure on `merge-gate-surface`; never a blocking `merge-gate` verdict,
+# because blocking it would make the gate unmodifiable once required.
+GATE_RUNNER_PATTERNS = (".github/workflows/merge-gate.yml",)
 
 STORY_LINK_RE = re.compile(r"^Story:\s*#(\d+)\s*$", re.MULTILINE)
 SCHEMA_LINE_RE = re.compile(r"^Schema-Version:\s*(\d+)\.(\d+)\.(\d+)\s*$", re.MULTILINE)
@@ -65,10 +84,10 @@ class Violation:
     SCOPE_MALFORMED = "SCOPE_MALFORMED"
     SCOPE_EMPTY = "SCOPE_EMPTY"
     OUT_OF_SCOPE = "OUT_OF_SCOPE"
-    SELF_MODIFICATION = "SELF_MODIFICATION"
     TESTS_FAILED = "TESTS_FAILED"
     NO_CHANGES = "NO_CHANGES"
     INPUT_UNAVAILABLE = "INPUT_UNAVAILABLE"
+    INTERNAL_ERROR = "INTERNAL_ERROR"
 
 
 @dataclass
@@ -202,9 +221,29 @@ def paths_out_of_scope(paths: list[str], patterns: list[str]) -> list[str]:
     return [p for p in paths if not any(match_path(pat, p) for pat in patterns)]
 
 
-def self_modifying_paths(paths: list[str]) -> list[str]:
-    """§9.14: paths inside the gate's own enforcement surface."""
-    return [p for p in paths if any(match_path(pat, p) for pat in SELF_PROTECTED_PATTERNS)]
+def _matching(paths: list[str], patterns) -> list[str]:
+    return sorted(p for p in paths if any(match_path(pat, p) for pat in patterns))
+
+
+def classify_surface(paths: list[str]) -> tuple[str, list[str], list[str]]:
+    """Classify a diff against the enforcement surface (#39).
+
+    Returns (verdict, runner_paths, logic_paths) where verdict is one of:
+
+      "clean"   nothing in the enforcement surface — ordinary PR
+      "logic"   touches gate logic; advisory, since the trusted main copy judges it
+      "runner"  touches the workflow runner; loud, since nothing mechanical can
+                protect it and only a human acknowledgement stands behind it
+
+    `runner` outranks `logic`: a PR touching both is reported as `runner`.
+    """
+    runner = _matching(paths, GATE_RUNNER_PATTERNS)
+    logic = _matching(paths, GATE_LOGIC_PATTERNS)
+    if runner:
+        return "runner", runner, logic
+    if logic:
+        return "logic", runner, logic
+    return "clean", [], []
 
 
 # --------------------------------------------------------------------------
@@ -228,16 +267,6 @@ def evaluate(pr_body: str, changed_paths: list[str], story: dict | None,
 
     if not changed_paths:
         verdict.fail(Violation.NO_CHANGES, "PR has no changed files; nothing to evaluate.")
-
-    offenders = self_modifying_paths(changed_paths)
-    if offenders:
-        verdict.fail(
-            Violation.SELF_MODIFICATION,
-            "PR modifies the gate's own enforcement surface: "
-            + ", ".join(sorted(offenders))
-            + ". §9.14 makes the workflow boundary a trust input, so the gate "
-              "cannot judge a change to itself. Requires human review.",
-        )
 
     if not tests_passed:
         verdict.fail(Violation.TESTS_FAILED, "CI-computed test result was not green.")
@@ -360,6 +389,45 @@ def fetch_story(repo: str, number: int, token: str) -> tuple[dict | None, str | 
 # --------------------------------------------------------------------------
 
 
+def render_surface(verdict: str, runner: list[str], logic: list[str], context: str) -> str:
+    """Human-facing report for `merge-gate-surface`. Advisory in every case —
+    this check must never block, or the gate becomes unmodifiable once required
+    (#39)."""
+    lines = [f"Merge gate — enforcement surface — {context}", ""]
+    if verdict == "clean":
+        lines.append("SUCCESS — this PR does not touch the gate's enforcement surface.")
+    elif verdict == "logic":
+        lines.append("NEUTRAL — this PR changes gate logic:")
+        lines.append("")
+        lines.extend(f"  {p}" for p in logic)
+        lines += [
+            "",
+            "This is allowed and is not a blocking failure. The `merge-gate` verdict",
+            "was computed by the trusted copy on `main`, so the proposed change could",
+            "not influence its own evaluation. A human `hazard-ack` is expected before",
+            "landing (§5.4); its absence is the detectable signal, not its presence.",
+        ]
+    else:
+        lines.append("FAILURE — this PR changes the workflow runner:")
+        lines.append("")
+        lines.extend(f"  {p}" for p in runner)
+        if logic:
+            lines.append("")
+            lines.append("It also changes gate logic:")
+            lines.extend(f"  {p}" for p in logic)
+        lines += [
+            "",
+            "For same-repo `pull_request` events GitHub executes the workflow file",
+            "from the PR head, so this change runs its own rewrite and NO check can",
+            "protect it — including this one. Human review is the only control here,",
+            "and under the shared credential that is a convention, not an enforcement",
+            "(§9.7, #39). A `hazard-ack` naming this diff is required before landing.",
+        ]
+    lines.append("")
+    lines.append("Advisory only — this check is not required and must not be made required.")
+    return "\n".join(lines)
+
+
 def render(verdict: Verdict, context: str) -> str:
     lines = [f"Merge gate — {context}", ""]
     if verdict.passed:
@@ -372,8 +440,9 @@ def render(verdict: Verdict, context: str) -> str:
     lines.append("")
     lines.append(
         "Inputs used: diff paths, linked story `### Scope`, CI-computed test "
-        "result, workflow boundary. Labels, Agent-ID, comments, and PR author "
-        "are deliberately not consulted (§9.14)."
+        "result. Labels, Agent-ID, comments, and PR author are deliberately not "
+        "consulted (§9.14). This verdict is computed by the trusted copy of the "
+        "gate on `main`, never by the copy under review (#39)."
     )
     return "\n".join(lines)
 
@@ -385,14 +454,22 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--tests-passed", choices=("true", "false"),
                         help="CI-computed test result for this run")
     parser.add_argument("--fixture", help="JSON fixture for offline evaluation")
+    parser.add_argument("--mode", choices=("verdict", "surface"), default="verdict",
+                        help="verdict: the merge-gate contract check (default). "
+                             "surface: the advisory merge-gate-surface classification.")
     args = parser.parse_args(argv)
 
     if args.fixture:
         with open(args.fixture, encoding="utf-8") as handle:
             data = json.load(handle)
+        paths = data.get("changed_paths", [])
+        if args.mode == "surface":
+            surface, runner, logic = classify_surface(paths)
+            print(render_surface(surface, runner, logic, f"fixture {args.fixture}"))
+            return 1 if surface == "runner" else 0
         verdict = evaluate(
             pr_body=data.get("pr_body", ""),
-            changed_paths=data.get("changed_paths", []),
+            changed_paths=paths,
             story=data.get("story"),
             tests_passed=bool(data.get("tests_passed", True)),
             story_fetch_error=data.get("story_fetch_error"),
@@ -400,8 +477,10 @@ def main(argv: list[str]) -> int:
         print(render(verdict, f"fixture {args.fixture}"))
         return 0 if verdict.passed else 1
 
-    if not (args.pr and args.repo and args.tests_passed):
-        parser.error("--pr, --repo and --tests-passed are required without --fixture")
+    if not (args.pr and args.repo):
+        parser.error("--pr and --repo are required without --fixture")
+    if args.mode == "verdict" and not args.tests_passed:
+        parser.error("--tests-passed is required in verdict mode")
 
     token = os.environ.get("GITHUB_TOKEN", "")
     if not token:
@@ -414,6 +493,11 @@ def main(argv: list[str]) -> int:
     except (urllib.error.URLError, OSError, ValueError) as exc:
         print(f"Merge gate — FAIL\n\n  [INPUT_UNAVAILABLE] could not read PR: {exc}")
         return 1
+
+    if args.mode == "surface":
+        surface, runner, logic = classify_surface(changed_paths)
+        print(render_surface(surface, runner, logic, f"{args.repo}#{args.pr}"))
+        return 1 if surface == "runner" else 0
 
     story = None
     story_error = None
@@ -432,5 +516,28 @@ def main(argv: list[str]) -> int:
     return 0 if verdict.passed else 1
 
 
+def guarded_main(argv: list[str]) -> int:
+    """Never let an internal error look like a pass, and never let it surface as
+    an opaque crash. A gate that cannot evaluate must say so readably and fail."""
+    try:
+        return main(argv)
+    except SystemExit:
+        raise
+    except BaseException as exc:  # noqa: BLE001 - deliberately total
+        import traceback
+
+        print("Merge gate — FAIL", file=sys.stdout)
+        print("", file=sys.stdout)
+        print(f"  [{Violation.INTERNAL_ERROR}] the gate raised "
+              f"{type(exc).__name__}: {exc}", file=sys.stdout)
+        print("", file=sys.stdout)
+        print("  The gate could not complete an evaluation, so it fails closed. "
+              "It never passes on an error.", file=sys.stdout)
+        print("", file=sys.stdout)
+        print("--- traceback (for the fix, not for the verdict) ---", file=sys.stdout)
+        traceback.print_exc(file=sys.stdout)
+        return 1
+
+
 if __name__ == "__main__":
-    raise SystemExit(main(sys.argv[1:]))
+    raise SystemExit(guarded_main(sys.argv[1:]))
