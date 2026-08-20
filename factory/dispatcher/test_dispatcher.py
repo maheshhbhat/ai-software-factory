@@ -11,6 +11,8 @@ plausible-looking story with a broken chain, cause the factory to run code".
 from __future__ import annotations
 
 import unittest
+from datetime import datetime, timedelta, timezone
+from unittest.mock import patch
 
 import dispatcher as dp
 from dispatcher import Reason as R
@@ -227,6 +229,124 @@ class TestSelection(unittest.TestCase):
         plan = dp.plan_dispatch(after, {901: project()}, COMMITMENT)
         self.assertEqual(plan.selected, [])
         self.assertEqual(plan.decisions[0].reason, R.NOT_READY)
+
+
+class TestClaimRecovery(unittest.TestCase):
+    NOW = datetime(2026, 8, 20, 18, 0, tzinfo=timezone.utc)
+
+    def claimed(self, number=10, attempt="1"):
+        return story(number, lifecycle="story:claimed", attempt=attempt)
+
+    def event(self, age_minutes, event_id=1):
+        return {"id": event_id, "event": "labeled", "label": {"name": "story:claimed"},
+                "created_at": (self.NOW - timedelta(minutes=age_minutes)).isoformat()}
+
+    def decide(self, *, claim=None, timeline=None, prs=None):
+        return dp.recovery_decision(
+            claim or self.claimed(), timeline or [], prs or [], self.NOW)
+
+    def test_fresh_valid_claim_is_not_recovered(self):
+        decision = self.decide(timeline=[self.event(59)])
+        self.assertEqual((decision.action, decision.reason), ("none", "CLAIM_FRESH"))
+
+    def test_expired_claim_returns_ready_and_preserves_attempt_semantics(self):
+        decision = self.decide(timeline=[self.event(61)])
+        self.assertEqual((decision.action, decision.reason),
+                         ("ready", "CLAIM_LEASE_EXPIRED"))
+        self.assertIn("Attempt 1 -> 0", decision.detail)
+
+    def test_merged_delivery_reconciles_claim_to_merged(self):
+        pr = {"number": 77, "body": "Story: #10\nAgent-ID: claude-delivery\n",
+              "state": "closed", "merged_at": "2026-08-20T17:00:00Z"}
+        decision = self.decide(timeline=[self.event(500)], prs=[pr])
+        self.assertEqual((decision.action, decision.reason),
+                         ("merged", "MERGED_DELIVERY_PR"))
+
+    def test_open_linked_pr_prevents_expiry(self):
+        pr = {"number": 77, "body": "Story: #10\n", "state": "open", "merged_at": None}
+        decision = self.decide(timeline=[self.event(500)], prs=[pr])
+        self.assertEqual((decision.action, decision.reason),
+                         ("none", "LINKED_PR_EXISTS"))
+
+    def test_ambiguous_downstream_evidence_fails_closed(self):
+        prs = [{"number": n, "body": "Story: #10\n", "state": "closed"} for n in (70, 71)]
+        decision = self.decide(timeline=[self.event(500)], prs=prs)
+        self.assertEqual((decision.action, decision.reason),
+                         ("bell", "AMBIGUOUS_LINKED_PRS"))
+
+    def test_duplicate_story_lines_fail_closed_instead_of_expiring(self):
+        pr = {"number": 70, "body": "Story: #10\nStory: #10\n", "state": "closed"}
+        decision = self.decide(timeline=[self.event(500)], prs=[pr])
+        self.assertEqual((decision.action, decision.reason),
+                         ("bell", "INVALID_PR_LINK"))
+
+    def test_missing_claim_event_fails_closed(self):
+        self.assertEqual(self.decide().reason, "CLAIM_EVENT_MISSING")
+
+    def test_invalid_attempt_never_resets_or_underflows(self):
+        for attempt in ("0", "many"):
+            decision = self.decide(claim=self.claimed(attempt=attempt),
+                                   timeline=[self.event(61)])
+            self.assertEqual((decision.action, decision.reason),
+                             ("bell", "RECOVERY_ATTEMPT_INVALID"))
+
+    def test_recovery_replay_is_identical_and_ready_state_is_noop(self):
+        first = self.decide(timeline=[self.event(61)])
+        second = self.decide(timeline=[self.event(61)])
+        self.assertEqual(first, second)
+        after = story(10, lifecycle="story:ready", attempt="0")
+        self.assertEqual(self.decide(claim=after).reason, "NOT_CLAIMED")
+
+    def test_recovery_precedes_wip_and_frees_capacity(self):
+        stories = {10: self.claimed(), 11: story(11), 12: story(12)}
+        recoveries = dp.reconcile_claims(stories, {10: [self.event(61)]}, [], self.NOW)
+        self.assertEqual(recoveries[0].action, "ready")
+        stories[10] = story(10, lifecycle="story:ready", attempt="0")
+        plan = dp.plan_dispatch(stories, {901: project()}, COMMITMENT)
+        self.assertEqual(plan.wip_in_use, 0)
+        self.assertEqual([d.number for d in plan.selected], [10, 11])
+        self.assertLessEqual(len(plan.selected), dp.WIP_LIMIT)
+
+    def test_attempt_max_routes_to_poison_not_dispatch(self):
+        plan = dp.plan_dispatch({10: story(10, attempt="3")},
+                                {901: project()}, COMMITMENT)
+        self.assertEqual(plan.decisions[0].reason, R.ATTEMPT_EXHAUSTED)
+        self.assertEqual(plan.selected, [])
+
+    @patch.object(dp, "_api")
+    @patch.object(dp, "fetch_issue")
+    def test_apply_expiry_is_one_canonical_patch(self, fetch_issue, api):
+        fetch_issue.return_value = self.claimed(attempt="2")
+        decision = self.decide(claim=self.claimed(attempt="2"), timeline=[self.event(61)])
+        ok, note = dp.apply_recovery("owner/repo", self.claimed(attempt="2"), decision, "token")
+        self.assertTrue(ok)
+        self.assertIn("Attempt 2 -> 1", note)
+        payload = api.call_args.kwargs["payload"]
+        self.assertIn("story:ready", payload["labels"])
+        self.assertNotIn("story:claimed", payload["labels"])
+        self.assertEqual(dp.merge_gate.parse_section(payload["body"], "Attempt").strip(), "1")
+
+    @patch.object(dp, "_api")
+    @patch.object(dp, "fetch_issue")
+    def test_apply_merged_closes_completed_atomically(self, fetch_issue, api):
+        fetch_issue.return_value = self.claimed()
+        decision = dp.RecoveryDecision(10, "merged", "MERGED_DELIVERY_PR", "PR #77")
+        ok, _ = dp.apply_recovery("owner/repo", self.claimed(), decision, "token")
+        self.assertTrue(ok)
+        payload = api.call_args.kwargs["payload"]
+        self.assertEqual(payload["state_reason"], "completed")
+        self.assertIn("story:merged", payload["labels"])
+
+    @patch.object(dp, "_api")
+    @patch.object(dp, "fetch_issue")
+    def test_poison_keeps_attempt_three_and_closes_not_planned(self, fetch_issue, api):
+        fetch_issue.return_value = story(10, attempt="3")
+        ok, note = dp.poison("owner/repo", story(10, attempt="3"), "token")
+        self.assertTrue(ok)
+        self.assertIn("Attempt remains 3", note)
+        payload = api.call_args.kwargs["payload"]
+        self.assertEqual(payload["state_reason"], "not_planned")
+        self.assertIn("story:blocked:poison", payload["labels"])
 
 
 class TestDispatchLine(unittest.TestCase):
