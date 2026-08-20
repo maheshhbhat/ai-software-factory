@@ -185,7 +185,7 @@ def recovery_decision(story: dict, timeline: list[dict], pull_requests: list[dic
 
 def reconcile_claims(stories: dict, timelines: dict[int, list[dict]],
                      pull_requests: list[dict], now: datetime) -> list[RecoveryDecision]:
-    """Pure recovery pass. Call before \`plan_dispatch\`, never after it."""
+    """Pure recovery pass. Call before `plan_dispatch`, never after it."""
     return [
         recovery_decision(stories[number], timelines.get(number, []), pull_requests, now)
         for number in sorted(stories)
