@@ -76,6 +76,7 @@ import dispatcher  # noqa: E402
 import humanqueue  # noqa: E402
 import poller  # noqa: E402
 import review_link  # noqa: E402
+import workers  # noqa: E402
 
 ACK_HEADING = "## Worker acknowledgement"
 COMPLETION_HEADING = "## Story completed"
@@ -363,7 +364,48 @@ class Scenario:
 # --------------------------------------------------------------------------
 
 
+def worker_configuration_error() -> str:
+    """Name unsafe live-E2E wiring before it can strand a real Story.
+
+    The hermetic suite intentionally accepts process doubles.  This runner has
+    a different promise: it exercises the factory-owned bridge and a real
+    engine.  A legacy ``printf WAKE`` declaration exits zero and therefore
+    proves only that printf ran; it cannot post the acknowledgement that the
+    completion contract requires.  Validate the live boundary explicitly.
+    """
+    specs = workers.configured_workers()
+    if not specs:
+        return ("no valid FACTORY_WORKER_*_LAUNCH declaration; live E2E requires "
+                "a worker pointing at factory/runtime/bridge.py")
+
+    expected_engines = {"claude-delivery": "claude", "codex-delivery": "codex"}
+    for spec in specs:
+        command = workers.launch_command(spec, 123456789, 987654321)
+        joined = " ".join(command)
+        if not any(part.endswith("factory/runtime/bridge.py") for part in command):
+            return (f"{spec.name} does not launch factory/runtime/bridge.py: "
+                    f"{joined}")
+        if "{story}" not in spec.launch or "{project}" not in spec.launch:
+            return (f"{spec.name} launch must include both {{story}} and {{project}} "
+                    "placeholders")
+        expected = expected_engines.get(spec.name)
+        if expected:
+            try:
+                engine = command[command.index("--engine") + 1]
+            except (ValueError, IndexError):
+                return f"{spec.name} launch must include --engine {expected}"
+            if engine != expected:
+                return (f"{spec.name} selects engine {engine!r}; expected "
+                        f"{expected!r}")
+    return ""
+
+
 def preflight(run: Run, repo: str, commitment: int, project: int, token: str) -> bool:
+    configuration_error = worker_configuration_error()
+    if configuration_error:
+        run.aborted = f"unsafe worker configuration: {configuration_error}"
+        return False
+
     try:
         issues = dispatcher.fetch_issues(repo, token)
     except Exception as exc:  # noqa: BLE001 — an unreachable repo is a clean abort
