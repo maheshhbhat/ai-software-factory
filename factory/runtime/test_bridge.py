@@ -22,14 +22,30 @@ import io
 import shlex
 import subprocess
 import unittest
+import os
+import tempfile
 from unittest import mock
 
 import bridge
+import runlog
 import workers
 
 
+def setUpModule():
+    """Operational logging is a side effect of these tests, not their subject."""
+    os.environ["FACTORY_RUNTIME_LOG_STDERR"] = "0"
+    os.environ.setdefault("FACTORY_RUNTIME_LOG",
+                          os.path.join(tempfile.gettempdir(), "factory-runtime-test.jsonl"))
+
+
 def runner(code=0, stdout="", stderr="", raises=None):
-    """A fake subprocess.run with a fixed outcome, recording its calls."""
+    """A fake engine invocation with a fixed outcome, recording its calls.
+
+    Stands in for `workers.run_observed`, which is what the bridge launches the
+    engine through (#104 — the PID of a hung engine is the first thing anyone
+    needs and `subprocess.run` never exposes it). Its contract is
+    `subprocess.run`'s, so this fake is unchanged in shape.
+    """
     calls = []
 
     def _run(cmd, **kwargs):
@@ -50,7 +66,7 @@ def run_main(engine="claude", story=96, project=95, run=None, answers=None,
     """
     if not isinstance(answers, list):
         answers = [answers] * (bridge.ACK_CHECK_ATTEMPTS + 1)
-    with mock.patch.object(bridge.subprocess, "run", run or runner()), \
+    with mock.patch.object(bridge.workers, "run_observed", run or runner()), \
          mock.patch.object(bridge, "server_now", return_value=since), \
          mock.patch.object(bridge, "acknowledged_since", side_effect=list(answers)), \
          mock.patch.object(bridge.time, "sleep"):
@@ -226,7 +242,7 @@ class TestProofOfAction(unittest.TestCase):
 
     def test_dry_run_launches_nothing_and_checks_nothing(self):
         run = runner()
-        with mock.patch.object(bridge.subprocess, "run", run), \
+        with mock.patch.object(bridge.workers, "run_observed", run), \
              mock.patch.object(bridge, "server_now",
                                side_effect=AssertionError("must not be called")):
             code = bridge.main(["--engine", "claude", "--story", "96",
@@ -375,3 +391,68 @@ class TestServerNow(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTheRunIsRecorded(unittest.TestCase):
+    """#104 — an unattended run must be explicable afterwards: which engine, what
+    it printed, how long, and why the verdict was what it was."""
+
+    def events(self, **kwargs):
+        with mock.patch.object(runlog, "event", wraps=runlog.event) as recorded:
+            code = run_main(**kwargs)
+        return code, {call.args[0]: call.kwargs for call in recorded.call_args_list}
+
+    def test_the_dispatch_is_recorded_before_anything_runs(self):
+        _, events = self.events()
+        dispatch = events["bridge.dispatch"]
+        self.assertEqual("claude", dispatch["engine"])
+        self.assertEqual(96, dispatch["story"])
+        self.assertEqual(95, dispatch["project"])
+
+    def test_the_recorded_command_shows_the_permission_grant_not_the_prompt(self):
+        """#96 was a wrong permission flag, so the reviewable part of an
+        invocation is its shape — and the prompt is the same every time."""
+        _, events = self.events()
+        cmd = events["bridge.dispatch"]["cmd"]
+        self.assertIn("<prompt>", cmd)
+        self.assertIn("--allowedTools", cmd)
+        self.assertNotIn("You are a delivery worker", cmd)
+
+    def test_engine_exit_records_both_streams_and_the_elapsed_time(self):
+        _, events = self.events(run=runner(0, stdout="did it", stderr="warning"))
+        exit_event = events["bridge.engine.exit"]
+        self.assertEqual(0, exit_event["exit"])
+        self.assertEqual("did it", exit_event["stdout"])
+        self.assertEqual("warning", exit_event["stderr"])
+        self.assertIsInstance(exit_event["elapsed_ms"], int)
+
+    def test_each_verdict_is_recorded_with_its_reason(self):
+        """The four rows of the acknowledgement truth table, as they appear in
+        the record. A trail that cannot distinguish them cannot explain a
+        failover."""
+        for answers, code, verdict in (
+            (True, 0, "LAUNCHED"),                 # acknowledgement in the window
+            (False, 1, "FAILED"),                  # clean exit, nothing posted
+            (None, 0, "LAUNCHED"),                 # unverifiable, engine exited 0
+        ):
+            with self.subTest(verdict=verdict):
+                actual_code, events = self.events(answers=answers)
+                self.assertEqual(code, actual_code)
+                self.assertEqual(verdict, events["bridge.outcome"]["verdict"])
+                self.assertTrue(events["bridge.outcome"]["reason"])
+
+    def test_an_absent_acknowledgement_is_recorded_as_evidence_not_ignorance(self):
+        _, events = self.events(answers=False)
+        self.assertEqual("ABSENT", events["bridge.acknowledgement"]["verdict"])
+
+    def test_an_unreadable_acknowledgement_is_recorded_as_ignorance(self):
+        _, events = self.events(answers=None)
+        self.assertEqual("UNVERIFIABLE", events["bridge.acknowledgement"]["verdict"])
+
+    def test_a_timeout_is_recorded_as_ambiguous_never_as_failure(self):
+        """Recording a timeout as a failure would tell a reader failover was
+        safe when it never was."""
+        run = runner(raises=subprocess.TimeoutExpired(cmd="claude", timeout=1))
+        code, events = self.events(run=run, answers=False)
+        self.assertEqual(2, code)
+        self.assertEqual("AMBIGUOUS", events["bridge.outcome"]["verdict"])

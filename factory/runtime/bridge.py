@@ -48,6 +48,7 @@ from datetime import timezone
 HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
+import runlog   # noqa: E402 — operational record (#104)
 import workers  # noqa: E402 — the launch budget this process is killed by
 
 # How long the engine may take to accept and complete the bounded task.
@@ -302,18 +303,28 @@ def main(argv: list[str]) -> int:
     # reproduce the handoff from this line, not merely read it.
     print(f"[bridge] exec: {shlex.join(printable)}", flush=True)
 
+    runlog.event("bridge.dispatch", engine=args.engine, story=args.story,
+                 project=args.project, repo=args.repo,
+                 cmd=runlog.command(cmd, elide=prompt),
+                 timeout_s=ENGINE_TIMEOUT_SECONDS)
+
     if args.dry_run:
         return 0
 
     # The launch instant, by GitHub's clock. Everything after this asks one
     # question: did an acknowledgement appear *after* this moment.
     since = server_now(args.repo, args.story)
+    started = time.monotonic()
 
     try:
-        completed = subprocess.run(cmd, capture_output=True, text=True,
-                                   timeout=ENGINE_TIMEOUT_SECONDS)
+        completed = workers.run_observed(cmd, capture_output=True, text=True,
+                                         timeout=ENGINE_TIMEOUT_SECONDS)
     except FileNotFoundError as exc:
         # Definite: the engine is not installed, so it certainly did not run.
+        runlog.event("bridge.outcome", engine=args.engine, story=args.story,
+                     project=args.project, verdict="FAILED", exit=1,
+                     elapsed_ms=runlog.elapsed_ms(started),
+                     reason=f"engine not available: {exc}")
         report(f"[bridge] FAIL: engine not available: {exc}")
         return 1
     except subprocess.TimeoutExpired:
@@ -324,9 +335,22 @@ def main(argv: list[str]) -> int:
         # says plainly that the engine may still be working. It must never become
         # the normal path — `workers.launch` would read the non-zero exit as a
         # definite failure and start a second engine on a live Story.
+        runlog.event("bridge.outcome", engine=args.engine, story=args.story,
+                     project=args.project, verdict="AMBIGUOUS", exit=2,
+                     elapsed_ms=runlog.elapsed_ms(started),
+                     reason=f"engine exceeded {ENGINE_TIMEOUT_SECONDS}s; it may still "
+                            f"be running. Do not launch another worker for this story.")
         report(f"[bridge] TIMEOUT after {ENGINE_TIMEOUT_SECONDS}s: the engine may "
                f"still be running. Do not launch another worker for this story.")
         return 2
+
+    elapsed = runlog.elapsed_ms(started)
+    # The engine's observable output, both streams, kept whichever way this
+    # exits. Only what the process wrote — never a request for its reasoning.
+    runlog.event("bridge.engine.exit", engine=args.engine, story=args.story,
+                 project=args.project, exit=completed.returncode,
+                 pid=getattr(completed, "pid", None), elapsed_ms=elapsed,
+                 stdout=runlog.tail(completed.stdout), stderr=runlog.tail(completed.stderr))
 
     tail = (completed.stdout or "").strip().splitlines()[-3:]
     for line in tail:
@@ -335,6 +359,9 @@ def main(argv: list[str]) -> int:
     # the non-zero path ended up with a single un-retried read that could race
     # GitHub's replication and call a posted acknowledgement a failure.
     verdict = acknowledgement_verdict(args.repo, args.story, since)
+    runlog.event("bridge.acknowledgement", engine=args.engine, story=args.story,
+                 project=args.project, since=since,
+                 verdict={True: "PRESENT", False: "ABSENT", None: "UNVERIFIABLE"}[verdict])
     if verdict is None:
         report("[bridge] WARN: acknowledgement unverifiable; reporting the engine's "
                "own exit status")
@@ -347,10 +374,18 @@ def main(argv: list[str]) -> int:
         # Only *evidence* overrides the exit code here: an unverifiable answer
         # leaves the engine's own non-zero verdict standing.
         if verdict is True:
+            runlog.event("bridge.outcome", engine=args.engine, story=args.story,
+                         project=args.project, verdict="LAUNCHED", exit=0,
+                         elapsed_ms=elapsed,
+                         reason=f"engine exited {completed.returncode} after posting the "
+                                f"acknowledgement; the work is durable in GitHub")
             print(f"[bridge] {args.engine} exited {completed.returncode} but the "
                   f"acknowledgement is on #{args.story}; the work was done.",
                   flush=True)
             return 0
+        runlog.event("bridge.outcome", engine=args.engine, story=args.story,
+                     project=args.project, verdict="FAILED", exit=1, elapsed_ms=elapsed,
+                     reason=f"engine exited {completed.returncode}")
         report(f"[bridge] FAIL: engine exited {completed.returncode}: "
                f"{(completed.stderr or '').strip()[-300:]}")
         return 1
@@ -362,11 +397,18 @@ def main(argv: list[str]) -> int:
     # definite `False` is what makes "did nothing" a definite *failure* instead,
     # which is the one verdict that lets another engine try.
     if verdict is False:
+        runlog.event("bridge.outcome", engine=args.engine, story=args.story,
+                     project=args.project, verdict="FAILED", exit=1, elapsed_ms=elapsed,
+                     reason="engine exited 0 without posting an acknowledgement; proven "
+                            "not done, so another engine may try")
         report(f"[bridge] FAIL: {args.engine} exited 0 without posting an "
                f"acknowledgement on #{args.story}; it did not do the work. "
                f"Treat as a definite failure — another engine may try.")
         return 1
 
+    runlog.event("bridge.outcome", engine=args.engine, story=args.story,
+                 project=args.project, verdict="LAUNCHED", exit=0, elapsed_ms=elapsed,
+                 reason="acknowledgement verified in this invocation's window")
     print(f"[bridge] {args.engine} accepted story #{args.story}", flush=True)
     return 0
 

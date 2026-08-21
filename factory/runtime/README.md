@@ -20,10 +20,14 @@ valid approval sat in GitHub while the lifecycle waited for someone to type
 
 **2 · Dispatch** (`poller.py` + the dispatcher) — claim and wake, as below.
 
+**3 · Completion** (`completion.py`) — when a worker finishes successfully, ask
+whether its Story is done. See *The completion path* below.
+
 Continuation runs first, so an approval and the work it unblocks can land in the
 same cycle. Its failures are isolated: a malformed decision comment reports and
 is skipped, and dispatch still runs. Coupling them would let one bad comment
-halt the whole factory.
+halt the whole factory. Completion is isolated the same way and for the same
+reason: if it fails, the Story stays claimed and the §9.4 lease resolves it.
 
 ### What continuation can and cannot prove
 
@@ -46,16 +50,20 @@ an unrecognized verdict — fails closed with a named reason and no transition.
 
 ## The design rule that keeps it small
 
-**The runtime holds no judgment.** It does not decide what is authorized,
-eligible, in scope, or within WIP; it does not recover leases; it never edits a
-story's lifecycle. All of that belongs to `factory/dispatcher/dispatcher.py`,
-which it runs as a subprocess. Everything protecting the repository from a bad
-dispatch — the authorization chain, the trust boundary, WIP and attempt limits,
-the required merge gate — sits upstream. **If this ever grows a policy decision,
-that is the bug.**
+**`poller.py` holds no judgment.** It does not decide what is authorized,
+eligible, in scope, or within WIP; it does not recover leases; and it decides
+nothing about a story's lifecycle. All of that belongs to
+`factory/dispatcher/dispatcher.py`, which it runs as a subprocess, or to the
+narrow modules beside it — `continuation.py` for a project at a bell,
+`completion.py` for a Story a worker has finished. Everything protecting the
+repository from a bad dispatch — the authorization chain, the trust boundary,
+WIP and attempt limits, the required merge gate — sits upstream. **If the poll
+loop ever grows a policy decision, that is the bug**, and a test asserts it by
+inspection.
 
 Per poll: run the dispatcher with claiming enabled → read only canonical
-`DISPATCH story=#N project=#P agent=<id>` lines → launch the worker once each.
+`DISPATCH story=#N project=#P agent=<id>` lines → launch the worker once each →
+ask the completion path whether each finished worker ends its Story.
 
 ## Idempotency comes from GitHub
 
@@ -266,6 +274,134 @@ late — can therefore be credited to its successor. The consequence is a
 misattributed audit line, not a duplicate or a lost Story, and it is recorded
 here rather than papered over.
 
+## The completion path (#104)
+
+The clean-room verification under Project #95 found the lifecycle stopping one
+step short. A Story moved `story:ready → story:claimed`, the worker ran, the
+bridge verified a durable acknowledgement — and the Story then sat at
+`story:claimed`, waiting for a human to finish a transition the evidence had
+already decided.
+
+**"Sat there" is not the same as "stayed still."** `story:claimed` is a lease.
+After `CLAIM_LEASE` the dispatcher finds a claim with no linked pull request,
+cannot tell a finished worker from a dead one, and recovers the Story to
+`story:ready` — so the next poll dispatches it again and a second
+acknowledgement appears. Project #95's *exactly one acknowledgement* criterion
+could not hold for longer than one lease period.
+
+### Why a component can decide this now
+
+§9.4.1 says why the dispatcher does not try: *durable evidence cannot
+distinguish a worker that died before starting from one that ran correctly and
+produced no pull request.* That was true when it was written. #98 made the
+missing evidence exist — the bounded assignment ends in an acknowledgement
+comment, durable in GitHub, verified before the launch is reported as success.
+
+### The preconditions, all of them
+
+| # | Condition | Read from |
+|---|---|---|
+| 1 | the launch reported `LAUNCHED` — a *definite* success | `workers.py` |
+| 2 | the Story is still `story:claimed` | the issue, re-read |
+| 3 | **no pull request links to the Story** (§9.5) | open + closed PRs |
+| 4 | a `story:claimed` `labeled` event exists | the timeline |
+| 5 | an acknowledgement was posted at or after that instant | the comments |
+
+Anything else leaves the Story exactly as it is, with a named reason. The
+asymmetry is deliberate: a wrong "no" costs one lease period and a §9.4
+recovery, while a wrong "yes" closes a Story whose work never happened — and
+§9.3 says no component reopens a closed issue.
+
+Condition 3 is what keeps this safe as worker assignments grow. A worker that
+produced a pull request has a deliverable and belongs to review and the merge
+gate; this path only ever completes work that finished with **nothing to
+merge**. A test pins the coupling from the other side too: the bridge's prompt
+must still forbid files, branches and pull requests, so widening the assignment
+fails the build instead of quietly cancelling Stories that were meant to deliver
+code.
+
+### Which state, and the amendment it needs
+
+§9.3 already names the terminal state for work that finishes with no
+deliverable: `story:cancelled` — *"a verification fixture that only had to prove
+something"* is its own example, and that is exactly what a bounded
+acknowledgement assignment is. No new label, no new bell, no new orchestration.
+`Attempt` is untouched: the attempt was dispatched and it succeeded.
+
+**Stated, not hidden:** §9.3 also says `story:cancelled` is a human decision and
+is "never applied by a component". That sentence was written when no component
+*could* prove the case. The spec amendment is requested with this change rather
+than assumed — story #104's declared `### Scope` is `factory/runtime/**`, so the
+edit to `factory/spec/state-schema.md` is not this Story's to make.
+
+### Where the judgment lives
+
+`poller.py` calls `completion.record_success` and prints what comes back. Every
+precondition, the §9.5 read, the target state and the recorded reason are in
+`completion.py`, and the primitives are *imported from the dispatcher* rather
+than restated — one definition of "a pull request links to this Story", one
+definition of what an acknowledgement looks like. Two definitions drifting apart
+is how a Story with a deliverable gets closed as having none.
+
+The write follows §9.2: re-read, verify the `from` state, then one PATCH with
+the complete final label set and the closure. The reason comment is posted
+*first*, so a crash between the two writes leaves a claimed Story carrying an
+explanation — visible and lease-recoverable — rather than a terminal Story with
+no recorded reason.
+
+### One limit worth naming
+
+The completion pass is triggered by a launch *returning* success, so it fits an
+engine the factory invoked and waited for.
+Under the legacy `FACTORY_WORKER_CMD` adapter — a `WAKE` line for a standing
+session to pick up later — the launch returns before the worker has done
+anything, so nothing is proved, nothing is completed, and §9.4 remains the
+resolution exactly as before.
+
+## Operational logging (#104)
+
+A factory-launched worker used to be observable only through whatever `[worker]`
+line reached stdout, and `workers.launch` kept a *launched* worker's stdout and
+a *failed* worker's stderr — so for any run that hung, the one channel with the
+explanation in it was the one thrown away. Diagnosing a hang meant re-running
+the engine by hand.
+
+`runlog.py` is the record. One JSON object per line, appended to
+`factory/runtime/logs/runtime.jsonl` (override with `FACTORY_RUNTIME_LOG`) and
+mirrored to stderr unless `FACTORY_RUNTIME_LOG_STDERR=0`.
+
+**Never stdout.** Under this repository's monitor one stdout line is one
+notification, so a chatty log there would page a human per event.
+
+| Event | Answers |
+|---|---|
+| `dispatch.received` | what the dispatcher authorized, and for which project |
+| `worker.health` / `worker.selected` | which engines were eligible, and why |
+| `worker.launch.start` | the exact command, and the timeout it runs under |
+| `process.started` | the child's PID — which process to look at in `ps` |
+| `worker.launch.end` | exit status, elapsed ms, **both** output streams |
+| `worker.failover` | fell back, suppressed, or not needed — with the reason |
+| `worker.outcome` | which engine ended up owning the Story |
+| `bridge.dispatch` / `bridge.engine.exit` | the engine's own view of the same run |
+| `bridge.acknowledgement` | `PRESENT` / `ABSENT` / `UNVERIFIABLE` |
+| `bridge.outcome` | the verdict, and the sentence that justifies it |
+| `story.completion` | what the completion path decided, and whether it wrote |
+
+Every record carries a `run` id, so events from a poll and from the bridge
+subprocess it launched stitch back together.
+
+**Two things are deliberately absent.** *Secrets*: any occurrence of the live
+`GITHUB_TOKEN` / `GH_TOKEN` is removed by value before a line is written, and
+token-shaped strings are removed by pattern — a worker that echoes its
+environment cannot spill a credential into the log. *Hidden model reasoning*:
+only what a process actually wrote to stdout/stderr is kept, tailed to
+`MAX_FIELD_CHARS`; nothing asks an engine for its chain of thought.
+
+**Logging never costs anything.** Every write is best-effort and every error is
+swallowed — a logging failure that stopped a dispatch would be a logging system
+that costs more than it earns. The file rotates once at `MAX_LOG_BYTES`, because
+a long-running loop appending forever is a loop without a bound.
+
 ## Worker adapter
 
 `FACTORY_WORKER_CMD` is the whole extension point — point it at Codex or any
@@ -303,8 +439,18 @@ python3 factory/runtime/poller.py --repo owner/name --commitment 54 --once --dry
 ```
 
 Stop it with `ctrl-c`, or by stopping the monitor task running it. Status is the
-stdout stream: every poll that dispatches prints a `[poller]` line, and every
-failure prints one too.
+stdout stream: every poll that dispatches prints a `[poller]` line, every
+completion prints a `[completion]` line, and every failure prints one too.
+
+For anything more detailed than that — which engine ran, what it printed, why a
+verdict was reached — read the structured log:
+
+```sh
+tail -f factory/runtime/logs/runtime.jsonl | python3 -m json.tool --json-lines
+
+# just one story's history, across polls and bridge subprocesses
+grep '"story":103' factory/runtime/logs/runtime.jsonl
+```
 
 ## Tests
 
@@ -314,3 +460,11 @@ cd factory/runtime && python3 -m unittest discover -p 'test_*.py' -v
 
 Standard library only. The parsing tests carry the weight — the near-miss cases
 matter more than the happy path.
+
+`test_lifecycle_e2e.py` is the one that wires the real dispatcher, the real
+worker contract and the real completion path together against one in-memory
+GitHub and asserts on durable state: a Story goes `ready → claimed → worker →
+cancelled + closed` in a single poll, and no later poll or restart launches a
+second worker for it. It keeps the counterfactual next to it — a worker that
+proves nothing leaves the claim standing for §9.4 — so the fix is read as the
+answer to something real.
