@@ -84,6 +84,20 @@ import runlog  # noqa: E402
 # will actually read the reply. A fixed string alone would not prevent this
 # recurring: the failure mode is *drift*, an instruction and a parser that stop
 # agreeing, and only a test that reads both can catch that.
+#
+# **An action must also not promise behaviour no component performs** (#181). The
+# poison entry used to end "or leave it and let §4.3.7 close it as not planned",
+# which is false: `dispatcher.poison_closure` closes a poisoning only once the
+# §4.3.7 rescue cap is spent, and spending it takes two rescues. A story left
+# alone is never closed by anything — it stays open and is reported every poll,
+# which is §9.3 working as written. The entry also omitted the disposition that
+# *is* available, §9.4.1's cancellation, so the one route a finished or abandoned
+# Story needs was the one route the queue never mentioned.
+#
+# `HUMAN_QUEUE_FORMATS` cannot catch this class: there is no parser for "leave
+# it", because the promise is about a component's future behaviour rather than a
+# comment's shape. `test_humanqueue.py` therefore drives `poison_closure` itself
+# and asserts the text agrees with what it returns.
 WAITING_ON_A_HUMAN: dict[str, str] = {
     "project:awaiting-ready":
         "approve the falsifiable acceptance criteria, or request changes — post a "
@@ -94,9 +108,14 @@ WAITING_ON_A_HUMAN: dict[str, str] = {
         "line `result: pass` (or `result: fail`) and one `- <criterion> — pass/fail` "
         "line per criterion (§5.3)",
     dispatcher.POISON:
-        "rescue per §4.3.6 — all three, in order: a rescue comment stating what "
-        "changed, `### Attempt` reset to `0` in the body, and one `poison-rescue` "
-        "touch logged; or leave it and let §4.3.7 close it as not planned",
+        "decide the disposition — §9.4.1 offers two, and doing nothing is not one "
+        "of them. Rescue per §4.3.6 if the failure was infrastructural: all three, "
+        "in order, a rescue comment stating what changed, `### Attempt` reset to "
+        "`0` in the body, and one `poison-rescue` touch logged. Or cancel per §9.3 "
+        "if the work should stop: apply `story:cancelled` and close as not planned, "
+        "which is a human decision no component may take. Left alone this story "
+        "stays open and is reported again every poll — §4.3.7 closes a poisoning "
+        "only once the rescue cap of 2 is spent, which takes two rescues first",
     "story:blocked:scope":
         "resolve the scope dispute — amend `### Scope` or withdraw the dispute, move "
         "the label, and log one `scope-decision` touch (§4.2). No automated pass "

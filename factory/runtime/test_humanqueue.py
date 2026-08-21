@@ -15,6 +15,7 @@ until somebody happened to look).
 from __future__ import annotations
 
 import io
+import re
 import unittest
 from contextlib import redirect_stdout
 from unittest import mock
@@ -310,6 +311,64 @@ class TestItNeverWrites(unittest.TestCase):
         for forbidden in ("open(", "json.dump", "seen", "cursor", "cache"):
             self.assertNotIn(forbidden, source.split("PREFIXES")[1],
                              f"{forbidden} would let the pass decide it has said enough")
+
+
+class TestThePoisonEntryDescribesTheRuleThatExists(unittest.TestCase):
+    """#181 — pin the poison action against `poison_closure`, not against itself.
+
+    The entry used to end *"or leave it and let §4.3.7 close it as not planned"*.
+    A fixed-string assertion would have passed against that text, because the
+    string matched itself; what made it wrong was a claim about a component's
+    future behaviour, and the component is right here to be asked. So these tests
+    drive `dispatcher.poison_closure` and require the prose to agree with it.
+    """
+
+    def action(self) -> str:
+        return hq.WAITING_ON_A_HUMAN[dispatcher.POISON]
+
+    def test_inaction_never_closes_it_however_many_polls_pass(self):
+        """The claim the old text made, asked of the component that would do it."""
+        timeline = []                      # nobody rescues, nobody cancels
+        for _ in range(dispatcher.RESCUE_MAX + 5):
+            closes, _ = dispatcher.poison_closure(timeline)
+            self.assertFalse(closes,
+                             "nothing closes a poisoned story that no one acts on; "
+                             "the timeline only grows when a human does something")
+        self.assertIn("stays open", self.action(),
+                      "poison_closure says the story stays open, so the entry must "
+                      "say so too rather than implying the wait ends by itself")
+
+    def test_every_mention_of_the_closure_rule_carries_the_cap_that_gates_it(self):
+        # The original defect in one line: the entry cited §4.3.7 and omitted the
+        # cap, turning a conditional rule into an unconditional promise. Closure
+        # may still be named — cancellation closes immediately and correctly, by a
+        # human — but §4.3.7 may never be invoked without what gates it.
+        for clause in re.split(r"(?<=[.;])\s+", self.action()):
+            if "§4.3.7" in clause:
+                self.assertIn(str(dispatcher.RESCUE_MAX), clause,
+                              "§4.3.7 is stated without its rescue cap, which is "
+                              "how it was read as 'leave it and it closes'")
+
+    def test_closure_arrives_only_once_the_cap_is_spent(self):
+        poisoning = {"event": "labeled", "label": {"name": dispatcher.POISON}}
+        for already in range(dispatcher.RESCUE_MAX):
+            closes, _ = dispatcher.poison_closure([poisoning] * already)
+            self.assertFalse(closes, f"poisoning {already + 1} must not close")
+        closes, _ = dispatcher.poison_closure([poisoning] * dispatcher.RESCUE_MAX)
+        self.assertTrue(closes, "the cap being spent is what closes it")
+
+    def test_both_dispositions_9_4_1_offers_are_named(self):
+        action = self.action()
+        self.assertIn("§4.3.6", action, "the rescue route must be named")
+        self.assertIn(dispatcher.CANCELLED, action,
+                      "§9.4.1 offers cancellation and the queue never mentioned it, "
+                      "so the one route an abandoned story needs was unreachable "
+                      "from the only place that asks about it")
+
+    def test_the_rescue_still_names_all_three_parts(self):
+        action = self.action()
+        for part in ("rescue comment", "`### Attempt` reset to `0`", "poison-rescue"):
+            self.assertIn(part, action, f"§4.3.6 requires {part}")
 
 
 if __name__ == "__main__":
