@@ -25,9 +25,11 @@ class FakeStore:
         self.issues.append(item)
         return copy.deepcopy(item)
 
-    def update_issue(self, number, body):
+    def update_issue(self, number, body, title=None):
         item = next(item for item in self.issues if item["number"] == number)
         item["body"] = body
+        if title is not None:
+            item["title"] = title
         return copy.deepcopy(item)
 
     def update_labels(self, number, labels):
@@ -39,8 +41,14 @@ class FakeStore:
         return copy.deepcopy(self.comments.get(number, []))
 
     def create_comment(self, number, body):
-        item = {"id": len(self.comments.get(number, [])) + 1, "body": body}
+        item = {"id": 1 + sum(len(items) for items in self.comments.values()), "body": body}
         self.comments.setdefault(number, []).append(item)
+        return copy.deepcopy(item)
+
+    def update_comment(self, comment_id, body):
+        item = next(item for values in self.comments.values() for item in values
+                    if item["id"] == comment_id)
+        item["body"] = body
         return copy.deepcopy(item)
 
     def ensure_label(self, name):
@@ -70,7 +78,27 @@ def project_output():
                          "spec": "Calculate a projection.", "depends_on": []},
                         {**base, "key": "ui", "title": "Show retirement",
                          "spec": "Render a projection.", "depends_on": ["model"]}],
-            "expected_bells": 2, "digest": "ADR, model, then UI; no hazards."}
+            "expected_bells": 2, "digest": """## Plan in plain language
+
+Build the model, then show it.
+
+## How the plan works
+
+```mermaid
+flowchart LR
+  input --> model --> output
+```
+
+Input flows through the model to output.
+
+## Story dependencies
+
+```mermaid
+flowchart LR
+  model --> ui
+```
+
+The UI depends on the model."""}
 
 
 class CampaignTests(unittest.TestCase):

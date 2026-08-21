@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+import re
 
 
 class ContractError(ValueError):
@@ -24,12 +25,66 @@ TRIGGER_LABELS = {
     "type:project": Altitude.PROJECT,
 }
 
-REQUIRED_INPUTS = ("trigger", "product", "adrs", "repository")
+REQUIRED_INPUTS = ("trigger", "product", "adrs", "repository", "review_comments",
+                   "existing_plan")
 
 CAMPAIGN_KEYS = frozenset({"altitude", "project", "rationale", "risks"})
 PROJECT_KEYS = frozenset({
     "altitude", "adr", "stories", "expected_bells", "digest",
 })
+
+CAMPAIGN_JSON_SCHEMA = {
+    "type": "object", "additionalProperties": False,
+    "properties": {
+        "altitude": {"const": "campaign"},
+        "project": {"type": "object", "additionalProperties": False,
+                    "properties": {
+                        "title": {"type": "string"}, "goal": {"type": "string"},
+                        "acceptance_criteria": {"type": "array", "items": {"type": "string"},
+                                                "minItems": 1},
+                        "expected_bells": {"type": "integer", "minimum": 2},
+                        "risks": {"type": "string"}},
+                    "required": ["title", "goal", "acceptance_criteria",
+                                 "expected_bells", "risks"]},
+        "rationale": {"type": "string"},
+        "risks": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+    }, "required": ["altitude", "project", "rationale", "risks"],
+}
+
+PROJECT_JSON_SCHEMA = {
+    "type": "object", "additionalProperties": False,
+    "properties": {
+        "altitude": {"const": "project"},
+        "adr": {"type": "object", "additionalProperties": False,
+                "properties": {key: ({"type": "string"} if key in
+                                      {"title", "context", "decision"} else
+                                      {"type": "array", "items": {"type": "string"},
+                                       "minItems": 1})
+                               for key in ("title", "context", "decision",
+                                           "alternatives", "consequences")},
+                "required": ["title", "context", "decision", "alternatives", "consequences"]},
+        "stories": {"type": "array", "minItems": 1, "items": {
+            "type": "object", "additionalProperties": False,
+            "properties": {
+                "key": {"type": "string"}, "title": {"type": "string"},
+                "spec": {"type": "string"},
+                "phase": {"enum": ["build", "ship", "shadow", "cutover", "hardening"]},
+                "depends_on": {"type": "array", "items": {"type": "string"}},
+                "hazard": {"type": "boolean"},
+                "acceptance_criteria": {"type": "array", "items": {"type": "string"},
+                                        "minItems": 1},
+                "scope": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+                "spend_cap": {"type": "string"}},
+            "required": ["key", "title", "spec", "phase", "depends_on", "hazard",
+                         "acceptance_criteria", "scope", "spend_cap"]}},
+        "expected_bells": {"type": "integer", "minimum": 2},
+        "digest": {"type": "string"},
+    }, "required": ["altitude", "adr", "stories", "expected_bells", "digest"],
+}
+
+
+def json_schema(altitude: Altitude) -> dict:
+    return CAMPAIGN_JSON_SCHEMA if altitude is Altitude.CAMPAIGN else PROJECT_JSON_SCHEMA
 
 
 @dataclass(frozen=True)
@@ -66,6 +121,10 @@ def validate_input(value: dict) -> PlanningInput:
     repository = value["repository"]
     if not isinstance(repository, dict) or not repository.get("files"):
         raise ContractError("repository read access must provide a non-empty file index")
+    if not isinstance(value["review_comments"], (list, tuple)):
+        raise ContractError("review comments must be a list")
+    if not isinstance(value["existing_plan"], dict):
+        raise ContractError("existing plan must be an object")
     return PlanningInput(trigger, product, tuple(adrs), repository)
 
 
@@ -89,5 +148,15 @@ def validate_output(altitude: Altitude, value: dict) -> dict:
         raise ContractError(
             f"{altitude.value} output contains other-altitude artifacts: "
             f"{', '.join(leaked)}")
+    if altitude is Altitude.PROJECT:
+        digest = value.get("digest")
+        if not isinstance(digest, str):
+            raise ContractError("project digest must be a string")
+        required_sections = ("## Plan in plain language", "## How the plan works",
+                             "## Story dependencies")
+        missing_sections = [section for section in required_sections if section not in digest]
+        if missing_sections or len(re.findall(r"```mermaid\s*\n", digest)) < 2:
+            raise ContractError(
+                "project digest must contain a plain-language explanation and two Mermaid "
+                "diagrams (system flow and story dependencies)")
     return value
-

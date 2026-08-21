@@ -22,7 +22,8 @@ class InputTests(unittest.TestCase):
     def valid(self):
         return {"trigger": {"labels": ["type:project"]},
                 "product": "# Product", "adrs": [],
-                "repository": {"files": ["product.md"]}}
+                "repository": {"files": ["product.md"]}, "review_comments": [],
+                "existing_plan": {}}
 
     def test_all_grounding_inputs_are_required(self):
         for key in contract.REQUIRED_INPUTS:
@@ -40,6 +41,28 @@ class InputTests(unittest.TestCase):
 
 
 class OutputTests(unittest.TestCase):
+    DIGEST = """## Plan in plain language
+
+Plain explanation.
+
+## How the plan works
+
+```mermaid
+flowchart LR
+  a --> b
+```
+
+Text fallback.
+
+## Story dependencies
+
+```mermaid
+flowchart LR
+  story_a --> story_b
+```
+
+Text fallback."""
+
     def test_campaign_schema_excludes_project_artifacts(self):
         value = {"altitude": "campaign", "project": {}, "rationale": "why",
                  "risks": []}
@@ -50,7 +73,7 @@ class OutputTests(unittest.TestCase):
 
     def test_project_schema_excludes_campaign_proposal(self):
         value = {"altitude": "project", "adr": {}, "stories": [],
-                 "expected_bells": 2, "digest": "plan"}
+                 "expected_bells": 2, "digest": self.DIGEST}
         self.assertIs(value, contract.validate_output(contract.Altitude.PROJECT, value))
         value["project"] = {}
         with self.assertRaises(contract.ContractError):
@@ -60,9 +83,15 @@ class OutputTests(unittest.TestCase):
         with self.assertRaises(contract.ContractError):
             contract.validate_output(contract.Altitude.CAMPAIGN, {"altitude": "campaign"})
         project = {"altitude": "campaign", "adr": {}, "stories": [],
-                   "expected_bells": 2, "digest": "plan"}
+                   "expected_bells": 2, "digest": self.DIGEST}
         with self.assertRaises(contract.ContractError):
             contract.validate_output(contract.Altitude.PROJECT, project)
+
+    def test_project_digest_requires_plain_language_and_two_diagrams(self):
+        value = {"altitude": "project", "adr": {}, "stories": [],
+                 "expected_bells": 2, "digest": "plan"}
+        with self.assertRaisesRegex(contract.ContractError, "plain-language"):
+            contract.validate_output(contract.Altitude.PROJECT, value)
 
 
 class CanonicalPathTests(unittest.TestCase):
@@ -72,6 +101,9 @@ class CanonicalPathTests(unittest.TestCase):
                        "type:roadmap-commitment", "type:project",
                        "risk-ordered", "expected bells", "Depends-on",
                        "hazard", "falsifiable", "read-back"):
+            self.assertIn(phrase, prompt)
+        for phrase in ("Plan in plain language", "How the plan works",
+                       "Story dependencies", "```mermaid"):
             self.assertIn(phrase, prompt)
 
     def test_no_competing_root_agents_tree(self):

@@ -116,6 +116,37 @@ class InvocationTests(unittest.TestCase):
         second = invoke.state_version(client, {**issue, "updated_at": "two"})
         self.assertEqual(first, second)
 
+    def test_default_model_command_embeds_input_and_binds_json_schema(self):
+        value = {"trigger": {"labels": ["type:roadmap-commitment"]},
+                 "product": "# Product", "adrs": [], "repository": {"files": ["product.md"]}}
+        import tempfile
+        with tempfile.NamedTemporaryFile("w", suffix=".json") as handle:
+            json.dump(value, handle)
+            handle.flush()
+            with mock.patch.dict(os.environ, {}, clear=True):
+                command = invoke.model_command(handle.name, 30, 2.5)
+        self.assertIn("--json-schema", command)
+        self.assertIn("--max-budget-usd", command)
+        self.assertIn('"product": "# Product"', command[2])
+
+    def test_prompt_version_changes_when_prompt_changes(self):
+        with mock.patch.object(invoke.pathlib.Path, "read_bytes", return_value=b"one"):
+            first = invoke.prompt_version()
+        with mock.patch.object(invoke.pathlib.Path, "read_bytes", return_value=b"two"):
+            second = invoke.prompt_version()
+        self.assertNotEqual(first, second)
+
+    def test_readback_retries_eventual_consistency_then_passes(self):
+        expected = object()
+        with mock.patch.object(invoke.artifacts, "verify", side_effect=[
+                invoke.artifacts.ArtifactError("missing"), expected]) as verify:
+            sleeps = []
+            actual = invoke.verify_with_retry(None, {}, "key", contract.Altitude.CAMPAIGN,
+                                               sleeper=sleeps.append)
+        self.assertIs(expected, actual)
+        self.assertEqual([1], sleeps)
+        self.assertEqual(2, verify.call_count)
+
 
 if __name__ == "__main__":
     unittest.main()

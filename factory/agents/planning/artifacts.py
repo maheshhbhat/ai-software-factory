@@ -33,10 +33,11 @@ class Store(Protocol):
     def list_issues(self, state: str = "all") -> list[dict]: ...
     def get_issue(self, number: int) -> dict: ...
     def create_issue(self, title: str, body: str, labels: list[str]) -> dict: ...
-    def update_issue(self, number: int, body: str) -> dict: ...
+    def update_issue(self, number: int, body: str, title: str | None = None) -> dict: ...
     def update_labels(self, number: int, labels: list[str]) -> dict: ...
     def list_comments(self, number: int) -> list[dict]: ...
     def create_comment(self, number: int, body: str) -> dict: ...
+    def update_comment(self, comment_id: int, body: str) -> dict: ...
     def ensure_label(self, name: str) -> None: ...
 
 
@@ -74,6 +75,41 @@ def _issue_once(store: Store, key: str, kind: str, title: str,
     for label in labels:
         store.ensure_label(label)
     return store.create_issue(title, f"{token}\n\n{body}", labels)
+
+
+def _prior(items: list[dict], artifact: int, kind: str) -> dict | None:
+    pattern = re.compile(
+        rf"<!-- {MARKER}:{artifact}:[^\n]*:project:prompt-[^\n]*:{re.escape(kind)} -->")
+    found = [item for item in items if pattern.search(item.get("body") or "")]
+    if len(found) > 1:
+        raise ArtifactError(f"duplicate prior planning artifact for {kind}")
+    return found[0] if found else None
+
+
+def _issue_reconcile(store: Store, artifact: int, key: str, kind: str, title: str,
+                     body: str, labels: list[str]) -> dict:
+    current = _find(store.list_issues("all"), marker(key, kind))
+    if current:
+        return current
+    prior = _prior(store.list_issues("all"), artifact, kind)
+    if not prior:
+        return _issue_once(store, key, kind, title, body, labels)
+    for label in labels:
+        store.ensure_label(label)
+    store.update_issue(prior["number"], f"{marker(key, kind)}\n\n{body}", title)
+    store.update_labels(prior["number"], labels)
+    return store.get_issue(prior["number"])
+
+
+def _comment_reconcile(store: Store, artifact: int, key: str, kind: str, body: str) -> dict:
+    comments = store.list_comments(artifact)
+    current = _find(comments, marker(key, kind))
+    if current:
+        return current
+    prior = _prior(comments, artifact, kind)
+    rendered = f"{marker(key, kind)}\n\n{body}"
+    return (store.update_comment(prior["id"], rendered) if prior else
+            store.create_comment(artifact, rendered))
 
 
 def _project_body(project: dict, commitment: int) -> str:
@@ -189,8 +225,16 @@ def write_project(store: Store, trigger: dict, key: str, output: dict) -> Writte
     _adr_body(output["adr"])
     for story in output["stories"]:
         _story_body(story, trigger["number"], [1] * len(story["depends_on"]))
-    adr = _issue_once(store, key, "adr", f"[ADR] {output['adr']['title']}",
-                      _adr_body(output["adr"]), ["type:adr"])
+    existing_story_keys = {match.group(1) for item in store.list_issues("all")
+                           if (match := re.search(
+                               rf"<!-- {MARKER}:{trigger['number']}:[^\n]*:project:prompt-[^\n]*:story:([^ ]+) -->",
+                               item.get("body") or ""))}
+    proposed_story_keys = set(by_key)
+    if existing_story_keys and existing_story_keys != proposed_story_keys:
+        raise ArtifactError("feedback revision may not silently add or remove story identities")
+    adr = _issue_reconcile(store, trigger["number"], key, "adr",
+                           f"[ADR] {output['adr']['title']}",
+                           _adr_body(output["adr"]), ["type:adr"])
     created = {}
     for story_key in order:
         story = by_key[story_key]
@@ -198,8 +242,8 @@ def write_project(store: Store, trigger: dict, key: str, output: dict) -> Writte
         labels = ["type:story", "story:blocked", f"phase:{story['phase']}"]
         if story["hazard"]:
             labels.append("hazard")
-        created[story_key] = _issue_once(
-            store, key, f"story:{story_key}", f"[Story] {story['title']}",
+        created[story_key] = _issue_reconcile(
+            store, trigger["number"], key, f"story:{story_key}", f"[Story] {story['title']}",
             _story_body(story, trigger["number"], dep_numbers), labels)
 
     live = store.get_issue(trigger["number"])
@@ -215,8 +259,8 @@ def write_project(store: Store, trigger: dict, key: str, output: dict) -> Writte
     if count != 1:
         raise ArtifactError("project issue has no writable Expected bells section")
     store.update_issue(trigger["number"], body)
-    _comment_once(store, trigger["number"], key, "digest",
-                  "## Planning digest\n\n" + output["digest"])
+    _comment_reconcile(store, trigger["number"], key, "digest",
+                       "## Planning digest\n\n" + output["digest"])
     return WrittenPlan(contract.Altitude.PROJECT, trigger["number"], adr["number"],
                        tuple(created[item]["number"] for item in order))
 
@@ -356,8 +400,11 @@ class GitHubStore:
     def create_issue(self, title, body, labels):
         return self._api("/issues", "POST", {"title": title, "body": body, "labels": labels})
 
-    def update_issue(self, number, body):
-        return self._api(f"/issues/{number}", "PATCH", {"body": body})
+    def update_issue(self, number, body, title=None):
+        payload = {"body": body}
+        if title is not None:
+            payload["title"] = title
+        return self._api(f"/issues/{number}", "PATCH", payload)
 
     def update_labels(self, number, labels):
         return self._api(f"/issues/{number}", "PATCH", {"labels": labels})
@@ -367,6 +414,9 @@ class GitHubStore:
 
     def create_comment(self, number, body):
         return self._api(f"/issues/{number}/comments", "POST", {"body": body})
+
+    def update_comment(self, comment_id, body):
+        return self._api(f"/issues/comments/{comment_id}", "PATCH", {"body": body})
 
     def ensure_label(self, name):
         encoded = urllib.parse.quote(name, safe="")
