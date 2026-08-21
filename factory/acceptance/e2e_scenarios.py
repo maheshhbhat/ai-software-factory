@@ -229,8 +229,24 @@ class LifecycleAndObservability(Scenario):
 
     def run(self, run: Run) -> None:
         fixture = self.fixture("full lifecycle — launch, acknowledge, complete, replay")
-        output = self.poll()
         number = fixture.number
+
+        run.check("[completion] the fixture became visible to the dispatch queue",
+                  self.wait_until(lambda: self.visible([number]), "fixture listed"),
+                  observed(f"#{number} present in the open-issue listing"))
+
+        # Poll until the fixture is terminal, rather than assuming one poll does
+        # it. Two things make a single poll wrong, and both were observed live:
+        # the issue listing lags a write by seconds, and WIP_LIMIT is
+        # repository-wide — other eligible work with a lower issue number takes
+        # the slots first, exactly as §9.10 says it should. Neither is a fault,
+        # and a scenario that treats "not on the first poll" as failure is
+        # reporting the contract working as if it were broken.
+        output = ""
+        for _ in range(dispatcher.WIP_LIMIT + 3):
+            output += self.poll()
+            if fixture.terminal():
+                break
         events = runlog_events(number)
         kinds = [e.get("event") for e in events]
 
@@ -273,11 +289,15 @@ class LifecycleAndObservability(Scenario):
                   applied == [dispatcher.READY, dispatcher.CLAIMED, dispatcher.COMPLETED],
                   observed(f"applied in order: {applied}"))
 
+        # Replay is asserted only once the fixture is terminal — a story still
+        # working is *supposed* to change on the next poll, and asserting
+        # otherwise would test that the factory does nothing.
         before = len(fixture.timeline())
         second = self.poll()
-        run.check("[replay] a replay poll changed nothing",
+        run.check("[replay] a replay poll over the finished story changed nothing",
                   len(fixture.timeline()) == before and f"story=#{number}" not in second,
-                  observed(f"timeline {before} -> {len(fixture.timeline())}"))
+                  observed(f"timeline {before} -> {len(fixture.timeline())}; "
+                           f"story is {fixture.lifecycle()}"))
 
         queue = io.StringIO()
         with redirect_stdout(queue):

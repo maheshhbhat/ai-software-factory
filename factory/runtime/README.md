@@ -258,6 +258,9 @@ workers on one Story is a corruption.
 worker declaration points at:
 
 ```sh
+export FACTORY_WORKER_CLAUDE_DELIVERY_LAUNCH='python3 factory/runtime/bridge.py \
+    --engine claude --story {story} --project {project}'
+
 export FACTORY_WORKER_CODEX_DELIVERY_LAUNCH='python3 factory/runtime/bridge.py \
     --engine codex --story {story} --project {project}'
 ```
