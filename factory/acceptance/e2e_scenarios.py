@@ -591,23 +591,52 @@ class Recovery(Scenario):
                                f"and this test does not get to disagree"))
             return
 
+        recoveries_before = dispatcher.count_expiry_recoveries(
+            dispatcher.fetch_timeline(self.repo, number, self.token))
         before = dispatcher.fetch_issue(self.repo, number, self.token)
         attempt_before = (dispatcher.merge_gate.parse_section(
             before.get("body") or "", "Attempt") or "").strip()
-        report = self.dispatch(claim=True)
-        after = dispatcher.fetch_issue(self.repo, number, self.token)
-        attempt_after = (dispatcher.merge_gate.parse_section(
-            after.get("body") or "", "Attempt") or "").strip()
 
-        run.check("[recovery] the expired claim returned to story:ready",
-                  dispatcher.lifecycle_of(after, dispatcher.STORY_LIFECYCLE)
-                  in (dispatcher.READY, dispatcher.CLAIMED),
-                  observed(f"#{number} is "
-                           f"{dispatcher.lifecycle_of(after, dispatcher.STORY_LIFECYCLE)}"))
-        run.check("[recovery] the attempt it consumed was restored (§9.4)",
+        # A full poll, not a bare dispatch. §9.4 recovers *before* selection, so
+        # the same run that frees the claim can re-dispatch it — and a bare
+        # dispatch would re-claim without launching a worker, stranding the
+        # fixture for another lease. Polling means the re-dispatch carries a
+        # worker and the fixture can finish.
+        report = self.poll()
+
+        timeline = dispatcher.fetch_timeline(self.repo, number, self.token)
+        recoveries_after = dispatcher.count_expiry_recoveries(timeline)
+
+        # Assert on the timeline, not on the current label. The label has
+        # already moved on: recovery restores `story:ready` and selection may
+        # re-claim it microseconds later, so a check reading the label at the
+        # end cannot tell a recovery from a story that never moved. The first
+        # version of this scenario asserted `lifecycle in (READY, CLAIMED)` —
+        # true whether or not anything happened, which is no assertion at all.
+        run.check("[recovery] the expired claim was recovered to story:ready",
+                  recoveries_after == recoveries_before + 1,
+                  observed(f"expiry recoveries counted from the timeline: "
+                           f"{recoveries_before} -> {recoveries_after}"))
+
+        applied = [dispatcher.merge_gate.label_name(e["label"]) for e in timeline
+                   if e.get("event") == "labeled"
+                   and dispatcher.merge_gate.label_name(e.get("label", {}))
+                   .startswith(dispatcher.STORY_LIFECYCLE)]
+        run.check("[recovery] it went claimed -> ready, not through review",
+                  applied[-2:] and dispatcher.READY in applied[-2:],
+                  observed(f"lifecycle labels applied: {applied}"))
+
+        attempt_after = (dispatcher.merge_gate.parse_section(
+            dispatcher.fetch_issue(self.repo, number, self.token).get("body") or "",
+            "Attempt") or "").strip()
+        run.check("[recovery] the attempt it consumed was not double-counted (§9.4)",
                   int(attempt_after or 0) <= int(attempt_before or 0),
-                  observed(f"Attempt {attempt_before} -> {attempt_after}"))
+                  observed(f"Attempt {attempt_before} -> {attempt_after}; recovery "
+                           f"restores the attempt and any re-dispatch in the same run "
+                           f"spends it again, so the net must never grow"))
+
         run.check("[recovery] the recovery named its reason",
                   "CLAIM_LEASE_EXPIRED" in report,
                   observed("CLAIM_LEASE_EXPIRED recorded"
                            if "CLAIM_LEASE_EXPIRED" in report else "no named reason"))
+        self.settle(run)
