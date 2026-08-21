@@ -5,7 +5,7 @@
 > All state lives in GitHub (issues + labels + PRs + issue comments). Any cache is derivable and disposable.
 > No component other than GitHub is authoritative. Ref: `architecture-v2.1.md` §1, §4; `implementation-plan-v1.md` Phase 1.
 >
-> **`SCHEMA_VERSION = 2.1.0`** — §1–§8 are the Phase 1 state model, verified and unchanged in substance. §9 freezes the executable contracts Phase 2 implements (§9.1 defines versioning and compatibility).
+> **`SCHEMA_VERSION = 2.2.0`** — §1–§8 are the Phase 1 state model, verified and unchanged in substance. §9 freezes the executable contracts Phase 2 implements (§9.1 defines versioning and compatibility).
 
 ---
 
@@ -100,8 +100,8 @@ the world and stays a human decision.
 |---|---|
 | `type:roadmap-commitment` / `type:project` / `type:story` | Issue type |
 | `phase:<value>` | Story phase, mirroring the story form's Phase value (e.g. `phase:build`). Body is canonical. |
-| `hazard` | Pre-flag that story touches a hazard path (Phase 2 enforces via CODEOWNERS). Body field is source of truth. |
-| `test-change` | Distinct class for test weakening/deletion (Phase 2 gate). |
+| `hazard` | Pre-flag that story touches a hazard path. **Not mechanically enforced** — the CODEOWNERS deliverable is withdrawn (§9.17); the label routes and reports, and the advisory `merge-gate-surface` check classifies the diff. Body field is source of truth. |
+| `test-change` | Distinct class for test weakening/deletion. **Not enforced** — gate check (d) is withdrawn (§9.17), because a label that turns a red verdict green is a trust anchor the agent's own credential can write (§9.14). |
 
 Phase scope labels are not state; they coexist with the single lifecycle label.
 
@@ -241,10 +241,10 @@ Both former self-loops (`awaiting-ready → awaiting-ready`, `awaiting-acceptanc
 |---|---|---|---|---|
 | `story:blocked` | `story:ready` | human (manual in P1) / sequencer | dependencies satisfied, WIP allows | explicit `depends-on` already declared |
 | `story:ready` | `story:claimed` | human (manual in P1) / dispatcher assigns | worker attempt dispatched | workers never self-claim; **`Attempt` increments here** (§4.3) |
-| `story:claimed` | `story:in-review` | worker (human in P1) | PR opened referencing story | PR links to the story per §9.5 |
+| `story:claimed` | `story:in-review` | **runtime** (worker/human in P1) | PR opened referencing story | PR links to the story per §9.5; live from §9.11 (#114). No `Attempt` change |
 | `story:claimed` | `story:ready` | dispatcher | **claim lease expired** with no linked PR | **`Attempt` decrements by 1** (restores the pre-dispatch value); see §9.4 |
 | `story:claimed` | `story:completed` | runtime completion path | the dispatched worker returned a **definite success** and durable evidence proves the bounded assignment was carried out, with **no PR linked** per §9.5 | terminal success; the issue is **closed as completed** (§9.3). **No `Attempt` change** — the attempt was dispatched and it succeeded. Every precondition in §9.16 must hold; anything short of all of them leaves the story claimed for §9.4 |
-| `story:in-review` | `story:merged` | merge gate (human in P1) | PR merged | terminal success; the issue is **closed as completed** (§9.3) |
+| `story:in-review` | `story:merged` | **runtime**, on the merge gate's verdict (human in P1) | PR merged | terminal success; the issue is **closed as completed** (§9.3). Live from §9.11 (#114). No `Attempt` change |
 | `story:in-review` | `story:ready` | review (manual in P1) / review skill | findings posted | **no `Attempt` change**; attach findings as a comment |
 | `story:ready` | `story:blocked:poison` | dispatcher (human in P1) | `Attempt >= 3` and another attempt would otherwise be dispatched | **raises** the `poison-rescue` bell; no dispatch occurs. No touch is logged here — the touch belongs to the rescue (§4.3.8) |
 | `story:blocked:poison` | `story:ready` | human | rescue per §4.3 | rescue comment + `Attempt` reset required; **yes** — the single `poison-rescue` / `rescue` touch is logged here (§4.3.8) |
@@ -370,7 +370,7 @@ Nothing in §9 rewrites Phase 1: artifacts created before it (Project #1, storie
 This document is the contract, so the contract carries the version:
 
 ```
-SCHEMA_VERSION = 2.1.0
+SCHEMA_VERSION = 2.2.0
 ```
 
 Semantics: **major** changes break a component that has not been updated (a lifecycle label renamed, a field's meaning changed); **minor** adds contract that older components can ignore; **patch** is editorial. Phase 1 was authored under an implicit `1.x`.
@@ -381,10 +381,11 @@ Semantics: **major** changes break a component that has not been updated (a life
 |---|---|
 | `2.0.0` | §9 executable contracts frozen for Phase 2 |
 | `2.1.0` | `story:completed` added (§9.16), with the §9.10 dependency rule and the §9.3 cancellation description narrowed to match (#104). **Minor:** a component that does not know the label reads it as not-ready and waits, which is the fail-closed direction. Nothing was renamed and no field changed meaning, so the major stays `2` and every pinned component keeps working |
+| `2.2.0` | Merge-gate checks (a), (d) and (e) and the CODEOWNERS deliverable withdrawn (§9.17); `story:claimed → story:in-review` and `story:in-review → story:merged` promoted to live routes (§9.11); §9.3's poison closure corrected to match §4.3.7 (#114). **Minor:** nothing is renamed and no field changes meaning. The withdrawal removes checks that were never implemented, so no component loses a behaviour it had. The two promoted routes are additive — a component that does not know them leaves those transitions to a human, which is what every component did until now. The §9.3 correction makes a *first* poisoning leave the issue open; a component that expected it closed would have been reading a state the contract never described |
 
 Every Phase 2 component pins the major version it implements and, on encountering state written under a different major version, **halts and routes to the human queue** — it must never guess. Fail-closed is the rule wherever §9 is silent.
 
-Version is asserted, not stamped on every issue: issue bodies are rendered forms and carry no room for a marker. The dispatcher records the pinned version in its own run log, and any artifact it writes that has a free-text field carries `schema-version: 2.1.0`.
+Version is asserted, not stamped on every issue: issue bodies are rendered forms and carry no room for a marker. The dispatcher records the pinned version in its own run log, and any artifact it writes that has a free-text field carries `schema-version: 2.2.0`.
 
 ### 9.2 Atomic lifecycle transitions
 
@@ -409,6 +410,7 @@ Required behaviour:
 | `story:merged` | closed | completed |
 | `story:completed` | closed | completed |
 | `story:blocked:poison` after the §4.3.7 rescue cap | closed | not planned |
+| `story:blocked:poison` **before** that cap | **open** | — (waiting on a human) |
 | `story:cancelled` | closed | not planned |
 | `project:accepted` | closed | completed |
 | every other state | open | — |
@@ -442,6 +444,8 @@ A cancellation is a **human decision** and stays one, recorded as a comment on t
 Work that *succeeded* with no deliverable is `story:completed`, not this. #77 originally described cancellation as "finished with no deliverable", which conflated the two; #104 separates them, because a factory that records its successes as cancellations cannot report on itself.
 
 A closed issue is never reopened by a component; only a human reopens, which is itself a decision.
+
+**A poisoned story is open until the rescue cap is spent.** Added by #114 after #110 found the dispatcher closing it on the *first* poisoning. Two things follow from that closure and both are wrong. The §4.3.6 rescue becomes unreachable — it requires the story to return to `story:ready`, and reaching a closed issue means reopening it, which the paragraph above reserves to a human and forbids to every component. And the story disappears from the human queue, which enumerates open issues (§9.11), so the one artifact most in need of a person's attention is the one nothing mentions again. Poison routes work *to* a human; it does not file it away. Only the third poisoning, with §4.3.7's two rescues spent, closes the issue as *not planned* — there, closure is correct, because the story is going back to planning rather than waiting for anyone.
 
 ### 9.4 Claim lease and expiry
 
@@ -588,9 +592,41 @@ Executable from Increment 2 onward:
 | `story:ready` → `story:claimed` | dispatch a worker, increment `Attempt` (§4.3.2) |
 | `story:ready` → `story:blocked:poison` | at the §4.3.5 threshold: do not dispatch, notify |
 | `story:claimed` → `story:ready` | claim expiry (§9.4) |
+| `story:claimed` → `story:completed` | the runtime completion path (§9.16) |
+| `story:claimed` → `story:in-review` | a §9.5-linked pull request is open (#114) |
+| `story:in-review` → `story:merged` | that pull request merged; close as completed (#114) |
+| `project:awaiting-ready` → `project:active` | consume the §5.1 plan approval |
+| `project:awaiting-acceptance` → `project:accepted` / `project:active` | consume the §5.3 acceptance |
 | `project:awaiting-ready`, `project:awaiting-acceptance`, `story:blocked:poison`, `story:blocked:scope` | notify the human queue; take no other action |
 
-**Documentation-only** until their phase arrives: `project:ready-for-planning → project:planning` (planning agent, Phase 3); PR-open → review (review skill, Phase 4); `story:in-review → story:merged` (merge gate, Increment 2+, gated on §9.13).
+**The two review routes, and why they may be mechanical.** Both were
+documentation-only until #114, the second explicitly "gated on §9.13". §9.13 is
+complete — `merge-gate` is required and `required_approving_review_count` is 0 —
+so the condition has been met. They are owned by the runtime, not by the worker
+§4.2 names: a worker that has exited cannot write the transition its own pull
+request caused, and a human writing it is the relay Phase 2 exists to delete.
+
+What makes them safe to automate is *where the evidence comes from*. The only
+input is whether a pull request carrying the canonical `Story: #N` line is open
+or merged, and a merge is the outcome of the required gate — a verdict the
+delivering credential cannot fabricate (§9.14). That is the whole difference
+from `story:completed`, which needs §9.16's much narrower proof precisely
+because nothing outside the factory has ruled on the work. Ambiguity — two
+linked pull requests, a duplicate `Story:` line, a pull request closed without
+merging — writes nothing and names its reason; the last of those is a human's
+decision, because work delivered and then rejected is not a state the factory
+has a rule for.
+
+**The human queue is enumerated, not announced once.** §9.11's last row is a
+standing obligation, not an event: every artifact in one of those states is
+surfaced on *every* poll, with its link and the action required, for as long as
+it waits. A notifier that reports only transitions goes quiet about a problem
+precisely because the problem is old — which is what happened to #55, #61 and
+#66, each of which sat at a bell until somebody happened to look.
+
+**Documentation-only** until their phase arrives: `project:ready-for-planning → project:planning` (planning agent, Phase 3); `story:blocked → story:ready` (sequencer, Phase 3); `project:active → project:awaiting-acceptance` (sequencer, Phase 3); review *findings* on an open pull request, `story:in-review → story:ready` (review skill, Phase 4).
+
+The §9.15 replay reports every transition it cannot route live under one of these headings rather than dropping it, so this list is checkable against the code instead of maintained by hand.
 
 **No silent drops.** A transition with no live route is logged and surfaced, never discarded — an unrouted transition is a contract gap, and silence would hide it.
 
@@ -721,3 +757,46 @@ produce is a path that closes stories on something else's output. Equally,
 precondition 3 is what keeps the rule honest as assignments grow: it is only
 ever true that "no deliverable was required" while the assignment forbids
 producing one, and that coupling must be asserted mechanically, not remembered.
+
+### 9.17 Withdrawn merge-gate checks
+
+Added by #114. Three Phase 2 deliverables are **withdrawn**, not deferred, and
+the difference matters: deferred means "later", withdrawn means "this design
+cannot do what it claimed, and pretending otherwise is worse than the gap".
+
+| Withdrawn | Was | Why |
+|---|---|---|
+| Gate check **(a)** | review approval bound to the exact head SHA | Already withdrawn by §9.14 under the single-identity decision (#27); recorded here so all three sit together |
+| Gate check **(d)** | test files not deleted or weakened without a distinct `test-change` label | The label is the release valve, and §9.14 prohibits any label as a trust anchor because the agent's credential can set it. A check whose red can be turned green by the actor it constrains is not a check |
+| Gate check **(e)** | hazard paths not touched without a human ack label from an allowed identity | Same defect, plus a second: with one identity there is no "allowed identity" distinct from the agent's |
+| **CODEOWNERS** | code-owner review over dependency manifests, CI/workflow files, migrations, secrets config, `factory/spec/**`, `factory/gates/**` | With one credential the owner and the agent are the same account, so a required code-owner review is a review the agent gives itself |
+
+**What is not withdrawn.** Hazard paths remain enumerated, stories still
+pre-flag them in `### Hazard`, the `hazard-ack` bell is still rung and still
+logged, and the advisory `merge-gate-surface` check still classifies every diff
+against the enforcement surface. What is withdrawn is the claim that any of this
+is **mechanically enforced**. §9.14 already stated the honest version for the
+gate runner and it generalises: *the ack is forgeable, so its evidential value
+is asymmetric — a missing ack on a landed hazard change is unforgeable evidence
+that no one reviewed it, while a present ack proves only that the text exists.
+Design for the missing case.*
+
+**Why withdrawal rather than a weaker implementation.** A gate that reports
+`hazard-ack: present` tells a reader the hazard was reviewed. Under a shared
+credential it tells them only that a string exists. Shipping it would put a
+green light on the one class of change least able to justify one, and every
+later reader would have to know the caveat to avoid being misled. An absent
+check misleads nobody.
+
+**What would bring them back.** A second identity — a worker credential distinct
+from the human's — restores the distinction all three rest on, at which point
+(d), (e) and CODEOWNERS become implementable as written. That is a Phase 4+
+question (#26, #27); nothing here forecloses it, and the labels stay defined in
+§2 so the data is not lost in the meantime.
+
+**What replaces them in Phase 2.** Nothing pretends to. The gate enforces what
+it can derive from inputs the credential cannot fabricate — the diff, the story's
+`### Scope`, and CI-computed test results across every factory suite (#113) —
+and `factory/acceptance/` proves the rest of Phase 2 behaves as specified. The
+enforcement surface is covered by human review and the audit trail, which is a
+convention, and is now described as one.
