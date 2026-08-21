@@ -72,6 +72,96 @@ class TestWhatCounts(unittest.TestCase):
         ambiguous = issue(9, "type:story", "story:blocked:poison", "story:ready")
         self.assertIsNone(hq.waiting_for(ambiguous))
 
+    def test_every_action_names_the_exact_form_the_parser_will_read(self):
+        """#122 — the defect this fixes, pinned against the real parser.
+
+        Not a string comparison against a copy of the instruction: that would
+        pass forever while the parser moved underneath it. Each promised literal
+        is fed to `continuation.py`'s own regex, so an instruction and its
+        consumer cannot drift apart in silence — drift is the failure mode, and
+        the reason a fixed expected-string test would not prevent a recurrence.
+        """
+        import continuation
+
+        for state, promised in hq.HUMAN_QUEUE_FORMATS.items():
+            if promised is None:
+                continue
+            literal, heading = promised
+            action = hq.WAITING_ON_A_HUMAN[state]
+            self.assertIn(literal, action,
+                          f"{state}: the action does not name the line it needs")
+            self.assertIn(heading, action,
+                          f"{state}: the action does not name the required heading")
+
+            # The literal must actually satisfy the pattern that will read it.
+            pattern = (continuation.DECISION_RE if literal.startswith("decision:")
+                       else continuation.RESULT_RE)
+            self.assertIsNotNone(pattern.search(literal),
+                                 f"{state}: `{literal}` does not match the parser "
+                                 f"that will consume the reply")
+
+            # And the heading must be the one the consumer matches exactly.
+            heading_re = (continuation.APPROVAL_HEADING if "approval" in heading.lower()
+                          else continuation.ACCEPTANCE_HEADING)
+            self.assertIsNotNone(heading_re.search(heading),
+                                 f"{state}: `{heading}` is not the heading "
+                                 f"continuation.py recognises")
+
+    def test_an_action_reply_built_from_the_instruction_is_actually_consumed(self):
+        """End to end: follow the instruction literally, and it must work.
+
+        The #109 failure was that a person did what the queue asked and the
+        factory still refused it. This builds the minimal comment the action
+        describes and pushes it through the real classifier.
+        """
+        import continuation
+
+        approval = ("## Plan approval\n\ndecision: approved\nactor: @someone\n")
+        verdict, error = continuation.classify_approval({"body": approval})
+        self.assertIsNone(error, approval)
+        self.assertEqual(verdict, "approved")
+
+        acceptance = ("## Acceptance\n\nresult: pass\nactor: @someone\n\n"
+                      "- it works — pass\n")
+        verdict, error = continuation.classify_acceptance({"body": acceptance})
+        self.assertIsNone(error, acceptance)
+        self.assertEqual(verdict, "pass")
+
+    def test_the_109_comment_would_still_be_refused(self):
+        """The prose that started this is still not a decision.
+
+        The fix is the instruction, never the parser. If this test ever fails,
+        someone has taught the factory to read free text to decide whether it is
+        authorized, which is the one thing §9.9 forbids outright.
+        """
+        import continuation
+
+        _, error = continuation.classify_approval(
+            {"body": "## Plan approval\n\nAPPROVED.\n\nProceed with the work.\n"})
+        self.assertEqual(error, continuation.Reason.MALFORMED_DECISION)
+
+    def test_a_state_with_no_automated_consumer_says_so(self):
+        """An invented format for a decision nothing reads would be worse than
+        none: it implies a machine is waiting when no machine is."""
+        for state, promised in hq.HUMAN_QUEUE_FORMATS.items():
+            if promised is not None:
+                continue
+            action = hq.WAITING_ON_A_HUMAN[state]
+            self.assertNotIn("decision:", action, state)
+            self.assertNotIn("result:", action, state)
+
+    def test_every_waiting_state_declares_whether_it_has_a_consumer(self):
+        self.assertEqual(set(hq.HUMAN_QUEUE_FORMATS), set(hq.WAITING_ON_A_HUMAN),
+                         "a waiting state with no declared format is a state "
+                         "nobody checked for drift")
+
+    def test_the_poison_action_names_all_three_rescue_components(self):
+        """§4.3.6 requires all three, in order. Naming one is how a rescue gets
+        half-performed and the story sits poisoned anyway."""
+        action = hq.WAITING_ON_A_HUMAN[dispatcher.POISON]
+        for component in ("rescue comment", "`0`", "poison-rescue"):
+            self.assertIn(component, action, component)
+
     def test_the_poison_label_comes_from_the_authority(self):
         with open(hq.__file__, encoding="utf-8") as handle:
             source = handle.read()
