@@ -1,0 +1,95 @@
+{
+  "events": [
+    {
+      "_index": 0,
+      "created_at": "2026-08-19T20:05:00Z",
+      "event": "labeled",
+      "label": {
+        "name": "type:story"
+      }
+    },
+    {
+      "_index": 1,
+      "created_at": "2026-08-19T20:05:00Z",
+      "event": "labeled",
+      "label": {
+        "name": "story:blocked"
+      }
+    },
+    {
+      "_index": 2,
+      "created_at": "2026-08-19T20:05:00Z",
+      "event": "labeled",
+      "label": {
+        "name": "phase:build"
+      }
+    },
+    {
+      "_index": 10,
+      "created_at": "2026-08-19T20:24:14Z",
+      "event": "labeled",
+      "label": {
+        "name": "story:ready"
+      }
+    },
+    {
+      "_index": 11,
+      "created_at": "2026-08-19T20:24:14Z",
+      "event": "unlabeled",
+      "label": {
+        "name": "story:blocked"
+      }
+    },
+    {
+      "_index": 13,
+      "created_at": "2026-08-19T20:24:19Z",
+      "event": "unlabeled",
+      "label": {
+        "name": "story:ready"
+      }
+    },
+    {
+      "_index": 14,
+      "created_at": "2026-08-19T20:24:19Z",
+      "event": "labeled",
+      "label": {
+        "name": "story:claimed"
+      }
+    },
+    {
+      "_index": 16,
+      "created_at": "2026-08-19T20:24:22Z",
+      "event": "unlabeled",
+      "label": {
+        "name": "story:claimed"
+      }
+    },
+    {
+      "_index": 17,
+      "created_at": "2026-08-19T20:24:23Z",
+      "event": "labeled",
+      "label": {
+        "name": "story:in-review"
+      }
+    },
+    {
+      "_index": 19,
+      "created_at": "2026-08-19T20:24:26Z",
+      "event": "unlabeled",
+      "label": {
+        "name": "story:in-review"
+      }
+    },
+    {
+      "_index": 20,
+      "created_at": "2026-08-19T20:24:26Z",
+      "event": "labeled",
+      "label": {
+        "name": "story:merged"
+      }
+    }
+  ],
+  "issue": 10,
+  "repo": "maheshhbhat/ai-software-factory",
+  "type": "story"
+}

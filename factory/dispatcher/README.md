@@ -130,6 +130,55 @@ into general bell consumption. Follow-up: make the monitor reconcile approved
 project bells before routing, using the same durable-evidence and idempotency
 rules as this recovery pass.
 
+## The §9.15 replay (`replay.py`)
+
+`state-schema.md` §9.15 makes a replay of Phase 1's recorded history a
+precondition for the dispatcher writing anything, and `implementation-plan-v1.md`
+names the same replay as the proof that dispatch happens once and only once per
+transition. It replays the `labeled` / `unlabeled` timelines of #1, #10, #11 and
+#12 — the walk verified under #19, chosen because it contains the retry
+sequence, the poison threshold, the rescue, and the scope detour rather than
+only the happy path.
+
+```bash
+python3 factory/dispatcher/replay.py                      # replay the captured fixtures
+GITHUB_TOKEN=… python3 factory/dispatcher/replay.py \
+    --capture --repo owner/name                            # re-read the history, GET only
+```
+
+Three properties, and each clause earns its place. **Exactly once** — every
+reconstructed transition resolves to one routing decision, because a transition
+routed twice is a duplicate dispatch and one routed zero times is work that
+never starts. **No silent drops** — a route that is documentation-only until a
+later phase is reported by name, and a transition the table does not recognise
+is a failure, since §9.11 calls an unrouted transition a contract gap.
+**Read-only** — the replay writes to no issue, and `--capture` uses GET alone.
+
+A transition is reconstructed statefully, not by pairing events by timestamp.
+The recorded history predates §9.2 being enforced and shows it: on #10 the
+`story:claimed` label was removed at 20:24:22 and `story:in-review` applied at
+20:24:23, leaving a one-second window with no lifecycle label. Pairing by
+timestamp would read that as two transitions and invent a state the factory was
+never in. The replay instead applies events in order and emits a transition only
+when the label set settles on one label different from the last — so the window
+is recorded as a §9.2 finding, which is what it is. The replay rediscovers 33 of
+them across the four issues, which is the same defect the Phase 1 repair
+recorded, derived independently from the raw events.
+
+## Poison closure and the rescue cap (§4.3.7, §9.3)
+
+A poisoned story is **open**. §9.3 closes `story:blocked:poison` only after
+§4.3.7's rescue cap is spent, and until then the story is waiting for a human —
+a closed issue waits for nobody. Closing on the first poisoning, which this
+module did until #110, also put the story beyond reach of the §4.3.6 rescue,
+because §9.3 permits only a human to reopen an issue and no component may.
+
+Rescues are counted from the issue timeline, the same technique
+`count_expiry_recoveries` uses and for the same reason: durable history is the
+record. Both paths that reach poison — the §4.3.5 dispatch threshold and the
+§9.4.1 recovery budget — apply the identical closure rule, so the terminal state
+does not mean two different things depending on how the story arrived at it.
+
 ## Tests
 
 ```sh

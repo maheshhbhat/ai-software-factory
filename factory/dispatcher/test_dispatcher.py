@@ -344,15 +344,22 @@ class TestClaimRecovery(unittest.TestCase):
         self.assertIn("story:merged", payload["labels"])
 
     @patch.object(dp, "_api")
+    @patch.object(dp, "fetch_timeline", return_value=[])
     @patch.object(dp, "fetch_issue")
-    def test_poison_keeps_attempt_three_and_closes_not_planned(self, fetch_issue, api):
+    def test_poison_keeps_attempt_three_and_leaves_the_issue_open(self, fetch_issue,
+                                                                  timeline, api):
+        """§9.3: a first poisoning is a story waiting for a human, not a closed
+        one. Closing it here — which this module did until #110 — ends the wait
+        instead of serving it, and makes the §4.3.6 rescue unreachable."""
         fetch_issue.return_value = story(10, attempt="3")
         ok, note = dp.poison("owner/repo", story(10, attempt="3"), "token")
         self.assertTrue(ok)
         self.assertIn("Attempt remains 3", note)
         payload = api.call_args.kwargs["payload"]
-        self.assertEqual(payload["state_reason"], "not_planned")
+        self.assertNotIn("state", payload)
+        self.assertNotIn("state_reason", payload)
         self.assertIn("story:blocked:poison", payload["labels"])
+        self.assertNotIn("story:ready", payload["labels"])
 
 
 class TestDispatchLine(unittest.TestCase):
@@ -837,6 +844,112 @@ class TestClosedDependencyThroughTheRealLoadingPath(unittest.TestCase):
         output = self.run_main(github, "--claim")
         self.assertIn(R.DEPENDENCY_UNMET, output)
         self.assertNotIn("DISPATCH", output)
+
+
+class TestPoisonClosureIsBoundedByTheRescueCap(unittest.TestCase):
+    """§4.3.7 and §9.3 together — the fix for the unreachable rescue (#110).
+
+    Two rules interlock here and reading either alone gets it wrong. §4.3.5 says
+    the threshold poisons instead of dispatching. §9.3 says `story:blocked:poison`
+    is closed *after the §4.3.7 rescue cap* — which means before that cap it is
+    open, because it is waiting for a human and a closed issue waits for nobody.
+    Closing on the first poisoning also put the story beyond reach of the §4.3.6
+    rescue, since §9.3 permits only a human to reopen an issue.
+    """
+
+    def poisoning(self, n, at_minute=0):
+        return {"event": "labeled", "label": {"name": "story:blocked:poison"},
+                "created_at": f"2026-08-20T{at_minute:02d}:{n:02d}:00Z"}
+
+    def test_counts_poisonings_from_the_timeline_alone(self):
+        for n in (0, 1, 2, 3):
+            timeline = [self.poisoning(i) for i in range(n)]
+            self.assertEqual(dp.count_poisonings(timeline), n, n)
+
+    def test_unrelated_labels_are_not_poisonings(self):
+        timeline = [{"event": "labeled", "label": {"name": "story:ready"},
+                     "created_at": "2026-08-20T10:00:00Z"},
+                    {"event": "unlabeled", "label": {"name": "story:blocked:poison"},
+                     "created_at": "2026-08-20T10:01:00Z"}]
+        self.assertEqual(dp.count_poisonings(timeline), 0)
+
+    def test_the_first_poisonings_leave_the_issue_open(self):
+        for already in range(dp.RESCUE_MAX):
+            close, why = dp.poison_closure([self.poisoning(i) for i in range(already)])
+            self.assertFalse(close, already)
+            self.assertIn("stays open", why)
+
+    def test_the_poisoning_past_the_cap_closes_as_not_planned(self):
+        close, why = dp.poison_closure(
+            [self.poisoning(i) for i in range(dp.RESCUE_MAX)])
+        self.assertTrue(close)
+        self.assertIn("not planned", why)
+
+    @patch.object(dp, "_api")
+    @patch.object(dp, "fetch_timeline")
+    @patch.object(dp, "fetch_issue")
+    def test_the_third_poisoning_closes_the_issue(self, fetch_issue, timeline, api):
+        fetch_issue.return_value = story(10, attempt="3")
+        timeline.return_value = [self.poisoning(i) for i in range(dp.RESCUE_MAX)]
+        ok, _ = dp.poison("owner/repo", story(10, attempt="3"), "token")
+        self.assertTrue(ok)
+        payload = api.call_args.kwargs["payload"]
+        self.assertEqual(payload["state"], "closed")
+        self.assertEqual(payload["state_reason"], "not_planned")
+
+    @patch.object(dp, "_api")
+    @patch.object(dp, "fetch_timeline", return_value=[])
+    @patch.object(dp, "fetch_issue")
+    def test_the_recovery_budget_poison_path_agrees(self, fetch_issue, timeline, api):
+        """Two paths reach poison — the dispatch threshold and the §9.4.1 recovery
+        budget. They must not disagree about closure, or the same terminal state
+        means two different things depending on how the story got there."""
+        claimed = story(10, lifecycle="story:claimed", attempt="1")
+        fetch_issue.return_value = claimed
+        decision = dp.RecoveryDecision(10, "poison", "RECOVERY_BUDGET_EXHAUSTED", "x")
+        ok, note = dp.apply_recovery("owner/repo", claimed, decision, "token")
+        self.assertTrue(ok)
+        payload = api.call_args.kwargs["payload"]
+        self.assertNotIn("state", payload)
+        self.assertIn("story:blocked:poison", payload["labels"])
+        self.assertIn("stays open", note)
+
+    @patch.object(dp, "_api")
+    @patch.object(dp, "fetch_timeline")
+    @patch.object(dp, "fetch_issue")
+    def test_the_recovery_path_also_closes_past_the_cap(self, fetch_issue, timeline, api):
+        claimed = story(10, lifecycle="story:claimed", attempt="1")
+        fetch_issue.return_value = claimed
+        timeline.return_value = [self.poisoning(i) for i in range(dp.RESCUE_MAX)]
+        decision = dp.RecoveryDecision(10, "poison", "RECOVERY_BUDGET_EXHAUSTED", "x")
+        ok, _ = dp.apply_recovery("owner/repo", claimed, decision, "token")
+        self.assertTrue(ok)
+        self.assertEqual(api.call_args.kwargs["payload"]["state_reason"], "not_planned")
+
+    def test_an_open_poisoned_story_is_still_never_dispatched(self):
+        """Keeping it open must not make it dispatchable again — it is now in the
+        queue the dispatcher reads, which is exactly the risk this test pins."""
+        poisoned = story(10, lifecycle="story:blocked:poison", attempt="3")
+        plan = dp.plan_dispatch({10: poisoned}, {901: project()}, COMMITMENT)
+        self.assertEqual(plan.selected, [])
+        self.assertEqual(plan.decisions[0].reason, R.NOT_READY)
+
+    def test_an_open_poisoned_story_holds_no_wip_slot(self):
+        stories = {10: story(10, lifecycle="story:blocked:poison", attempt="3"),
+                   11: story(11)}
+        plan = dp.plan_dispatch(stories, {901: project()}, COMMITMENT, wip_limit=2)
+        self.assertEqual(plan.wip_in_use, 0)
+        self.assertEqual([d.number for d in plan.selected], [11])
+
+    def test_the_rescue_cap_matches_the_schema(self):
+        import os
+        path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(dp.__file__))),
+                            "spec", "state-schema.md")
+        with open(path, encoding="utf-8") as handle:
+            schema = handle.read()
+        self.assertIn("capped at **2**", schema,
+                      "§4.3.7's rescue cap is the number this module implements")
+        self.assertEqual(dp.RESCUE_MAX, 2)
 
 
 if __name__ == "__main__":
