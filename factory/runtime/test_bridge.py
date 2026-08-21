@@ -120,17 +120,35 @@ class TestObservability(unittest.TestCase):
 
 
 class TestCheckBudget(unittest.TestCase):
-    def test_the_check_fits_inside_the_launch_budget(self):
-        """The whole check is spent inside `workers.LAUNCH_TIMEOUT_SECONDS`,
-        which kills this process. If the check can outlast it, a slow engine is
-        killed mid-check and reported AMBIGUOUS — which suppresses failover and
-        makes the FAILED verdict unreachable exactly when it is needed."""
-        worst_case = (bridge.ACK_HTTP_TIMEOUT_SECONDS                      # pre-launch
-                      + bridge.ACK_CHECK_ATTEMPTS * bridge.ACK_HTTP_TIMEOUT_SECONDS
-                      + (bridge.ACK_CHECK_ATTEMPTS - 1) * bridge.ACK_CHECK_DELAY_SECONDS)
-        self.assertLess(worst_case, workers.LAUNCH_TIMEOUT_SECONDS * 0.6,
-                        "the acknowledgement check leaves too little of the launch "
-                        "budget for the engine itself")
+    """Everything the check spends is taken from the engine's own time, because
+    both are inside `workers.LAUNCH_TIMEOUT_SECONDS`, which kills this process.
+    Overrun it and a slow engine is killed mid-check and reported AMBIGUOUS —
+    suppressing failover and making the FAILED verdict unreachable exactly when
+    it is needed."""
+
+    def worst_case(self):
+        return (bridge.ACK_HTTP_TIMEOUT_SECONDS                            # pre-launch
+                + bridge.ACK_CHECK_ATTEMPTS * bridge.ACK_HTTP_TIMEOUT_SECONDS
+                + (bridge.ACK_CHECK_ATTEMPTS - 1) * bridge.ACK_CHECK_DELAY_SECONDS)
+
+    def test_the_check_stays_inside_its_declared_budget(self):
+        self.assertLessEqual(self.worst_case(), bridge.ACK_CHECK_BUDGET_SECONDS)
+
+    def test_the_budget_is_derived_from_the_cap_that_kills_this_process(self):
+        # Not a tuned constant: change the launch cap and the check follows.
+        self.assertEqual(bridge.ACK_CHECK_BUDGET_SECONDS,
+                         workers.LAUNCH_TIMEOUT_SECONDS // 3)
+
+    def test_the_engine_keeps_most_of_the_budget(self):
+        self.assertGreater(workers.LAUNCH_TIMEOUT_SECONDS - self.worst_case(),
+                           workers.LAUNCH_TIMEOUT_SECONDS / 2)
+
+    def test_the_bridge_never_times_out_before_its_parent(self):
+        # `workers.launch` maps any non-zero exit to FAILED, so a bridge timeout
+        # firing first would report "did not start" about a live engine and send
+        # a second one after it. A configured value below the cap is clamped.
+        self.assertGreater(bridge.ENGINE_TIMEOUT_SECONDS,
+                           workers.LAUNCH_TIMEOUT_SECONDS)
 
 
 class TestProofOfAction(unittest.TestCase):
@@ -153,8 +171,15 @@ class TestProofOfAction(unittest.TestCase):
         self.assertEqual(1, run_main(answers=[None, False, False]))
         self.assertEqual(0, run_main(answers=[None, True]))
 
-    def test_only_total_blindness_is_unverifiable(self):
-        self.assertEqual(0, run_main(answers=[None, None, None]))
+    def test_an_early_no_is_not_evidence_if_the_loop_then_goes_blind(self):
+        # The first read firing before the comment is visible is precisely why
+        # the loop retries. If reads 2 and 3 fail, the waiting never happened,
+        # so declaring "proven not done" would be a FAILED verdict invented out
+        # of a race — and a second engine would post a second acknowledgement.
+        self.assertEqual(0, run_main(answers=[False, None, None]))
+
+    def test_a_definite_no_at_the_end_is_still_a_failure(self):
+        self.assertEqual(1, run_main(answers=[None, None, False]))
 
     def test_no_launch_instant_is_unverifiable(self):
         self.assertEqual(0, run_main(since=None, answers=AssertionError(
@@ -191,13 +216,20 @@ class TestExitCodeIsNotProofEitherWay(unittest.TestCase):
 
     def test_a_non_zero_exit_with_no_acknowledgement_is_still_a_failure(self):
         run = runner(code=3, stderr="boom")
-        self.assertEqual(1, run_main(run=run, answers=[False]))
+        self.assertEqual(1, run_main(run=run, answers=[False, False, False]))
+
+    def test_the_failure_path_is_as_patient_as_the_success_path(self):
+        # An engine that posts and then dies in teardown races replication. A
+        # single un-retried read here calls that a definite failure, and the
+        # failover engine posts a second acknowledgement on the same Story.
+        run = runner(code=3, stderr="teardown blew up")
+        self.assertEqual(0, run_main(run=run, answers=[False, True]))
 
     def test_ignorance_does_not_rescue_a_non_zero_exit(self):
         # Only evidence overrides the engine's own verdict; not being able to
         # tell leaves the failure standing.
         run = runner(code=3, stderr="boom")
-        self.assertEqual(1, run_main(run=run, answers=[None]))
+        self.assertEqual(1, run_main(run=run, answers=[None, None, None]))
 
 
 class TestAcknowledgedSince(unittest.TestCase):
@@ -249,6 +281,43 @@ class TestAcknowledgedSince(unittest.TestCase):
 
     def test_an_unexpected_payload_is_ignorance_not_evidence(self):
         self.assertIsNone(self._ask({"message": "Not Found"}))
+
+
+class TestHeadingMatching(unittest.TestCase):
+    """The heading is text an LLM was asked to produce. Every miss here is a real
+    acknowledgement declared invisible — a definite failure, and a duplicate from
+    the failover engine."""
+
+    def test_the_exact_heading_matches(self):
+        self.assertTrue(bridge.looks_like_acknowledgement(
+            "## Worker acknowledgement\n\nI am codex."))
+
+    def test_markdown_emphasis_does_not_hide_it(self):
+        self.assertTrue(bridge.looks_like_acknowledgement(
+            "**## Worker acknowledgement**\n\nI am claude."))
+
+    def test_a_different_heading_level_does_not_hide_it(self):
+        self.assertTrue(bridge.looks_like_acknowledgement("### Worker acknowledgement"))
+
+    def test_a_line_of_preface_does_not_hide_it(self):
+        self.assertTrue(bridge.looks_like_acknowledgement(
+            "Done.\n\n## Worker acknowledgement\n\nI am claude."))
+
+    def test_trailing_text_on_the_heading_line_does_not_hide_it(self):
+        self.assertTrue(bridge.looks_like_acknowledgement(
+            "## Worker acknowledgement — claude-delivery, 23:43Z"))
+
+    def test_prose_about_an_acknowledgement_is_not_one(self):
+        # Someone talking *about* an acknowledgement — a review comment quoting
+        # the heading — must not count as the worker having acted.
+        self.assertFalse(bridge.looks_like_acknowledgement(
+            "> **## Worker acknowledgement** — quoted from the run log"))
+        self.assertFalse(bridge.looks_like_acknowledgement(
+            "The engine never posted its ## Worker acknowledgement heading."))
+
+    def test_an_unrelated_comment_is_not_one(self):
+        self.assertFalse(bridge.looks_like_acknowledgement("## Verification finding"))
+        self.assertFalse(bridge.looks_like_acknowledgement(""))
 
 
 class TestServerNow(unittest.TestCase):

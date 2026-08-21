@@ -45,10 +45,24 @@ import urllib.error
 import urllib.request
 from datetime import timezone
 
-# How long the engine may take to accept and complete the bounded task. Exceeding
-# it is reported as a timeout, which `workers.py` treats as AMBIGUOUS — never as
-# a definite failure, because the engine may still be running.
-ENGINE_TIMEOUT_SECONDS = int(os.environ.get("FACTORY_BRIDGE_TIMEOUT", "300"))
+HERE = os.path.dirname(os.path.abspath(__file__))
+if HERE not in sys.path:
+    sys.path.insert(0, HERE)
+import workers  # noqa: E402 — the launch budget this process is killed by
+
+# How long the engine may take to accept and complete the bounded task.
+#
+# This must never fire before `workers.LAUNCH_TIMEOUT_SECONDS`, and the reason is
+# not tidiness. `workers.launch` maps *any* non-zero exit to `FAILED` — a
+# definite failure that permits fallback — so a bridge that times out while the
+# engine is still running would report "it did not start" about a process that is
+# running right now, and a second engine would be launched onto the Story. The
+# timeout that must win is the parent's, which maps to `AMBIGUOUS` and refuses to
+# fall back. A configured value below that ceiling cannot be honoured, so it is
+# clamped rather than quietly inverted into the dangerous verdict.
+CONFIGURED_ENGINE_TIMEOUT = int(os.environ.get("FACTORY_BRIDGE_TIMEOUT", "300"))
+ENGINE_TIMEOUT_SECONDS = max(CONFIGURED_ENGINE_TIMEOUT,
+                             workers.LAUNCH_TIMEOUT_SECONDS + 1)
 
 DEFAULT_REPO = "maheshhbhat/ai-software-factory"
 
@@ -58,20 +72,32 @@ DEFAULT_REPO = "maheshhbhat/ai-software-factory"
 # check.
 ACK_HEADING = "## Worker acknowledgement"
 
+# What the heading is, once markdown is discounted. The prompt asks an LLM for
+# this exact string, and an exact prefix match on generated text fails closed in
+# the dangerous direction: `**## Worker acknowledgement**`, `### Worker
+# acknowledgement`, or one line of preface would make a real acknowledgement
+# invisible, and invisible means a definite failure and a duplicate from the
+# failover engine.
+ACK_HEADING_TEXT = "worker acknowledgement"
+ACK_HEADING_SCAN_LINES = 3
+
 # How hard to look for that artifact before concluding the engine did nothing.
 # GitHub is read-your-writes in practice but not by contract, and calling a
 # worker's success a failure would hand the same Story to a second engine — so
 # the check is patient before it is decisive.
 #
-# Every value here is spent inside `workers.LAUNCH_TIMEOUT_SECONDS` (60s), which
-# kills this process. The whole check must therefore cost far less than the
-# launch budget, or a slow engine would be killed mid-check and reported as
-# AMBIGUOUS — which suppresses failover and makes the FAILED verdict this module
-# exists to produce unreachable exactly when it is needed. Worst case below is
-# one 8s read before launch and 26s after it.
-ACK_HTTP_TIMEOUT_SECONDS = 8
+# The budget is *derived* from the launch cap that kills this process, not tuned
+# to sit under it. Everything the check spends is taken from the engine's own
+# time: overrun it and a slow engine is killed mid-check and reported AMBIGUOUS,
+# which suppresses failover and makes the FAILED verdict unreachable exactly when
+# it is needed. A third of the cap is the check's; the engine keeps the rest.
+ACK_CHECK_BUDGET_SECONDS = workers.LAUNCH_TIMEOUT_SECONDS // 3
 ACK_CHECK_ATTEMPTS = 3
 ACK_CHECK_DELAY_SECONDS = 1
+# One read before launch and one per attempt, plus the waits between them.
+ACK_HTTP_TIMEOUT_SECONDS = max(1, (ACK_CHECK_BUDGET_SECONDS
+                                   - (ACK_CHECK_ATTEMPTS - 1) * ACK_CHECK_DELAY_SECONDS)
+                               // (ACK_CHECK_ATTEMPTS + 1))
 
 # `date` is on the list because the prompt requires the acknowledgement to carry
 # the current UTC time. An engine that cannot read the clock either invents a
@@ -171,6 +197,19 @@ def server_now(repo: str, story: int) -> str | None:
     return parsed.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def looks_like_acknowledgement(body: str) -> bool:
+    """Is this comment the acknowledgement, allowing for markdown?
+
+    The heading is text an LLM was asked to produce, so the match discounts
+    emphasis and heading level and tolerates a line or two of preface. It stays
+    anchored to the start of a line — a quoted heading inside prose is somebody
+    talking *about* an acknowledgement, not one.
+    """
+    lines = [line.strip() for line in (body or "").splitlines() if line.strip()]
+    return any(line.strip("#*_ \t").lower().startswith(ACK_HEADING_TEXT)
+               for line in lines[:ACK_HEADING_SCAN_LINES])
+
+
 def acknowledged_since(repo: str, story: int, since: str) -> bool | None:
     """Has an acknowledgement been posted at or after `since`?
 
@@ -196,42 +235,31 @@ def acknowledged_since(repo: str, story: int, since: str) -> bool | None:
     if not isinstance(payload, list):
         print(f"[bridge] WARN: unexpected comments payload for #{story}", flush=True)
         return None
-    return any((comment.get("body") or "").lstrip().startswith(ACK_HEADING)
+    return any(looks_like_acknowledgement(comment.get("body") or "")
                and (comment.get("created_at") or "") >= since
                for comment in payload)
 
 
-def worker_acted(repo: str, story: int, since: str | None) -> bool:
-    """Did *this* invocation produce an acknowledgement?
+def acknowledgement_verdict(repo: str, story: int, since: str | None) -> bool | None:
+    """Did this invocation produce an acknowledgement? `None` means unknowable.
 
-    Patient, then decisive: a read that fails is retried, because the pre-launch
-    read already proved the token and the network work, so a failure here is far
-    more likely a blip than an inability to see. Only when every attempt fails is
-    the answer unknowable.
-
-    An unknowable answer returns `True` — the pre-#97 behaviour, kept as a stated
-    limitation rather than a hidden one: an unverifiable launch is reported
-    exactly as it always was. Ignorance must not be spent as evidence, because
-    the failure verdict it would produce puts a second engine on the Story.
+    Patient, then decisive — and the *last authoritative answer decides*. An
+    early `False` is not evidence that the work was not done; it is evidence that
+    the comment was not visible yet, which is the entire reason for retrying. If
+    the tail of the loop goes blind, the loop's purpose never happened, so the
+    honest answer is ignorance rather than the `FAILED` verdict that would put a
+    second engine on the Story.
     """
     if since is None:
-        print("[bridge] WARN: acknowledgement unverifiable; reporting the engine's "
-              "own exit status", flush=True)
-        return True
-    saw_evidence = False
+        return None
+    answer = None
     for attempt in range(ACK_CHECK_ATTEMPTS):
         answer = acknowledged_since(repo, story, since)
         if answer:
             return True
-        if answer is False:
-            saw_evidence = True
         if attempt + 1 < ACK_CHECK_ATTEMPTS:
             time.sleep(ACK_CHECK_DELAY_SECONDS)
-    if not saw_evidence:
-        print("[bridge] WARN: acknowledgement unverifiable; reporting the engine's "
-              "own exit status", flush=True)
-        return True
-    return False
+    return answer
 
 
 def main(argv: list[str]) -> int:
@@ -276,9 +304,13 @@ def main(argv: list[str]) -> int:
         print(f"[bridge] FAIL: engine not available: {exc}", flush=True)
         return 1
     except subprocess.TimeoutExpired:
-        # Ambiguous by nature. Exit non-zero so the runtime notices, but say
-        # plainly that the engine may still be working — `workers.py` maps its
-        # own timeout to AMBIGUOUS and refuses to fall back.
+        # Ambiguous by nature, and unreachable in practice: the clamp above keeps
+        # this timeout longer than the parent's, so `workers.py` times the launch
+        # out first and maps *that* to AMBIGUOUS, which refuses to fall back. This
+        # branch exists for the case where the bridge is driven directly, and it
+        # says plainly that the engine may still be working. It must never become
+        # the normal path — `workers.launch` would read the non-zero exit as a
+        # definite failure and start a second engine on a live Story.
         print(f"[bridge] TIMEOUT after {ENGINE_TIMEOUT_SECONDS}s: the engine may still "
               f"be running. Do not launch another worker for this story.", flush=True)
         return 2
@@ -286,6 +318,14 @@ def main(argv: list[str]) -> int:
     tail = (completed.stdout or "").strip().splitlines()[-3:]
     for line in tail:
         print(f"[bridge] {line}", flush=True)
+    # One patient verdict, consulted by both exit paths. Splitting them is how
+    # the non-zero path ended up with a single un-retried read that could race
+    # GitHub's replication and call a posted acknowledgement a failure.
+    verdict = acknowledgement_verdict(args.repo, args.story, since)
+    if verdict is None:
+        print("[bridge] WARN: acknowledgement unverifiable; reporting the engine's "
+              "own exit status", flush=True)
+
     if completed.returncode != 0:
         # An exit code proves the process ended — in this direction too. An
         # engine that posted the acknowledgement and then died in teardown has
@@ -293,7 +333,7 @@ def main(argv: list[str]) -> int:
         # second engine to post a second acknowledgement on the same Story.
         # Only *evidence* overrides the exit code here: an unverifiable answer
         # leaves the engine's own non-zero verdict standing.
-        if since is not None and acknowledged_since(args.repo, args.story, since):
+        if verdict is True:
             print(f"[bridge] {args.engine} exited {completed.returncode} but the "
                   f"acknowledgement is on #{args.story}; the work was done.",
                   flush=True)
@@ -305,10 +345,10 @@ def main(argv: list[str]) -> int:
     # An exit code proves the process ended, never that the assignment was
     # carried out. #96 caught the Claude engine ending cleanly having posted
     # nothing, which the runtime then recorded as LAUNCHED — a definite success,
-    # so failover was correctly suppressed and the no-op became terminal. The
-    # check below is what makes "did nothing" a *definite failure* instead, which
-    # is the one verdict that lets another engine try.
-    if not worker_acted(args.repo, args.story, since):
+    # so failover was correctly suppressed and the no-op became terminal. A
+    # definite `False` is what makes "did nothing" a definite *failure* instead,
+    # which is the one verdict that lets another engine try.
+    if verdict is False:
         print(f"[bridge] FAIL: {args.engine} exited 0 without posting an "
               f"acknowledgement on #{args.story}; it did not do the work. "
               f"Treat as a definite failure — another engine may try.", flush=True)
