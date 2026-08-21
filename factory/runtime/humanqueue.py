@@ -66,22 +66,52 @@ sys.path.insert(0, os.path.join(HERE, "..", "gates"))
 import dispatcher  # noqa: E402 — the lifecycle vocabulary is defined once, there
 import runlog  # noqa: E402
 
-# §9.11's last row, plus the action each one is actually waiting for. The state
-# is the key because the state is what a human can see and change; the action is
-# prose for a person, and it is the only prose in this module.
+# §9.11's last row, plus the action each one is waiting for. The state is the key
+# because the state is what a human can see and change; the action is prose for a
+# person, and it is the only prose in this module.
+#
+# **Each action names the exact recordable form, not merely the decision** (#122).
+# The queue used to say "post a `## Plan approval` comment" and stop there. On
+# #109 the CTO did exactly that, wrote `APPROVED.`, and the continuation pass
+# refused it: §5.1 declares a machine-readable shape carrying a literal
+# `decision:` line, and the queue had not said so. The parser was right — reading
+# prose to decide whether the factory is authorized is what §9.9 forbids — so the
+# defect was here, in the instruction. A queue that tells a person *what* to
+# decide but not *how to record it* manufactures a relay touch every time, and
+# relay is the one metric this phase is measured on driving to zero.
+#
+# `HUMAN_QUEUE_FORMATS` below pins each of these strings against the regex that
+# will actually read the reply. A fixed string alone would not prevent this
+# recurring: the failure mode is *drift*, an instruction and a parser that stop
+# agreeing, and only a test that reads both can catch that.
 WAITING_ON_A_HUMAN: dict[str, str] = {
     "project:awaiting-ready":
-        "approve the falsifiable acceptance criteria, or request changes — "
-        "post a `## Plan approval` comment quoting them (§5.1)",
+        "approve the falsifiable acceptance criteria, or request changes — post a "
+        "`## Plan approval` comment containing the line `decision: approved` "
+        "(or `decision: changes-requested`) and quoting the criteria verbatim (§5.1)",
     "project:awaiting-acceptance":
-        "record outcome acceptance, pass or fail per criterion — "
-        "post an `## Acceptance` comment (§5.3)",
+        "record outcome acceptance — post an `## Acceptance` comment containing the "
+        "line `result: pass` (or `result: fail`) and one `- <criterion> — pass/fail` "
+        "line per criterion (§5.3)",
     dispatcher.POISON:
-        "rescue per §4.3.6 (rescue comment, `Attempt` reset to 0, one "
-        "`poison-rescue` touch), or let §4.3.7 close it as not planned",
+        "rescue per §4.3.6 — all three, in order: a rescue comment stating what "
+        "changed, `### Attempt` reset to `0` in the body, and one `poison-rescue` "
+        "touch logged; or leave it and let §4.3.7 close it as not planned",
     "story:blocked:scope":
-        "resolve the scope dispute — amend the scope or withdraw it — and log "
-        "one `scope-decision` touch (§4.2)",
+        "resolve the scope dispute — amend `### Scope` or withdraw the dispute, move "
+        "the label, and log one `scope-decision` touch (§4.2). No automated pass "
+        "consumes this decision, so there is no comment format to match",
+}
+
+# The literal each action promises, against the pattern that will read it. Pinned
+# in a test so an instruction and its parser cannot drift apart in silence — see
+# `test_humanqueue.py`. `None` means no automated consumer, which is a fact about
+# the route worth stating rather than a gap to fill with an invented format.
+HUMAN_QUEUE_FORMATS: dict[str, tuple[str, str] | None] = {
+    "project:awaiting-ready": ("decision: approved", "## Plan approval"),
+    "project:awaiting-acceptance": ("result: pass", "## Acceptance"),
+    dispatcher.POISON: None,          # §4.3.6 is a three-part human act, not a parse
+    "story:blocked:scope": None,      # §4.2 resolution is read by no component
 }
 
 PREFIXES = (dispatcher.STORY_LIFECYCLE, dispatcher.PROJECT_LIFECYCLE)

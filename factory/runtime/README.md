@@ -99,6 +99,23 @@ HUMAN-QUEUE artifact=#109 state=project:awaiting-ready url=… action='approve t
 HUMAN-QUEUE artifact=#42 state=story:blocked:poison url=… action='rescue per §4.3.6 …'
 ```
 
+**Each action names the exact recordable form** (#122), not merely the decision.
+The queue used to say "post a `## Plan approval` comment" and stop. On #109 the
+CTO did exactly that, wrote `APPROVED.`, and the continuation pass refused it —
+§5.1 declares a machine-readable shape carrying a literal `decision:` line, and
+the queue had not said so. The parser was right; reading prose to decide whether
+the factory is authorized is what §9.9 forbids. The defect was in the
+instruction, and it cost a relay touch — the one metric this phase is measured
+on driving to zero.
+
+`HUMAN_QUEUE_FORMATS` pins each promised literal against the regex that will
+actually read the reply, because the failure mode is **drift**: an instruction
+and a parser that quietly stop agreeing. A test asserting a fixed expected string
+would pass forever while the parser moved underneath it. Two of the four states
+declare `None` — no automated pass consumes a poison rescue or a scope
+resolution — and the action says so, because an invented format implies a
+machine is waiting when none is.
+
 **It holds no state, and that is the design.** Nothing records that an artifact
 was announced, so an artifact still waiting is announced again and one that
 stopped waiting stops being announced — with no cursor to go stale and nothing
