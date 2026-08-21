@@ -9,7 +9,7 @@ number and typed `work #N`. The labels had already made the decision, so that
 touch carried no judgment — a *relay* touch, the one class
 `architecture-v2.1.md` §7 requires to trend to zero.
 
-## Five passes per cycle
+## Six passes per cycle
 
 **1 · Review link** (`review_link.py`) — turn a delivery pull request into the
 lifecycle transitions it implies: `story:claimed → story:in-review` when a
@@ -23,19 +23,23 @@ new-issue discovery cannot see. Observed live three times (#55, #61, #66): a
 valid approval sat in GitHub while the lifecycle waited for someone to type
 `work #N`.
 
-**3 · Human queue** (`humanqueue.py`) — say what is waiting on a person. See
+**3 · Sequencer** (`sequencer.py`) — advance dependency-satisfied blocked
+stories to ready, and fully delivered active projects to awaiting acceptance.
+Both decisions are derived from current GitHub state and are idempotent.
+
+**4 · Human queue** (`humanqueue.py`) — say what is waiting on a person. See
 *The human queue* below.
 
-**4 · Dispatch** (`poller.py` + the dispatcher) — claim and wake, as below.
+**5 · Dispatch** (`poller.py` + the dispatcher) — claim and wake, as below.
 
-**5 · Completion** (`completion.py`) — when a worker finishes successfully, ask
+**6 · Completion** (`completion.py`) — when a worker finishes successfully, ask
 whether its Story is done. See *The completion path* below.
 
 The order is load-bearing at both ends. Review link runs **first** so a story
 whose delivery merged leaves `story:claimed` before WIP is counted — otherwise
-finished work keeps a worker slot it no longer needs. Continuation runs before
-dispatch so an approval and the work it unblocks land in the same cycle. The
-human queue runs after both, so its list describes this cycle rather than the
+finished work keeps a worker slot it no longer needs. Continuation and
+sequencing run before dispatch so an approval and the work it unblocks land in
+the same cycle. The human queue runs after both, so its list describes this cycle rather than the
 last one.
 
 Every pass is isolated: a failure reports and the poll continues. Coupling them

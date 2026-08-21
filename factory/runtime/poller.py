@@ -60,6 +60,7 @@ import continuation  # noqa: E402  — decision-comment consumption (#71)
 import humanqueue   # noqa: E402  — what is waiting on a person (#111)
 import review_link  # noqa: E402  — delivery-PR lifecycle reconciliation (#111)
 import runlog       # noqa: E402  — operational record (#104)
+import sequencer    # noqa: E402  — dependency/project lifecycle sequencing (#193)
 import workers      # noqa: E402  — standard worker contract (#84)
 
 DISPATCHER = os.path.join(HERE, "..", "dispatcher", "dispatcher.py")
@@ -255,6 +256,12 @@ def run_human_queue(repo: str) -> list:
     return humanqueue.run(repo, token)
 
 
+def run_sequencer(repo: str, claim: bool = True) -> list:
+    """Advance dependency-ready stories and fully delivered projects."""
+    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or ""
+    return sequencer.run(repo, token, apply=claim)
+
+
 def poll_once(repo: str, commitment: int, seen: set[int], claim: bool = True) -> list[dict]:
     """One cycle. Returns the dispatches that produced a wake-up."""
     # Reconciliation runs first: a story whose delivery merged should leave
@@ -275,6 +282,14 @@ def poll_once(repo: str, commitment: int, seen: set[int], claim: bool = True) ->
         run_continuation(repo, claim)
     except Exception as exc:  # noqa: BLE001 — reported, never fatal to dispatch
         print(f"[poller] continuation pass failed, dispatch continues: "
+              f"{type(exc).__name__}: {exc}", flush=True)
+
+    # Sequencing consumes the active project created by continuation above and
+    # may expose ready stories to dispatch in this same cycle.
+    try:
+        run_sequencer(repo, claim)
+    except Exception as exc:  # noqa: BLE001 — reported, never fatal to dispatch
+        print(f"[poller] sequencer pass failed, dispatch continues: "
               f"{type(exc).__name__}: {exc}", flush=True)
 
     # Said on every poll, after the passes that can change what is waiting and

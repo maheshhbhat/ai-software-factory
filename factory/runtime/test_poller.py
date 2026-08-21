@@ -114,12 +114,13 @@ class TestPollOnce(unittest.TestCase):
             if key.startswith("FACTORY_WORKER"):
                 del os.environ[key]
         os.environ["FACTORY_WORKER_CMD"] = "/usr/bin/true"
-        # Reconciliation, continuation, the human queue and completion are
-        # separate concerns with their own tests; stub all four so these
+        # Reconciliation, continuation, sequencing, the human queue and completion are
+        # separate concerns with their own tests; stub all five so these
         # exercise dispatch only and make no network call.
         self._passes = [
             mock.patch.object(poller, "run_review_link", return_value=[]),
             mock.patch.object(poller, "run_continuation", return_value=[]),
+            mock.patch.object(poller, "run_sequencer", return_value=[]),
             mock.patch.object(poller, "run_human_queue", return_value=[]),
         ]
         for patcher in self._passes:
@@ -163,6 +164,14 @@ class TestPollOnce(unittest.TestCase):
             woken = poller.poll_once("o/r", 54, seen)
         self.assertEqual([d["story"] for d in woken], [64])
 
+    def test_sequencer_failure_does_not_block_dispatch(self):
+        seen: set[int] = set()
+        with mock.patch.object(poller, "run_sequencer",
+                               side_effect=RuntimeError("boom")), \
+             mock.patch.object(poller, "run_dispatcher", return_value=REPORT):
+            woken = poller.poll_once("o/r", 54, seen)
+        self.assertEqual([d["story"] for d in woken], [64])
+
     def test_every_poll_says_what_is_waiting_on_a_human(self):
         """Not once per change — once per poll. A queue that reports only
         transitions goes quiet about a problem precisely because it is old."""
@@ -190,6 +199,15 @@ class TestPollOnce(unittest.TestCase):
             woken = poller.poll_once("o/r", 54, seen)
         self.assertEqual([d["story"] for d in woken], [64])
         self.assertEqual(seen, {64})
+
+    def test_sequencer_runs_before_the_dispatcher(self):
+        order = []
+        with mock.patch.object(poller, "run_sequencer",
+                               side_effect=lambda *a, **k: order.append("sequencer")), \
+             mock.patch.object(poller, "run_dispatcher",
+                               side_effect=lambda *a, **k: (order.append("dispatch"), REPORT)[1]):
+            poller.poll_once("o/r", 54, set())
+        self.assertEqual(order, ["sequencer", "dispatch"])
 
     def test_replay_does_not_wake_twice(self):
         """Two polls, same output. The second must not launch a worker again —
@@ -260,6 +278,7 @@ class TestNoLocalAuthority(unittest.TestCase):
         latency, not a duplicate."""
         with mock.patch.object(poller, "run_review_link", return_value=[]), \
              mock.patch.object(poller, "run_continuation", return_value=[]), \
+             mock.patch.object(poller, "run_sequencer", return_value=[]), \
              mock.patch.object(poller, "run_human_queue", return_value=[]), \
              mock.patch.object(poller, "run_dispatcher",
                                return_value="Dispatcher — no eligible work"):
@@ -282,6 +301,7 @@ class TestWorkerContractRouting(unittest.TestCase):
         self._passes = [
             mock.patch.object(poller, "run_review_link", return_value=[]),
             mock.patch.object(poller, "run_continuation", return_value=[]),
+            mock.patch.object(poller, "run_sequencer", return_value=[]),
             mock.patch.object(poller, "run_human_queue", return_value=[]),
         ]
         for patcher in self._passes:
@@ -342,6 +362,7 @@ class TestCompletionIsDelegated(unittest.TestCase):
         self._passes = [
             mock.patch.object(poller, "run_review_link", return_value=[]),
             mock.patch.object(poller, "run_continuation", return_value=[]),
+            mock.patch.object(poller, "run_sequencer", return_value=[]),
             mock.patch.object(poller, "run_human_queue", return_value=[]),
         ]
         for patcher in self._passes:
