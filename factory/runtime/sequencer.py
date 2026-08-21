@@ -84,6 +84,7 @@ def plan_story_readiness(issues: dict[int, dict], wip_limit: int) -> list[Decisi
 
     reserved = sum(
         dispatcher.lifecycle_of(story, dispatcher.STORY_LIFECYCLE) in IN_FLIGHT
+        and (story.get("state") or "OPEN").upper() == "OPEN"
         for story in stories.values()
     )
     capacity = max(0, wip_limit - reserved)

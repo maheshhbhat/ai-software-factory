@@ -6,7 +6,7 @@ import sequencer as sq
 
 def issue(number, kind, lifecycle, body="", association="OWNER"):
     return {"number": number, "body": body, "author_association": association,
-            "labels": [{"name": kind}, {"name": lifecycle}]}
+            "state": "OPEN", "labels": [{"name": kind}, {"name": lifecycle}]}
 
 
 def story(number, lifecycle="story:blocked", deps="none", project=10,
@@ -67,6 +67,18 @@ class StoryReadinessTests(unittest.TestCase):
         issues = {10: project(), 20: story(20, "story:claimed"),
                   23: story(23), 21: story(21), 22: story(22)}
         self.assertEqual([21], [d.number for d in sq.plan_story_readiness(issues, 2)])
+
+    def test_closed_claim_does_not_consume_wip_but_open_claim_does(self):
+        closed_claim = story(19, "story:claimed")
+        closed_claim["state"] = "CLOSED"
+        issues = {10: project(), 19: closed_claim, 20: story(20, "story:claimed"),
+                  21: story(21), 22: story(22)}
+        self.assertEqual([21], [d.number for d in sq.plan_story_readiness(issues, 2)])
+        dispatch_plan = sq.dispatcher.plan_dispatch(
+            {n: value for n, value in issues.items() if n != 10}, {10: issues[10]},
+            commitment=54, wip_limit=2,
+            dependencies=sq.dispatcher.DependencyIndex(issues))
+        self.assertEqual(1, dispatch_plan.wip_in_use)
 
 
 class ProjectCompletionTests(unittest.TestCase):
