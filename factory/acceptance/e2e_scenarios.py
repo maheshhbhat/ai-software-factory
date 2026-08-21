@@ -640,3 +640,105 @@ class Recovery(Scenario):
                   observed("CLAIM_LEASE_EXPIRED recorded"
                            if "CLAIM_LEASE_EXPIRED" in report else "no named reason"))
         self.settle(run)
+
+
+@scenario
+class TrustBoundary(Scenario):
+    """§9.9 against real GitHub data — as far as one identity can take it.
+
+    This was recorded as unreachable, and that was half right. The full form —
+    open an issue as a stranger, watch the dispatcher refuse it — needs an
+    account that is not a collaborator, and decision #27 chose a single
+    identity. That much stands.
+
+    What was wrong was concluding nothing could be verified live. A public
+    repository accumulates artifacts from people who are not collaborators, and
+    this one has: GitHub has stamped at least one comment here
+    `author_association: NONE`. That is real, live, unfakeable data — GitHub
+    computes the field from repository membership and this credential cannot
+    forge it.
+
+    So the scenario asserts what that data can carry:
+
+    * the production trust check refuses a **real** untrusted-authored artifact;
+    * every issue the dispatcher actually fetches carries the field the check
+      reads, so the rule is wired to live data rather than to a fixture's shape;
+    * the trusted set is the one the contract names.
+
+    **What it still cannot prove**, and the report says so rather than implying
+    otherwise: that an untrusted *story* is refused end to end. No such story
+    exists, and this credential cannot author one. Acceptance scenario S3 covers
+    that by driving the real dispatcher against a NONE-authored issue, and it is
+    the strongest form available until a second identity exists (#26).
+
+    If the repository happens to contain no untrusted artifact, the scenario says
+    so and does not pass on an empty search. A check that quietly succeeds when
+    it found nothing to check is worse than one that admits it.
+    """
+
+    key = "trust-boundary"
+    cost = Cost(issues=0, engine_calls=0)
+
+    def run(self, run: Run) -> None:
+        untrusted = self._untrusted_artifacts()
+
+        run.check("[trust-boundary] the repository carries a real untrusted-authored artifact",
+                  bool(untrusted),
+                  observed(f"{len(untrusted)} found: "
+                           + ", ".join(f"{a['user']['login']}={a['author_association']}"
+                                       for a in untrusted[:3])
+                           if untrusted else
+                           "none — nothing to check against, so nothing is asserted below"))
+        if not untrusted:
+            return
+
+        # The production check, against data GitHub stamped and this credential
+        # cannot forge.
+        refused = [a for a in untrusted if not dispatcher.is_trusted(a)]
+        run.check("[trust-boundary] the production trust check refuses every one of them",
+                  len(refused) == len(untrusted),
+                  observed(f"{len(refused)}/{len(untrusted)} refused by "
+                           f"dispatcher.is_trusted, associations="
+                           f"{sorted({a['author_association'] for a in untrusted})}"))
+
+        # The rule has to be reading live data, not a fixture's shape.
+        issues = dispatcher.fetch_issues(self.repo, self.token)
+        missing = [n for n, issue in issues.items() if "author_association" not in issue]
+        run.check("[trust-boundary] every issue the dispatcher fetches carries the field",
+                  not missing,
+                  observed(f"{len(issues)} issue(s) fetched, "
+                           f"{len(missing)} without author_association"))
+
+        trusted_live = {issue["author_association"] for issue in issues.values()}
+        run.check("[trust-boundary] and the live issues it acts on are trusted ones",
+                  trusted_live <= dispatcher.TRUSTED_ASSOCIATIONS,
+                  observed(f"associations present on open issues: {sorted(trusted_live)}; "
+                           f"trusted set = {sorted(dispatcher.TRUSTED_ASSOCIATIONS)}"))
+
+        run.check("[trust-boundary] an untrusted story would be refused before its body is read",
+                  self._refusal_precedes_body(),
+                  observed("evaluate_story checks is_trusted before parsing any section — "
+                           "asserted by source order, since no untrusted story exists to "
+                           "drive through it"))
+
+    def _untrusted_artifacts(self) -> list[dict]:
+        """Real comments GitHub stamped with a non-trusted association.
+
+        Paginated, and that is not incidental. A single page returns the most
+        recent hundred comments, and this factory writes a great many of them —
+        the one untrusted artifact in this repository fell off page one within a
+        day of being posted. A search that silently reads only the newest slice
+        would report "no untrusted authors here" and be believed.
+        """
+        found = dispatcher.fetch_pages(
+            f"https://api.github.com/repos/{self.repo}/issues/comments", self.token)
+        return [c for c in found
+                if (c.get("author_association") or "").upper()
+                not in dispatcher.TRUSTED_ASSOCIATIONS]
+
+    def _refusal_precedes_body(self) -> bool:
+        import inspect
+        source = inspect.getsource(dispatcher.evaluate_story)
+        trust = source.find("is_trusted(story)")
+        body = source.find('story.get("body")')
+        return 0 < trust < body

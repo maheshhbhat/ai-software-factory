@@ -260,7 +260,7 @@ class Cost:
 class Scenario:
     """One requirement, proven against the live repository.
 
-    `key` must name a requirement in `e2e_requirements.py`; the registry asserts
+    `key` must name a requirement in `phase2_requirements.py`; the registry asserts
     it, so a scenario cannot drift away from the thing it claims to prove.
     """
 
@@ -457,7 +457,7 @@ def runlog_events(story: int) -> list[dict]:
 
 
 def render(run: Run, requested: list[str]) -> str:
-    import e2e_requirements as reqs
+    import phase2_requirements as reqs
 
     lines = ["End-to-end verification — real repository, real engine, nothing mocked", ""]
     if run.aborted:
@@ -513,7 +513,7 @@ def render(run: Run, requested: list[str]) -> str:
 
 
 def main(argv: list[str]) -> int:
-    import e2e_requirements as reqs
+    import phase2_requirements as reqs
 
     parser = argparse.ArgumentParser(
         description="End-to-end verification against a live repository")
