@@ -120,7 +120,39 @@ left behind means something is broken, and the fixture is the report.
 external engine being reachable. A required check that fails for reasons the
 author cannot fix is a check people learn to route around.
 
+### Requirement coverage, and its two honest holes
+
+`e2e.py --list` prints the map. Fourteen of fifteen Phase 2 requirements are
+reachable against a live repository; the report names every one on every run,
+including the ones it did not cover, because a suite that lists only what it
+proves reads as complete.
+
+**`trust-boundary` is unreachable and will stay so.** `author_association` is
+computed by GitHub from repository membership, so this credential cannot author
+an untrusted issue. Decision #27 chose a single identity, which makes this
+blocked by a recorded architectural choice rather than by effort. A second
+identity (#26) unlocks it; acceptance scenario S3 covers it hermetically
+meanwhile.
+
+**`recovery` is deferred, not skipped.** `CLAIM_LEASE` is sixty minutes measured
+from a durable timeline event, and timeline events cannot be backdated. Two
+invocations an hour apart reach it, with the fixture issue as the only state
+that has to survive between them:
+
+```bash
+python3 factory/acceptance/e2e.py --only recovery ...            # phase one
+python3 factory/acceptance/e2e.py --only recovery --resume 131 ... # 60+ min later
+```
+
+Two more are **attested rather than exercised**: `review-open` and
+`review-merged` are verified against durable history — #122, #124 and #126 each
+walked `claimed → in-review → merged` with every label written by a component —
+because causing them live means a commit on `main` per run. That is a weaker
+claim than exercising them, and the report marks it as one.
+
 ### What building it found
+
+
 
 The first live run scored 14/15, and the failure was in the test rather than the
 factory: it asserted the canonical `DISPATCH` line against the poller's stdout,
