@@ -1,0 +1,279 @@
+{
+  "events": [
+    {
+      "_index": 0,
+      "created_at": "2026-08-19T20:05:13Z",
+      "event": "labeled",
+      "label": {
+        "name": "type:story"
+      }
+    },
+    {
+      "_index": 1,
+      "created_at": "2026-08-19T20:05:13Z",
+      "event": "labeled",
+      "label": {
+        "name": "story:blocked"
+      }
+    },
+    {
+      "_index": 2,
+      "created_at": "2026-08-19T20:05:14Z",
+      "event": "labeled",
+      "label": {
+        "name": "hazard"
+      }
+    },
+    {
+      "_index": 3,
+      "created_at": "2026-08-19T20:05:14Z",
+      "event": "labeled",
+      "label": {
+        "name": "phase:build"
+      }
+    },
+    {
+      "_index": 11,
+      "created_at": "2026-08-19T20:25:08Z",
+      "event": "unlabeled",
+      "label": {
+        "name": "story:blocked"
+      }
+    },
+    {
+      "_index": 12,
+      "created_at": "2026-08-19T20:25:08Z",
+      "event": "labeled",
+      "label": {
+        "name": "story:ready"
+      }
+    },
+    {
+      "_index": 14,
+      "created_at": "2026-08-19T20:25:14Z",
+      "event": "labeled",
+      "label": {
+        "name": "story:claimed"
+      }
+    },
+    {
+      "_index": 15,
+      "created_at": "2026-08-19T20:25:14Z",
+      "event": "unlabeled",
+      "label": {
+        "name": "story:ready"
+      }
+    },
+    {
+      "_index": 17,
+      "created_at": "2026-08-19T20:25:18Z",
+      "event": "unlabeled",
+      "label": {
+        "name": "story:claimed"
+      }
+    },
+    {
+      "_index": 18,
+      "created_at": "2026-08-19T20:25:18Z",
+      "event": "labeled",
+      "label": {
+        "name": "story:in-review"
+      }
+    },
+    {
+      "_index": 20,
+      "created_at": "2026-08-19T20:25:22Z",
+      "event": "unlabeled",
+      "label": {
+        "name": "story:in-review"
+      }
+    },
+    {
+      "_index": 21,
+      "created_at": "2026-08-19T20:25:22Z",
+      "event": "labeled",
+      "label": {
+        "name": "story:ready"
+      }
+    },
+    {
+      "_index": 23,
+      "created_at": "2026-08-19T20:25:27Z",
+      "event": "unlabeled",
+      "label": {
+        "name": "story:ready"
+      }
+    },
+    {
+      "_index": 24,
+      "created_at": "2026-08-19T20:25:27Z",
+      "event": "labeled",
+      "label": {
+        "name": "story:claimed"
+      }
+    },
+    {
+      "_index": 26,
+      "created_at": "2026-08-19T20:25:30Z",
+      "event": "labeled",
+      "label": {
+        "name": "story:in-review"
+      }
+    },
+    {
+      "_index": 27,
+      "created_at": "2026-08-19T20:25:30Z",
+      "event": "unlabeled",
+      "label": {
+        "name": "story:claimed"
+      }
+    },
+    {
+      "_index": 29,
+      "created_at": "2026-08-19T20:25:33Z",
+      "event": "unlabeled",
+      "label": {
+        "name": "story:in-review"
+      }
+    },
+    {
+      "_index": 30,
+      "created_at": "2026-08-19T20:25:33Z",
+      "event": "labeled",
+      "label": {
+        "name": "story:ready"
+      }
+    },
+    {
+      "_index": 32,
+      "created_at": "2026-08-19T20:25:38Z",
+      "event": "labeled",
+      "label": {
+        "name": "story:claimed"
+      }
+    },
+    {
+      "_index": 33,
+      "created_at": "2026-08-19T20:25:38Z",
+      "event": "unlabeled",
+      "label": {
+        "name": "story:ready"
+      }
+    },
+    {
+      "_index": 35,
+      "created_at": "2026-08-19T20:25:42Z",
+      "event": "labeled",
+      "label": {
+        "name": "story:in-review"
+      }
+    },
+    {
+      "_index": 36,
+      "created_at": "2026-08-19T20:25:42Z",
+      "event": "unlabeled",
+      "label": {
+        "name": "story:claimed"
+      }
+    },
+    {
+      "_index": 38,
+      "created_at": "2026-08-19T20:25:45Z",
+      "event": "unlabeled",
+      "label": {
+        "name": "story:in-review"
+      }
+    },
+    {
+      "_index": 39,
+      "created_at": "2026-08-19T20:25:45Z",
+      "event": "labeled",
+      "label": {
+        "name": "story:ready"
+      }
+    },
+    {
+      "_index": 41,
+      "created_at": "2026-08-19T20:25:49Z",
+      "event": "labeled",
+      "label": {
+        "name": "story:blocked:poison"
+      }
+    },
+    {
+      "_index": 42,
+      "created_at": "2026-08-19T20:25:49Z",
+      "event": "unlabeled",
+      "label": {
+        "name": "story:ready"
+      }
+    },
+    {
+      "_index": 47,
+      "created_at": "2026-08-19T20:36:28Z",
+      "event": "unlabeled",
+      "label": {
+        "name": "story:blocked:poison"
+      }
+    },
+    {
+      "_index": 48,
+      "created_at": "2026-08-19T20:36:28Z",
+      "event": "labeled",
+      "label": {
+        "name": "story:ready"
+      }
+    },
+    {
+      "_index": 52,
+      "created_at": "2026-08-19T20:41:38Z",
+      "event": "unlabeled",
+      "label": {
+        "name": "story:ready"
+      }
+    },
+    {
+      "_index": 53,
+      "created_at": "2026-08-19T20:41:38Z",
+      "event": "labeled",
+      "label": {
+        "name": "story:claimed"
+      }
+    },
+    {
+      "_index": 55,
+      "created_at": "2026-08-19T20:41:41Z",
+      "event": "unlabeled",
+      "label": {
+        "name": "story:claimed"
+      }
+    },
+    {
+      "_index": 56,
+      "created_at": "2026-08-19T20:41:41Z",
+      "event": "labeled",
+      "label": {
+        "name": "story:in-review"
+      }
+    },
+    {
+      "_index": 58,
+      "created_at": "2026-08-19T20:41:45Z",
+      "event": "labeled",
+      "label": {
+        "name": "story:merged"
+      }
+    },
+    {
+      "_index": 59,
+      "created_at": "2026-08-19T20:41:45Z",
+      "event": "unlabeled",
+      "label": {
+        "name": "story:in-review"
+      }
+    }
+  ],
+  "issue": 11,
+  "repo": "maheshhbhat/ai-software-factory",
+  "type": "story"
+}

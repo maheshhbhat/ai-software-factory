@@ -59,6 +59,21 @@ CLAIM_LEASE = timedelta(minutes=60)  # §9.4
 # occurred. A story therefore reaches a terminal or human-queue state after at
 # most RECOVERY_MAX + 1 dispatches through the expiry path.
 RECOVERY_MAX = 2
+
+# §4.3.7 — how many times a poisoned story may be rescued by a human before the
+# factory stops asking. Counted as the number of times `story:blocked:poison`
+# has been applied in the issue timeline, because GitHub's timeline is
+# authoritative history and no local counter may contradict it.
+#
+# The number decides *closure*, not the poisoning itself. §9.3 keeps a poisoned
+# story **open** until this cap is spent: it is waiting for a human, and an
+# issue closed as `not planned` is not waiting for anyone. Closing on the first
+# poisoning — which is what this module did until #110 — made the §4.3.6 rescue
+# unreachable, since only a human may reopen a closed issue (§9.3) and no
+# component may. It also hid the story from every queue built on open issues,
+# which is the population the human queue enumerates.
+RESCUE_MAX = 2
+
 SUPPORTED_SCHEMA_MAJOR = merge_gate.SUPPORTED_SCHEMA_MAJOR
 
 # §9.9: only these author associations may have their issues treated as factory
@@ -198,6 +213,41 @@ def count_expiry_recoveries(timeline: list[dict]) -> int:
             recoveries += 1
             seen_claimed = False
     return recoveries
+
+
+def count_poisonings(timeline: list[dict]) -> int:
+    """How many times `story:blocked:poison` has already been applied (§4.3.7).
+
+    Derived from the issue timeline for the same reason `count_expiry_recoveries`
+    is: durable history is the record, and a story that has been rescued twice
+    must read as rescued twice after any restart, on any machine, with no local
+    state involved.
+    """
+    return sum(
+        1 for event in timeline
+        if event.get("event") == "labeled"
+        and merge_gate.label_name(event.get("label", {})) == POISON
+    )
+
+
+def poison_closure(timeline: list[dict]) -> tuple[bool, str]:
+    """Does *this* poisoning close the issue? §9.3 and §4.3.7 decide together.
+
+    §9.3 lists `story:blocked:poison` as terminal-and-closed only "after the
+    §4.3.7 rescue cap"; before that the story is open, because it is waiting for
+    a human rescue and closure would end the wait rather than serve it.
+
+    Returns (close, reason). The reason is written into the operator note either
+    way, so a poisoning always says which of the two things it was.
+    """
+    already = count_poisonings(timeline)
+    if already >= RESCUE_MAX:
+        return True, (f"poisoning {already + 1} with {already} rescue(s) already spent "
+                      f"(cap {RESCUE_MAX}); §4.3.7 closes this as not planned and "
+                      f"returns it to planning rather than asking for a {already + 1}th rescue")
+    return False, (f"poisoning {already + 1} of {RESCUE_MAX + 1}; the issue stays open "
+                   f"awaiting the §4.3.6 rescue, which needs a rescue comment, "
+                   f"Attempt reset to 0, and a poison-rescue touch")
 
 
 def recovery_decision(story: dict, timeline: list[dict], pull_requests: list[dict],
@@ -576,6 +626,7 @@ def apply_recovery(repo: str, story: dict, decision: RecoveryDecision,
     """Apply a recovery only if the claim is still authoritative."""
     if decision.action not in {"ready", "merged", "poison"}:
         return False, f"{decision.reason}: {decision.detail}".rstrip()
+    note_suffix = ""
     fresh = fetch_issue(repo, story["number"], token)
     if fresh is None or lifecycle_of(fresh, STORY_LIFECYCLE) != CLAIMED:
         return False, "STALE_RECOVERY_PLAN: story is no longer story:claimed"
@@ -598,27 +649,41 @@ def apply_recovery(repo: str, story: dict, decision: RecoveryDecision,
         # question a human must answer is why no PR ever appeared, not how many
         # attempts remain.
         labels.add(POISON)
+        close, why = poison_closure(fetch_timeline(repo, story["number"], token))
+        if close:
+            payload.update({"state": "closed", "state_reason": "not_planned"})
+        note_suffix = f"; {why}"
     else:
         labels.add(MERGED)
         payload.update({"state": "closed", "state_reason": "completed"})
     payload["labels"] = sorted(labels)
     _api(f"https://api.github.com/repos/{repo}/issues/{story['number']}", token,
          method="PATCH", payload=payload)
-    return True, f"{decision.reason}: {decision.detail}".rstrip()
+    return True, f"{decision.reason}: {decision.detail}{note_suffix}".rstrip()
 
 
 def poison(repo: str, story: dict, token: str) -> tuple[bool, str]:
-    """§4.3.5: the fourth dispatch opportunity terminates at Attempt 3."""
+    """§4.3.5: the fourth dispatch opportunity does not dispatch; it poisons.
+
+    The story is **not** closed here unless §4.3.7's rescue cap is spent. A
+    poisoned story is waiting for a human, and §9.3 keeps waiting artifacts open
+    — which is also what makes it visible to the human queue, and what makes the
+    §4.3.6 rescue reachable without a human first reopening the issue.
+    """
     fresh = fetch_issue(repo, story["number"], token)
     if fresh is None or lifecycle_of(fresh, STORY_LIFECYCLE) != READY:
         return False, "story no longer ready"
     attempt_raw = (merge_gate.parse_section(fresh.get("body") or "", "Attempt") or "").strip()
     if attempt_raw != str(ATTEMPT_MAX):
         return False, f"Attempt changed to {attempt_raw!r}"
-    labels = sorted((labels_of(fresh) - {READY}) | {POISON})
+
+    close, why = poison_closure(fetch_timeline(repo, story["number"], token))
+    payload: dict = {"labels": sorted((labels_of(fresh) - {READY}) | {POISON})}
+    if close:
+        payload.update({"state": "closed", "state_reason": "not_planned"})
     _api(f"https://api.github.com/repos/{repo}/issues/{story['number']}", token,
-         method="PATCH", payload={"labels": labels, "state": "closed", "state_reason": "not_planned"})
-    return True, f"ATTEMPT_EXHAUSTED: Attempt remains {ATTEMPT_MAX}; terminal poison"
+         method="PATCH", payload=payload)
+    return True, f"ATTEMPT_EXHAUSTED: Attempt remains {ATTEMPT_MAX}; {why}"
 
 
 def claim(repo: str, story: dict, token: str) -> tuple[bool, str]:
