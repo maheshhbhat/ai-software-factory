@@ -4,11 +4,26 @@
 
 ## Current Position
 
-- **Current phase:** Phase 2 — Deterministic rails
-- **Current status:** **BUILT — in acceptance.** The rails run themselves: a `story:ready` story is claimed, launched, verified and closed with no human touching a label. Project #109 (Phase 2 Closeout) is `project:active`; five predecessor projects sit at `project:awaiting-acceptance` with per-criterion evidence recorded.
-- **Next action:** the outstanding §5.3 acceptance bells on #55, #61, #66, #72 and #95, then Phase 2 acceptance itself.
-- **Blocker:** none mechanical. Acceptance is a human bell by design (§5.3) and is the only check in the architecture pointed at the factory's own work.
-- **Last verified milestone:** **Phase 1 — verified 2026-08-19.**
+- **Current phase:** Phase 2 complete; Phase 3 — Planning agent — not started.
+- **Current status:** **VERIFIED — accepted 2026-08-21.** Project #109 and all five predecessor projects (#55, #61, #66, #72, #95) are `project:accepted` and closed, each carrying an `## Acceptance` comment recording pass per criterion. The human queue reports `nothing is waiting on a human`.
+- **Next action:** **decide #38 — where factory-maintenance stories live.** Every project is now accepted, so no `project:active` parent exists and the dispatcher has nothing it may dispatch (`No eligible work`). Story #181 is filed and `story:blocked` for exactly this reason. Phase 3 begins with a plan, and the plan needs a home.
+- **Blocker:** no active project. Structural, not mechanical — the rails are working correctly by refusing to dispatch work with no authorized parent.
+- **Last verified milestone:** **Phase 2 — verified 2026-08-21.** (Phase 1 — verified 2026-08-19.)
+
+### The acceptance, and the two relays
+
+Five projects plus the closeout accepted in one sitting. Every one of the six `project:awaiting-acceptance → project:accepted` transitions was applied by the continuation pass reading the decision comment, with **zero relay** — the §5.1 shape failure that cost #109 a relay on its own plan approval did not recur, which is #115/#122 working on their first unfamiliar encounter after the repair.
+
+The touch log now carries 23 touches: **20 `decision`, 2 `relay`, 1 `rescue`**. Both relays are on #109 and they bookend it:
+
+| Relay | Cause | Fixed by |
+|---|---|---|
+| Plan approval recorded as prose, refused as `MALFORMED_DECISION`; label moved by hand | the queue entry named *what* to decide, not *how to record it* | #122, verified live on all six acceptances |
+| `project:active → project:awaiting-acceptance` applied by hand | §9.11 records that route as documentation-only, owned by the sequencer | Phase 3 — the sequencer does not exist yet |
+
+The second is an unbuilt phase rather than a defect, and it reaches zero when Phase 3 lands. It is counted anyway; a relay excused is a relay uncounted.
+
+Two of the five did not pass cleanly on the evidence as it stood, and both are recorded on their issues: #55's criterion 5 was **refused on SUITE-only evidence** and re-proven live before the decision (fixtures #178/#179/#180, `9/9 check(s) passed`, the surplus story draining once capacity freed), and #61 passed with an **escaped defect** named on criterion 6 — the delivered `poison()` closed a story on its first poisoning, making §4.3.6 rescue unreachable and hiding the story from every open-issue queue, repaired by #110.
 
 ### What runs today, with evidence
 
@@ -22,7 +37,7 @@
 | Launch bridge + proof-of-action | #106, #128 and every E2E fixture |
 | Completion (§9.16) | #103, #106, and 15 E2E fixtures |
 | PR/merge reconciliation (§9.11) | #97, #107, #110–#114, #122, #124, #126, #130 |
-| Human queue (§9.11 no silent drops) | 6 waiting artifacts enumerated every poll |
+| Human queue (§9.11 no silent drops) | 6 waiting artifacts enumerated every poll until each was decided; now `nothing is waiting on a human` |
 | Acceptance suite | 16 scenarios, 16/16 |
 | End-to-end suite | 12/14 reachable requirements, real engine |
 
@@ -41,7 +56,7 @@ States are limited to `NOT STARTED` | `IN PROGRESS` | `VERIFYING` | `VERIFIED`.
 | Phase | State | Verification / Proof Required |
 |---|---|---|
 | **Phase 1 — State schema and touch log** (no AI, no automation) | **VERIFIED** (2026-08-19) | Create one project + three story issues by hand from the templates; manually walk every legal Project transition (`queued → ready-for-planning → planning → awaiting-ready → active → awaiting-acceptance → accepted`) and Story transition (`blocked → ready → claimed → in-review → merged`, plus `blocked:poison` / `blocked:scope`); log touches. Pass = transitions and touch log match `spec/state-schema.md`. |
-| **Phase 2 — Deterministic rails** (no AI) | **BUILT — in acceptance** | With a fake worker script (opens trivial PR on invoke, no AI): prove dispatch is idempotent per artifact + state version (once and only once per transition); merge gate blocks without exact-head review-approval label; hazard-path edit blocks without human ack label from allowed identity; 3 failed attempts → `blocked:poison` + human notification; tests-green, scope, and `test-change` label checks enforce. |
+| **Phase 2 — Deterministic rails** (no AI) | **VERIFIED** (2026-08-21) | With a fake worker script (opens trivial PR on invoke, no AI): prove dispatch is idempotent per artifact + state version (once and only once per transition); merge gate blocks without exact-head review-approval label; hazard-path edit blocks without human ack label from allowed identity; 3 failed attempts → `blocked:poison` + human notification; tests-green, scope, and `test-change` label checks enforce. |
 | **Phase 3 — Planning agent** | NOT STARTED | Run planning agent against a real module of the real product. Single gate: **is the plan digest one you would sign?** Must include ADR, stories with `phase:` labels + explicit `depends-on:` + hazard pre-flags, falsifiable acceptance criteria, expected-bells count, and human-readable digest (campaign vs. project altitude selected by trigger type). Iterate prompt until yes. Do not start Phase 4 on an unsigned plan. |
 | **Phase 4 — Workers and review** | NOT STARTED | One toy story `add a /health endpoint returning build SHA` through the full loop with zero manual steps between READY sign-off and merge. Worker reads spec+ADRs+findings, branches, PRs, exits with spend cap; review fires on PR-open in fresh context (diff+spec+ADRs only), posts findings→`ready` or approval label bound to head SHA; sampling hook applies 1-in-N lottery (start N=3); merge gate auto-merges. |
 | **Phase 5 — Test ladder and KPIs** (overall) | NOT STARTED | Three rungs executed through the identical loop; per-rung KPI report written to `runs/` with Touches (classified), Autonomy, Retry rate, Poison rate, Escaped defects, Acceptance catches, Cost/story, Cycle time (READY→acceptance). Each rung re-verifies affected phases after prompt/plan edits. |
@@ -78,4 +93,4 @@ Decisions established by `architecture-v2.1.md` and `implementation-plan-v1.md`,
 - **Measurement:** Instrument v1 baseline before migrating — touches classified, autonomous merge rate, rework/reopen rate, escaped defects, acceptance-catch rate, cost/wall-clock per accepted story, poison rate, stuck-work MTTR, sampling findings rate.
 
 ---
-*Last updated: 2026-08-21 · Position: Phase 1 VERIFIED; Phase 2 BUILT and in acceptance · Source specs: `factory/spec/architecture-v2.1.md`, `factory/spec/implementation-plan-v1.md`*
+*Last updated: 2026-08-21 · Position: Phase 1 and Phase 2 VERIFIED; Phase 3 not started · Source specs: `factory/spec/architecture-v2.1.md`, `factory/spec/implementation-plan-v1.md`*

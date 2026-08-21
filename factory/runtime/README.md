@@ -537,6 +537,22 @@ infrastructure).
 
 ## Running it
 
+`poll.sh` in the repository root is the operator's entry point — it supplies the
+repository, the commitment and a token, and passes everything else through:
+
+```sh
+./poll.sh --once              # one cycle and exit
+./poll.sh --once --dry-run    # decide, write nothing
+./poll.sh                     # watch continuously (this is the service)
+```
+
+It holds **no policy**, and that is a constraint rather than an observation.
+Authorization, eligibility, WIP, lifecycle and recovery live in GitHub (§9.12)
+and in the modules the poller invokes. A rule that appears in a wrapper has two
+sources and only one of them is the system of record.
+
+The underlying commands are unchanged:
+
 ```sh
 export GITHUB_TOKEN=$(gh auth token)
 
