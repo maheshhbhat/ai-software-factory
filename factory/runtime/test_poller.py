@@ -333,7 +333,8 @@ class TestCompletionIsDelegated(unittest.TestCase):
         check smuggled in here is invisible until it disagrees with GitHub."""
         with open(poller.__file__, encoding="utf-8") as handle:
             body = handle.read().split('"""', 2)[-1]
-        for leaked in ("story:cancelled", "story:in-review", "story:merged",
+        for leaked in ("story:completed", "story:cancelled", "story:in-review",
+                       "story:merged",
                        "looks_like_acknowledgement", "linked_delivery_prs",
                        "state_reason"):
             self.assertNotIn(leaked, body,

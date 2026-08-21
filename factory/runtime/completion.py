@@ -26,8 +26,8 @@ two cases are now distinguishable, and this module distinguishes exactly them.
 
 ## The narrow path, stated as its preconditions
 
-Every one of these must hold, and each is checked against durable GitHub state
-read at decision time:
+§9.16 is the contract; this is its implementation. Every one of these must hold,
+and each is checked against durable GitHub state read at decision time:
 
   1. the launch reported `LAUNCHED` — a *definite* success from `workers.py`
   2. the Story is still `story:claimed`
@@ -45,21 +45,23 @@ produced a pull request has a deliverable, and its Story belongs to review and
 the merge gate — not here. This module only ever completes work that finished
 with *nothing to merge*.
 
-## Which state, and why it is not a new one
+## Which state, and why it is its own
 
-§9.3 already names the terminal state for work that finishes with no
-deliverable: `story:cancelled`, described there as covering exactly *"a
-verification fixture that only had to prove something"*. That is what a bounded
-acknowledgement assignment is. No new label, no new bell, no new orchestration —
-the contract already had a name for this outcome, and §9.4.1 already named
-cancellation as the disposition a human would reach for.
+`story:completed` (§9.16) — *the bounded assignment succeeded and required no
+deliverable*. A terminal **success**, closed as completed.
 
-**A stated deviation, not a hidden one.** §9.3 also says `story:cancelled` is a
-human decision and is "never applied by a component". That sentence was written
-when no component *could* prove the case; #98 changed what is provable, and this
-module is the narrow consequence. The spec amendment is requested with the change
-that needs it — story #104's declared `### Scope` is `factory/runtime/**`, so the
-edit to `factory/spec/state-schema.md` is not this Story's to make.
+Not `story:merged`: nothing merged, and nothing was ever going to. Not
+`story:cancelled`: nothing was called off. Cancellation means work was
+deliberately stopped, and a factory that files its own successes under
+"cancelled" cannot afterwards tell anyone — including itself — which of its
+stories worked. The CTO's decision on #104 is explicit on that point, and the
+schema now carries two distinct terminal successes for the two distinct ways
+work can be done: through the merge path, or with nothing to merge.
+
+The label lives in `dispatcher.py` with the rest of the lifecycle vocabulary,
+because the authority that decides what a story's state *means* is the one that
+must name it. This module chooses the transition; it does not get to invent the
+state it transitions to.
 
 ## Two limits worth naming
 
@@ -239,11 +241,11 @@ def completion_decision(story: dict, timeline: list[dict], comments: list[dict],
         return Outcome(number, None, Reason.ALREADY_RECORDED,
                        "a completion is already recorded on this story")
 
-    return Outcome(number, dispatcher.CANCELLED, Reason.COMPLETED,
+    return Outcome(number, dispatcher.COMPLETED, Reason.COMPLETED,
                    f"worker acknowledgement {proof.get('html_url') or proof.get('id')} "
                    f"posted at {proof.get('created_at')}, after the claim at "
                    f"{since.isoformat()}; no pull request links to this story, so the "
-                   f"bounded assignment finished with no deliverable (§9.3)")
+                   f"bounded assignment succeeded and required no deliverable (§9.16)")
 
 
 def completion_comment(outcome: Outcome, worker: str) -> str:
@@ -259,10 +261,12 @@ def completion_comment(outcome: Outcome, worker: str) -> str:
             f"- Worker: `{worker}`\n"
             f"- Launch verdict: `{workers.Result.LAUNCHED}` (definite success)\n"
             f"- Evidence: {outcome.detail}\n\n"
-            f"`story:claimed → story:cancelled` per §9.3 — *finished with no "
-            f"deliverable*. No pull request links to this Story, so there is "
-            f"nothing to review or merge, and leaving it claimed would let the "
-            f"§9.4 lease expire and dispatch a second worker.\n\n"
+            f"`story:claimed → {dispatcher.COMPLETED}` per §9.16 — *the bounded "
+            f"assignment succeeded and required no deliverable*. This is a "
+            f"terminal **success**, not a cancellation: no pull request links to "
+            f"this Story because none was ever asked for, so there is nothing to "
+            f"review or merge, and leaving it claimed would let the §9.4 lease "
+            f"expire and dispatch a second worker onto finished work.\n\n"
             f"`Attempt` is unchanged: the attempt was dispatched and it succeeded.")
 
 
@@ -304,12 +308,15 @@ def apply_outcome(repo: str, outcome: Outcome, worker: str, token: str) -> tuple
     post_comment(repo, number, completion_comment(outcome, worker), token)
 
     labels = sorted((dispatcher.labels_of(fresh) - {dispatcher.CLAIMED}) | {outcome.action})
+    # §9.3 — closure is part of the transition, and the reason is `completed`
+    # because this *is* a success. `not_planned` would file it beside the work
+    # that was abandoned, which is the confusion this state exists to end.
     dispatcher._api(f"https://api.github.com/repos/{repo}/issues/{number}", token,
                     method="PATCH",
                     payload={"labels": labels,
-                             "state": "closed",          # §9.3 — closure is part of
-                             "state_reason": "not_planned"})  # the transition
-    return True, f"{dispatcher.CLAIMED} -> {outcome.action}; closed as not_planned"
+                             "state": "closed",
+                             "state_reason": "completed"})
+    return True, f"{dispatcher.CLAIMED} -> {outcome.action}; closed as completed"
 
 
 def record_success(repo: str, story: int, project: int, launch_result: str,

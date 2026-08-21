@@ -72,7 +72,7 @@ def decide(story_issue=None, tl=None, cmts=None, prs=None,
 class TestTheHappyPathIsNarrow(unittest.TestCase):
     def test_proven_bounded_success_completes_the_story(self):
         outcome = decide()
-        self.assertEqual(dispatcher.CANCELLED, outcome.action)
+        self.assertEqual(dispatcher.COMPLETED, outcome.action)
         self.assertEqual(completion.Reason.COMPLETED, outcome.reason)
 
     def test_the_recorded_reason_names_the_evidence(self):
@@ -80,11 +80,15 @@ class TestTheHappyPathIsNarrow(unittest.TestCase):
         outcome = decide()
         self.assertIn(ACK_AT, outcome.detail)
         self.assertIn("no pull request", outcome.detail)
+        self.assertIn("§9.16", outcome.detail)
 
-    def test_the_target_state_is_the_one_the_contract_already_names(self):
-        """§9.3 names `story:cancelled` for work that finishes with no
-        deliverable — no new label, no new bell, no new orchestration."""
-        self.assertEqual("story:cancelled", decide().action)
+    def test_the_target_state_is_a_terminal_success_not_a_cancellation(self):
+        """§9.16. `story:completed` says the work succeeded and had nothing to
+        merge; `story:cancelled` says it was called off. A factory that files
+        its successes under the second cannot report on itself."""
+        self.assertEqual("story:completed", decide().action)
+        self.assertEqual(dispatcher.COMPLETED, decide().action)
+        self.assertNotEqual(dispatcher.CANCELLED, decide().action)
 
     def test_markdown_around_the_heading_still_counts_as_proof(self):
         outcome = decide(cmts=comments("**## Worker acknowledgement**\n\nclaude here"))
@@ -170,7 +174,7 @@ class TestTheRecordedComment(unittest.TestCase):
         body = completion.completion_comment(decide(), "claude-delivery")
         self.assertTrue(body.startswith(completion.COMPLETION_HEADING))
         self.assertIn("claude-delivery", body)
-        self.assertIn("story:claimed → story:cancelled", body)
+        self.assertIn("story:claimed → story:completed", body)
         self.assertIn(ACK_AT, body)
 
     def test_the_recording_can_never_be_read_as_the_proof_it_cites(self):
@@ -230,14 +234,16 @@ class TestApplyingTheTransition(unittest.TestCase):
 
     def test_the_transition_replaces_the_whole_label_set_and_closes(self):
         """§9.2 — one PATCH carrying the complete final label set; §9.3 —
-        closure is part of the transition."""
+        closure is part of the transition, with the reason a success earns."""
         _, api = run_record()
         payload = api.writes[-1][2]
-        self.assertIn("story:cancelled", payload["labels"])
+        self.assertIn("story:completed", payload["labels"])
         self.assertNotIn("story:claimed", payload["labels"])
         self.assertIn("type:story", payload["labels"])
         self.assertEqual("closed", payload["state"])
-        self.assertEqual("not_planned", payload["state_reason"])
+        self.assertEqual("completed", payload["state_reason"],
+                         "a success is closed as completed, not filed beside "
+                         "the work that was abandoned")
 
     def test_the_attempt_counter_is_left_untouched(self):
         """The attempt was dispatched and it succeeded. §4.3 increments only at
@@ -290,6 +296,23 @@ class TestNoPolicyIsInvented(unittest.TestCase):
             body = handle.read().split('"""', 2)[-1]
         self.assertIn("dispatcher.linked_delivery_prs", body)
         self.assertNotIn("Story: #", body)
+
+    def test_the_terminal_state_comes_from_the_authority_not_a_literal(self):
+        """The lifecycle vocabulary is the dispatcher's. A label spelled out
+        here is a second definition of the contract, free to drift from the one
+        the schema documents and the dispatcher routes on."""
+        with open(completion.__file__, encoding="utf-8") as handle:
+            body = handle.read().split('"""', 2)[-1]
+        self.assertIn("dispatcher.COMPLETED", body)
+        self.assertNotIn('"story:completed"', body)
+        self.assertNotIn('"story:cancelled"', body)
+
+    def test_a_success_is_never_recorded_as_a_cancellation(self):
+        """The CTO decision on #104, pinned. Overloading cancellation would put
+        the factory's successes and its abandonments in one bucket."""
+        outcome = decide()
+        self.assertNotEqual(dispatcher.CANCELLED, outcome.action)
+        self.assertIn(outcome.action, dispatcher.TERMINAL_SUCCESS)
 
     def test_what_counts_as_proof_is_the_bridges_definition(self):
         with open(completion.__file__, encoding="utf-8") as handle:

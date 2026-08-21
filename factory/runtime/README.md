@@ -320,19 +320,22 @@ must still forbid files, branches and pull requests, so widening the assignment
 fails the build instead of quietly cancelling Stories that were meant to deliver
 code.
 
-### Which state, and the amendment it needs
+### Which state
 
-§9.3 already names the terminal state for work that finishes with no
-deliverable: `story:cancelled` — *"a verification fixture that only had to prove
-something"* is its own example, and that is exactly what a bounded
-acknowledgement assignment is. No new label, no new bell, no new orchestration.
-`Attempt` is untouched: the attempt was dispatched and it succeeded.
+`story:completed` (§9.16) — *the bounded assignment succeeded and required no
+deliverable*. A terminal **success**, closed as completed. `Attempt` is
+untouched: the attempt was dispatched and it succeeded.
 
-**Stated, not hidden:** §9.3 also says `story:cancelled` is a human decision and
-is "never applied by a component". That sentence was written when no component
-*could* prove the case. The spec amendment is requested with this change rather
-than assumed — story #104's declared `### Scope` is `factory/runtime/**`, so the
-edit to `factory/spec/state-schema.md` is not this Story's to make.
+Not `story:merged`, because nothing merged and nothing was going to. Not
+`story:cancelled`, because nothing was called off — cancellation means work was
+deliberately stopped, and a factory that files its own successes there cannot
+afterwards tell anyone, including itself, which of its stories worked. The
+schema now carries two distinct terminal successes for the two distinct ways
+work can be done: through the merge path, or with nothing to merge.
+
+The label is defined in `dispatcher.py` alongside the rest of the lifecycle
+vocabulary. This module chooses the transition; it does not get to invent the
+state it transitions to.
 
 ### Where the judgment lives
 
@@ -464,7 +467,7 @@ matter more than the happy path.
 `test_lifecycle_e2e.py` is the one that wires the real dispatcher, the real
 worker contract and the real completion path together against one in-memory
 GitHub and asserts on durable state: a Story goes `ready → claimed → worker →
-cancelled + closed` in a single poll, and no later poll or restart launches a
+completed + closed` in a single poll, and no later poll or restart launches a
 second worker for it. It keeps the counterfactual next to it — a worker that
 proves nothing leaves the claim standing for §9.4 — so the fix is read as the
 answer to something real.

@@ -11,8 +11,8 @@ comments — because that is the only thing the factory actually keeps.
 
 Two runs matter, and they are the same run with one difference:
 
-  * the worker posts its acknowledgement → the Story reaches a terminal state on
-    the first poll, and nothing is ever dispatched for it again
+  * the worker posts its acknowledgement → the Story reaches `story:completed`
+    on the first poll, and nothing is ever dispatched for it again
   * the worker posts nothing → the Story stays claimed, the §9.4 lease expires,
     and the dispatcher hands it to a second worker
 
@@ -295,10 +295,11 @@ class TestSuccessfulStoryReachesATerminalState(LifecycleCase):
         self.assertEqual(1, len(worker.calls), "exactly one worker was launched")
         self.assertEqual(1, len(self.hub.acknowledgements(STORY)),
                          "exactly one acknowledgement exists")
-        self.assertIn("story:cancelled", self.hub.labels(STORY))
+        self.assertIn("story:completed", self.hub.labels(STORY))
         self.assertNotIn("story:claimed", self.hub.labels(STORY))
         self.assertEqual("closed", self.hub.issues[STORY]["state"])
-        self.assertEqual("not_planned", self.hub.issues[STORY]["state_reason"])
+        self.assertEqual("completed", self.hub.issues[STORY]["state_reason"],
+                         "a terminal success, not an abandonment")
 
     def test_it_passes_through_claimed_on_the_way(self):
         """The completion is a transition out of a real claim, not a shortcut
@@ -314,7 +315,7 @@ class TestSuccessfulStoryReachesATerminalState(LifecycleCase):
 
         with mock.patch.object(self.hub, "_patch", watch):
             self.poll(worker_that(self.hub, posts=True))
-        self.assertEqual([["story:claimed"], ["story:cancelled"]], events)
+        self.assertEqual([["story:claimed"], ["story:completed"]], events)
         self.assertEqual("1", self.hub.section(STORY, "Attempt"))
 
     def test_the_reason_is_recorded_on_the_story(self):
@@ -341,7 +342,7 @@ class TestSuccessfulStoryReachesATerminalState(LifecycleCase):
         self.assertEqual([], self.poll(second, seen=set()), "fresh process, empty state")
         self.assertEqual([], second.calls)
         self.assertEqual(1, len(self.hub.acknowledgements(STORY)))
-        self.assertIn("story:cancelled", self.hub.labels(STORY))
+        self.assertIn("story:completed", self.hub.labels(STORY))
 
 
 class TestUnprovenWorkKeepsTheOldSafeBehaviour(LifecycleCase):
@@ -363,7 +364,7 @@ class TestUnprovenWorkKeepsTheOldSafeBehaviour(LifecycleCase):
         second = worker_that(self.hub, posts=True)
         self.assertEqual([STORY], [d["story"] for d in self.poll(second, seen=set())])
         self.assertEqual(1, len(second.calls), "the recovered story reached a worker")
-        self.assertIn("story:cancelled", self.hub.labels(STORY),
+        self.assertIn("story:completed", self.hub.labels(STORY),
                       "and this time it proved the work and completed")
 
     def test_a_failed_launch_leaves_the_story_claimed_and_is_loud(self):
