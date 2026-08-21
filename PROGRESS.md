@@ -4,13 +4,35 @@
 
 ## Current Position
 
-- **Current phase:** Phase 1 — State schema and touch log
-- **Current status:** **VERIFIED / COMPLETE.** Project #1 is `project:accepted`; all ten approved acceptance criteria pass against durable GitHub/repository evidence.
-- **Next action:** **Phase 2 Increment 2** — build the deterministic merge gate as a *non-required* CI check and prove it red on each violation class, then request separate authorization for the single atomic ruleset edit that makes it required (`state-schema.md` §9.13). Increment 1 froze the executable contracts in §9; Increment 2 implements them and invents no policy.
-- **Phase 2 status:** Increment 1 (contracts) complete — see `state-schema.md` §9. No dispatcher, gate, worker, or workflow code exists.
-- **Phase 2 readiness:** B1 (no required checks) closed — repo public, `main-protection` active and verified blocking (#24). B2 (no separate agent identity) closed by CTO decision (#27): a single GitHub credential is retained and `Agent-ID` metadata provides attribution, **not** authentication — the threat model is stated in `state-schema.md` §9.7. One constraint remains open by design: with one identity GitHub refuses self-approval, so agent PRs are unmergeable until §9.13's migration replaces the approval rule with the deterministic gate. Humans land factory PRs manually until then.
-- **Blocker:** None.
-- **Last verified milestone:** **Phase 1 — verified 2026-08-19.** Evidence: Project #1 `project:accepted` with its `## Acceptance` comment recording pass per criterion; stories #10/#11/#12 all `story:merged`; four bells, each with a decision comment and exactly one `touchlog.jsonl` line (`plan-approval`, `poison-rescue`, `scope-decision`, `acceptance`), `relay = 0`; tasks #13/#15/#17/#19 carry the walk checkpoints; review #6 and its repairs in #7.
+- **Current phase:** Phase 2 — Deterministic rails
+- **Current status:** **BUILT — in acceptance.** The rails run themselves: a `story:ready` story is claimed, launched, verified and closed with no human touching a label. Project #109 (Phase 2 Closeout) is `project:active`; five predecessor projects sit at `project:awaiting-acceptance` with per-criterion evidence recorded.
+- **Next action:** the outstanding §5.3 acceptance bells on #55, #61, #66, #72 and #95, then Phase 2 acceptance itself.
+- **Blocker:** none mechanical. Acceptance is a human bell by design (§5.3) and is the only check in the architecture pointed at the factory's own work.
+- **Last verified milestone:** **Phase 1 — verified 2026-08-19.**
+
+### What runs today, with evidence
+
+| Component | Evidence |
+|---|---|
+| Dispatcher — authorization, WIP, deterministic order, atomic claim | 120 tests; live on every story since #56 |
+| §9.15 replay of Phase 1's recorded history | 37 transitions, 19 routed live, 0 unknown, 0 duplicates |
+| Merge gate, required, trusted-`main` verdict | 46 tests; green on every PR; `bypass_actors: []` |
+| Runtime poller — five passes per cycle | 263 tests |
+| Worker contract, health, capability, failover | live Claude→Codex failover proven under #85 and again in E2E |
+| Launch bridge + proof-of-action | #106, #128 and every E2E fixture |
+| Completion (§9.16) | #103, #106, and 15 E2E fixtures |
+| PR/merge reconciliation (§9.11) | #97, #107, #110–#114, #122, #124, #126, #130 |
+| Human queue (§9.11 no silent drops) | 6 waiting artifacts enumerated every poll |
+| Acceptance suite | 16 scenarios, 16/16 |
+| End-to-end suite | 12/14 reachable requirements, real engine |
+
+### Known limitations, recorded rather than implied
+
+- **No independent code review.** `required_approving_review_count` is 0 and no review agent exists (Phase 4). The gate checks form — scope, links, tests green — and nothing checks correctness but the tests, which share their code's authorship.
+- **Three gate checks withdrawn** (§9.17): test-deletion gating, hazard-path gating, CODEOWNERS. All rest on an artifact the agent's credential can write. A second identity restores them.
+- **The Phase 2 worker is an acknowledgement bridge.** `bridge.task_prompt` gives every story the same bounded assignment, because Phase 2 has no delivery worker — that is Phase 4. A story needing a pull request, if dispatched through the bridge today, is completed by §9.16 on an assignment nobody asked for. Every real delivery here was made by a directly-invoked worker.
+- **GitHub's issue listing is eventually consistent** — measured at ~3s in both directions. Harmless: every writer re-reads its subject by number first, and reads by number are strongly consistent, so a stale listing costs latency and never a duplicate write. The one direction it biases, WIP accounting, over-counts and so under-dispatches.
+- **Two E2E requirements are unreachable or deferred**: an untrusted-author dispatch needs a second identity (#26/#27); claim expiry needs sixty minutes of wall clock.
 
 ## Phase Tracker
 
@@ -19,7 +41,7 @@ States are limited to `NOT STARTED` | `IN PROGRESS` | `VERIFYING` | `VERIFIED`.
 | Phase | State | Verification / Proof Required |
 |---|---|---|
 | **Phase 1 — State schema and touch log** (no AI, no automation) | **VERIFIED** (2026-08-19) | Create one project + three story issues by hand from the templates; manually walk every legal Project transition (`queued → ready-for-planning → planning → awaiting-ready → active → awaiting-acceptance → accepted`) and Story transition (`blocked → ready → claimed → in-review → merged`, plus `blocked:poison` / `blocked:scope`); log touches. Pass = transitions and touch log match `spec/state-schema.md`. |
-| **Phase 2 — Deterministic rails** (no AI) | IN PROGRESS — Increment 1 (contracts) done; Increment 2 (gate) next | With a fake worker script (opens trivial PR on invoke, no AI): prove dispatch is idempotent per artifact + state version (once and only once per transition); merge gate blocks without exact-head review-approval label; hazard-path edit blocks without human ack label from allowed identity; 3 failed attempts → `blocked:poison` + human notification; tests-green, scope, and `test-change` label checks enforce. |
+| **Phase 2 — Deterministic rails** (no AI) | **BUILT — in acceptance** | With a fake worker script (opens trivial PR on invoke, no AI): prove dispatch is idempotent per artifact + state version (once and only once per transition); merge gate blocks without exact-head review-approval label; hazard-path edit blocks without human ack label from allowed identity; 3 failed attempts → `blocked:poison` + human notification; tests-green, scope, and `test-change` label checks enforce. |
 | **Phase 3 — Planning agent** | NOT STARTED | Run planning agent against a real module of the real product. Single gate: **is the plan digest one you would sign?** Must include ADR, stories with `phase:` labels + explicit `depends-on:` + hazard pre-flags, falsifiable acceptance criteria, expected-bells count, and human-readable digest (campaign vs. project altitude selected by trigger type). Iterate prompt until yes. Do not start Phase 4 on an unsigned plan. |
 | **Phase 4 — Workers and review** | NOT STARTED | One toy story `add a /health endpoint returning build SHA` through the full loop with zero manual steps between READY sign-off and merge. Worker reads spec+ADRs+findings, branches, PRs, exits with spend cap; review fires on PR-open in fresh context (diff+spec+ADRs only), posts findings→`ready` or approval label bound to head SHA; sampling hook applies 1-in-N lottery (start N=3); merge gate auto-merges. |
 | **Phase 5 — Test ladder and KPIs** (overall) | NOT STARTED | Three rungs executed through the identical loop; per-rung KPI report written to `runs/` with Touches (classified), Autonomy, Retry rate, Poison rate, Escaped defects, Acceptance catches, Cost/story, Cycle time (READY→acceptance). Each rung re-verifies affected phases after prompt/plan edits. |
@@ -56,4 +78,4 @@ Decisions established by `architecture-v2.1.md` and `implementation-plan-v1.md`,
 - **Measurement:** Instrument v1 baseline before migrating — touches classified, autonomous merge rate, rework/reopen rate, escaped defects, acceptance-catch rate, cost/wall-clock per accepted story, poison rate, stuck-work MTTR, sampling findings rate.
 
 ---
-*Last updated: 2026-08-19 · Position: Phase 1 VERIFIED; Phase 2 Increment 1 (contracts) complete · Source specs: `factory/spec/architecture-v2.1.md`, `factory/spec/implementation-plan-v1.md`*
+*Last updated: 2026-08-21 · Position: Phase 1 VERIFIED; Phase 2 BUILT and in acceptance · Source specs: `factory/spec/architecture-v2.1.md`, `factory/spec/implementation-plan-v1.md`*

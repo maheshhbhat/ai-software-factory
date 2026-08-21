@@ -55,3 +55,38 @@ python factory/touchlog/append.py \
 
 * Append-only: no edits, no deletions. History is `git log -- factory/touchlog/touchlog.jsonl`.
 * One JSON object per line; `ensure_ascii=False`, separators `(",", ":")` (canonical via helper, but any valid JSON that parses is accepted).
+
+## Phase 2 Closeout (Project #109) — the touches, and one relay
+
+Four bells, and the relay count is the number worth reading. `relay` is the only
+classification the architecture expects to trend to zero; `decision`, `audit` and
+`rescue` are human judgment the factory is not trying to remove.
+
+| When | Bell | Class | Note |
+|---|---|---|---|
+| 10:59 | `plan-approval` #109 | decision | the closeout plan |
+| 12:49 | `hazard-ack` #113 | decision | PR #119, the gate runner |
+| 12:55 | `plan-approval` #109 | **relay** | see below |
+| 14:39 | `hazard-ack` #114 | decision | PR #120, `factory/spec/**` |
+
+**relay = 1, at zero human seconds.** The CTO's approval on #109 was recorded as
+prose rather than in §5.1's machine-readable shape, so the continuation pass
+refused it — correctly, since reading prose to decide whether the factory is
+authorized is what §9.9 forbids — and the label was moved by hand.
+
+It is logged as `relay` rather than `decision` because no new judgment was
+exercised: a decision that already existed was carried across a format gap. The
+`seconds_spent` is 0 because the cost fell on a machine step, not on the human;
+recording their approval time here as well would double-count the
+`plan-approval` decision touch immediately above it.
+
+The cause is fixed. #122 made every human-queue entry name the exact recordable
+form, and pinned each promised literal against the parser that will read the
+reply — because the failure mode is drift between an instruction and its
+consumer, which a fixed-string test would not catch.
+
+**The seconds are estimates.** Every figure above was estimated by the agent and
+is flagged as such in its own `note`. Only the CTO knows what these actually
+cost, and a fabricated number in a measurement log is worse than an absent one —
+the whole point of this file is that it is the substrate for measurement. They
+should be corrected in place when the real figures are known.
