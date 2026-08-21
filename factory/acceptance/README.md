@@ -95,6 +95,17 @@ criteria** — calling it "production-shaped" describes its shape, not its reach
 `e2e.py` is the layer that does reach:
 
 ```bash
+./live-e2e.sh --only dispatch      # one requirement
+./live-e2e.sh --list               # the requirement map; runs nothing
+./live-e2e.sh                      # every reachable requirement
+```
+
+`live-e2e.sh` supplies the worker declarations the contract already defines (#84)
+and nothing else. It chooses none of the factory's behaviour, and the preflight
+below rejects a declaration that could not honour the completion contract rather
+than trusting the wrapper to be right. The underlying command is unchanged:
+
+```bash
 GITHUB_TOKEN=$(gh auth token) python3 factory/acceptance/e2e.py \
     --repo owner/name --commitment 54 --project 109
 ```
