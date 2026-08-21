@@ -119,6 +119,37 @@ class TestObservability(unittest.TestCase):
                           bridge.CLAUDE_ALLOWED_TOOLS], argv)
 
 
+class TestDiagnosticsSurvive(unittest.TestCase):
+    """`workers.launch` keeps a launched worker's stdout and a failed one's
+    stderr. A failure explained on stdout is a failure explained nowhere: the
+    trail reads `FAILED exit 1:` with the reason discarded — observed live on
+    #101 before this was fixed. The verdict this module exists to produce is
+    precisely the one that would vanish."""
+
+    def failure_output(self, answers):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = run_main(answers=answers)
+        return code, out.getvalue(), err.getvalue()
+
+    def test_the_no_acknowledgement_verdict_reaches_stderr(self):
+        code, _, err = self.failure_output([False, False, False])
+        self.assertEqual(1, code)
+        self.assertIn("without posting an acknowledgement", err)
+
+    def test_an_engine_failure_reaches_stderr(self):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            run_main(run=runner(raises=FileNotFoundError("no claude")), answers=False)
+        self.assertIn("engine not available", err.getvalue())
+
+    def test_the_launch_line_stays_on_stdout(self):
+        # The success detail workers.py keeps must not move: #90 requires the
+        # invocation be observable on a launch that worked.
+        _, out, _ = self.failure_output([True])
+        self.assertIn("exec:", out)
+
+
 class TestCheckBudget(unittest.TestCase):
     """Everything the check spends is taken from the engine's own time, because
     both are inside `workers.LAUNCH_TIMEOUT_SECONDS`, which kills this process.

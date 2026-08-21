@@ -170,7 +170,7 @@ def _api_get(url: str) -> tuple | None:
                                     timeout=ACK_HTTP_TIMEOUT_SECONDS) as response:
             return json.load(response), dict(response.headers)
     except (urllib.error.URLError, OSError, ValueError) as exc:
-        print(f"[bridge] WARN: GitHub read failed: {exc}", flush=True)
+        report(f"[bridge] WARN: GitHub read failed: {exc}")
         return None
 
 
@@ -195,6 +195,19 @@ def server_now(repo: str, story: int) -> str | None:
     except (TypeError, ValueError):
         return None
     return parsed.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def report(message: str) -> None:
+    """Print a diagnosis where it will still be readable after a failure.
+
+    `workers.launch` keeps a launched worker's **stdout** and a failed one's
+    **stderr**, so a failure explained on stdout is a failure explained nowhere:
+    the trail reads `FAILED exit 1:` with the reason discarded. The verdict this
+    module exists to produce is exactly the one that would vanish, and an audit
+    trail believed to be complete while silently dropping its most important
+    line is worse than no trail at all (#93).
+    """
+    print(message, file=sys.stderr, flush=True)
 
 
 def looks_like_acknowledgement(body: str) -> bool:
@@ -233,7 +246,7 @@ def acknowledged_since(repo: str, story: int, since: str) -> bool | None:
         return None
     payload = result[0]
     if not isinstance(payload, list):
-        print(f"[bridge] WARN: unexpected comments payload for #{story}", flush=True)
+        report(f"[bridge] WARN: unexpected comments payload for #{story}")
         return None
     return any(looks_like_acknowledgement(comment.get("body") or "")
                and (comment.get("created_at") or "") >= since
@@ -276,7 +289,7 @@ def main(argv: list[str]) -> int:
     try:
         cmd = engine_command(args.engine, prompt)
     except ValueError as exc:
-        print(f"[bridge] FAIL: {exc}", flush=True)
+        report(f"[bridge] FAIL: {exc}")
         return 1
 
     # Observable by requirement (#90): the exact invocation is printed, with the
@@ -301,7 +314,7 @@ def main(argv: list[str]) -> int:
                                    timeout=ENGINE_TIMEOUT_SECONDS)
     except FileNotFoundError as exc:
         # Definite: the engine is not installed, so it certainly did not run.
-        print(f"[bridge] FAIL: engine not available: {exc}", flush=True)
+        report(f"[bridge] FAIL: engine not available: {exc}")
         return 1
     except subprocess.TimeoutExpired:
         # Ambiguous by nature, and unreachable in practice: the clamp above keeps
@@ -311,8 +324,8 @@ def main(argv: list[str]) -> int:
         # says plainly that the engine may still be working. It must never become
         # the normal path — `workers.launch` would read the non-zero exit as a
         # definite failure and start a second engine on a live Story.
-        print(f"[bridge] TIMEOUT after {ENGINE_TIMEOUT_SECONDS}s: the engine may still "
-              f"be running. Do not launch another worker for this story.", flush=True)
+        report(f"[bridge] TIMEOUT after {ENGINE_TIMEOUT_SECONDS}s: the engine may "
+               f"still be running. Do not launch another worker for this story.")
         return 2
 
     tail = (completed.stdout or "").strip().splitlines()[-3:]
@@ -323,8 +336,8 @@ def main(argv: list[str]) -> int:
     # GitHub's replication and call a posted acknowledgement a failure.
     verdict = acknowledgement_verdict(args.repo, args.story, since)
     if verdict is None:
-        print("[bridge] WARN: acknowledgement unverifiable; reporting the engine's "
-              "own exit status", flush=True)
+        report("[bridge] WARN: acknowledgement unverifiable; reporting the engine's "
+               "own exit status")
 
     if completed.returncode != 0:
         # An exit code proves the process ended — in this direction too. An
@@ -338,8 +351,8 @@ def main(argv: list[str]) -> int:
                   f"acknowledgement is on #{args.story}; the work was done.",
                   flush=True)
             return 0
-        print(f"[bridge] FAIL: engine exited {completed.returncode}: "
-              f"{(completed.stderr or '').strip()[-300:]}", flush=True)
+        report(f"[bridge] FAIL: engine exited {completed.returncode}: "
+               f"{(completed.stderr or '').strip()[-300:]}")
         return 1
 
     # An exit code proves the process ended, never that the assignment was
@@ -349,9 +362,9 @@ def main(argv: list[str]) -> int:
     # definite `False` is what makes "did nothing" a definite *failure* instead,
     # which is the one verdict that lets another engine try.
     if verdict is False:
-        print(f"[bridge] FAIL: {args.engine} exited 0 without posting an "
-              f"acknowledgement on #{args.story}; it did not do the work. "
-              f"Treat as a definite failure — another engine may try.", flush=True)
+        report(f"[bridge] FAIL: {args.engine} exited 0 without posting an "
+               f"acknowledgement on #{args.story}; it did not do the work. "
+               f"Treat as a definite failure — another engine may try.")
         return 1
 
     print(f"[bridge] {args.engine} accepted story #{args.story}", flush=True)
