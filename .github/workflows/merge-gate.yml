@@ -61,11 +61,62 @@ jobs:
       # Tests come from the PR head — they are evidence about the proposed code,
       # which is what the verdict needs. The result is computed here, in this
       # run; it is never read from a label, comment, or PR body (§9.14).
-      - name: Run gate tests from the PR head
+      #
+      # Every suite, not one of them. Until #113 this step ran `factory/gates`
+      # alone, so `tests-passed` was green for a pull request that broke the
+      # dispatcher or the runtime — and one did: PR #108 changed 355 lines of
+      # dispatcher code and the required check passed in ten seconds without
+      # running a single one of its tests. A gate whose test input covers a
+      # quarter of the factory is not reporting on the factory.
+      #
+      # `continue-on-error` is deliberate and applies to the whole step: a red
+      # suite must reach the gate as `tests-passed=false` and be reported as a
+      # named violation, not abort the job before the verdict is computed.
+      - name: Run every factory suite from the PR head
         id: tests
-        working-directory: pr/factory/gates
+        working-directory: pr
         continue-on-error: true
-        run: python3 -m unittest discover -p 'test_*.py' -v
+        shell: bash
+        run: |
+          set -o pipefail
+          failed=0
+          total=0
+          for suite in gates dispatcher runtime acceptance; do
+            echo "::group::factory/$suite"
+            # Each suite is discovered from its own directory: the modules
+            # import their siblings by name, exactly as they do at runtime.
+            output=$(python3 -m unittest discover -s "factory/$suite" -p 'test_*.py' -v 2>&1) || failed=1
+            echo "$output"
+            ran=$(printf '%s' "$output" | grep -oE '^Ran [0-9]+' | grep -oE '[0-9]+' | tail -1)
+            total=$(( total + ${ran:-0} ))
+            echo "::endgroup::"
+            echo "factory/$suite: ${ran:-0} test(s)"
+          done
+          echo "tests_run=$total" >> "$GITHUB_OUTPUT"
+          echo "Total: $total test(s) across four suites"
+          exit "$failed"
+
+      # The acceptance suite again, through its own runner, for the report it
+      # writes. The unittest wrapper above already ran these scenarios — this
+      # produces the artifact a Phase 2 acceptance claim cites, and a suite
+      # whose result exists only in a log is not evidence.
+      - name: Write the Phase 2 acceptance report
+        id: acceptance
+        if: always()
+        working-directory: pr
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          python3 factory/acceptance/run_acceptance.py --quiet | tee acceptance.txt
+
+      - name: Upload the acceptance report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase-2-acceptance-report
+          path: pr/factory/acceptance/report.json
+          if-no-files-found: warn
 
       - name: Record CI-computed test result
         id: result
@@ -100,6 +151,16 @@ jobs:
             echo
             echo '```'
             cat gate-report.txt 2>/dev/null || echo 'gate produced no report'
+            echo '```'
+            echo
+            echo "Tests: **${{ steps.tests.outputs.tests_run }}** across \`factory/gates\`,"
+            echo '`factory/dispatcher`, `factory/runtime` and `factory/acceptance`'
+            echo "(outcome: \`${{ steps.tests.outcome }}\`)."
+            echo
+            echo '#### Phase 2 acceptance'
+            echo
+            echo '```'
+            cat pr/acceptance.txt 2>/dev/null || echo 'the acceptance suite produced no report'
             echo '```'
             echo
             echo '_Verdict computed by the trusted copy of the gate on `main`._'
