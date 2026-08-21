@@ -4,6 +4,14 @@ The persistent local loop that keeps the factory moving: it invokes the merged
 dispatcher on an interval and turns each canonical `DISPATCH` line into a worker
 wake-up.
 
+## Human plan-approval helper
+
+From the repository root, `./approve-plan.sh PROJECT_NUMBER` fetches the live
+project criteria, previews the exact §5.1 approval comment, and posts it only
+after the operator types `approved`. It removes error-prone copying but does not
+make or infer the decision. An absent/malformed criteria section, a failed
+GitHub read, or any other confirmation exits nonzero and posts nothing.
+
 **The relay it deletes.** Before this, a human read a newly-authorized issue
 number and typed `work #N`. The labels had already made the decision, so that
 touch carried no judgment — a *relay* touch, the one class
