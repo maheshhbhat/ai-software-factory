@@ -58,6 +58,7 @@ sys.path.insert(0, HERE)
 import completion   # noqa: E402  — post-worker-success transition (#104)
 import continuation  # noqa: E402  — decision-comment consumption (#71)
 import humanqueue   # noqa: E402  — what is waiting on a person (#111)
+import planning_route  # noqa: E402  — project planning invocation route (#190)
 import review_link  # noqa: E402  — delivery-PR lifecycle reconciliation (#111)
 import runlog       # noqa: E402  — operational record (#104)
 import sequencer    # noqa: E402  — dependency/project lifecycle sequencing (#193)
@@ -262,6 +263,27 @@ def run_sequencer(repo: str, claim: bool = True) -> list:
     return sequencer.run(repo, token, apply=claim)
 
 
+def run_planning_route(repo: str, claim: bool = True) -> list[int]:
+    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or ""
+    return planning_route.run(repo, token, apply=claim)
+
+
+def wake_planner(repo: str, artifact: int) -> None:
+    wrapper = os.path.join(HERE, "..", "agents", "planning", "run.sh")
+    template = os.environ.get("FACTORY_PLANNING_CMD", "").strip()
+    command = ([part.replace("{repo}", repo).replace("{artifact}", str(artifact))
+                for part in shlex.split(template)] if template
+               else [wrapper, repo, str(artifact)])
+    result = subprocess.run(command, capture_output=True, text=True,
+                            timeout=int(os.environ.get("FACTORY_PLANNING_TIMEOUT", "900")))
+    if result.returncode != 0:
+        raise WorkerLaunchFailed(
+            f"planning artifact #{artifact} failed ({result.returncode}): "
+            f"{(result.stderr or result.stdout)[:400]}")
+    if result.stdout:
+        print(f"[planning] #{artifact}: {result.stdout.strip()}", flush=True)
+
+
 def poll_once(repo: str, commitment: int, seen: set[int], claim: bool = True) -> list[dict]:
     """One cycle. Returns the dispatches that produced a wake-up."""
     # Reconciliation runs first: a story whose delivery merged should leave
@@ -290,6 +312,16 @@ def poll_once(repo: str, commitment: int, seen: set[int], claim: bool = True) ->
         run_sequencer(repo, claim)
     except Exception as exc:  # noqa: BLE001 — reported, never fatal to dispatch
         print(f"[poller] sequencer pass failed, dispatch continues: "
+              f"{type(exc).__name__}: {exc}", flush=True)
+
+    # Claim each planning transition before invoking. A duplicate poll sees
+    # `project:planning`, so GitHub state suppresses duplicate launches.
+    try:
+        for artifact in run_planning_route(repo, claim):
+            if claim:
+                wake_planner(repo, artifact)
+    except Exception as exc:  # noqa: BLE001 — loud, dispatch remains isolated
+        print(f"[poller] planning pass failed, dispatch continues: "
               f"{type(exc).__name__}: {exc}", flush=True)
 
     # Said on every poll, after the passes that can change what is waiting and

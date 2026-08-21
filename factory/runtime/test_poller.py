@@ -121,6 +121,7 @@ class TestPollOnce(unittest.TestCase):
             mock.patch.object(poller, "run_review_link", return_value=[]),
             mock.patch.object(poller, "run_continuation", return_value=[]),
             mock.patch.object(poller, "run_sequencer", return_value=[]),
+            mock.patch.object(poller, "run_planning_route", return_value=[]),
             mock.patch.object(poller, "run_human_queue", return_value=[]),
         ]
         for patcher in self._passes:
@@ -171,6 +172,21 @@ class TestPollOnce(unittest.TestCase):
              mock.patch.object(poller, "run_dispatcher", return_value=REPORT):
             woken = poller.poll_once("o/r", 54, seen)
         self.assertEqual([d["story"] for d in woken], [64])
+
+    def test_planning_route_invokes_wrapper_with_identity_only(self):
+        with mock.patch.object(poller, "run_planning_route", return_value=[70]), \
+             mock.patch.object(poller, "wake_planner") as wake, \
+             mock.patch.object(poller, "run_dispatcher",
+                               return_value="Dispatcher — no eligible work"):
+            poller.poll_once("o/r", 54, set())
+        wake.assert_called_once_with("o/r", 70)
+
+    def test_planning_failure_does_not_block_story_dispatch(self):
+        with mock.patch.object(poller, "run_planning_route", return_value=[70]), \
+             mock.patch.object(poller, "wake_planner", side_effect=RuntimeError("boom")), \
+             mock.patch.object(poller, "run_dispatcher", return_value=REPORT):
+            woken = poller.poll_once("o/r", 54, set())
+        self.assertEqual([64], [item["story"] for item in woken])
 
     def test_every_poll_says_what_is_waiting_on_a_human(self):
         """Not once per change — once per poll. A queue that reports only
@@ -279,6 +295,7 @@ class TestNoLocalAuthority(unittest.TestCase):
         with mock.patch.object(poller, "run_review_link", return_value=[]), \
              mock.patch.object(poller, "run_continuation", return_value=[]), \
              mock.patch.object(poller, "run_sequencer", return_value=[]), \
+             mock.patch.object(poller, "run_planning_route", return_value=[]), \
              mock.patch.object(poller, "run_human_queue", return_value=[]), \
              mock.patch.object(poller, "run_dispatcher",
                                return_value="Dispatcher — no eligible work"):
@@ -302,6 +319,7 @@ class TestWorkerContractRouting(unittest.TestCase):
             mock.patch.object(poller, "run_review_link", return_value=[]),
             mock.patch.object(poller, "run_continuation", return_value=[]),
             mock.patch.object(poller, "run_sequencer", return_value=[]),
+            mock.patch.object(poller, "run_planning_route", return_value=[]),
             mock.patch.object(poller, "run_human_queue", return_value=[]),
         ]
         for patcher in self._passes:
@@ -363,6 +381,7 @@ class TestCompletionIsDelegated(unittest.TestCase):
             mock.patch.object(poller, "run_review_link", return_value=[]),
             mock.patch.object(poller, "run_continuation", return_value=[]),
             mock.patch.object(poller, "run_sequencer", return_value=[]),
+            mock.patch.object(poller, "run_planning_route", return_value=[]),
             mock.patch.object(poller, "run_human_queue", return_value=[]),
         ]
         for patcher in self._passes:
