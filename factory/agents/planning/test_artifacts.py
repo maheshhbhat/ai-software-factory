@@ -30,6 +30,11 @@ class FakeStore:
         item["body"] = body
         return copy.deepcopy(item)
 
+    def update_labels(self, number, labels):
+        item = next(item for item in self.issues if item["number"] == number)
+        item["labels"] = list(labels)
+        return copy.deepcopy(item)
+
     def list_comments(self, number):
         return copy.deepcopy(self.comments.get(number, []))
 
