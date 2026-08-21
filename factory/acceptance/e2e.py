@@ -82,11 +82,10 @@ COMPLETION_HEADING = "## Story completed"
 
 FIXTURE_BODY = """### Spec
 
-**Disposable end-to-end verification fixture, created by `factory/acceptance/e2e.py`.**
+**Disposable end-to-end fixture, created by `factory/acceptance/e2e.py`.**
 
-Do not implement anything for this Story. It exists to be dispatched, acknowledged
-and completed by the factory itself, so that the end-to-end path is exercised by a
-test rather than by a person reading terminal output.
+Do not implement anything for this Story. It exists so the factory exercises
+itself: {purpose}.
 
 Created at {created}.
 
@@ -100,7 +99,7 @@ test
 
 ### Depends-on
 
-none
+{depends}
 
 ### Hazard
 
@@ -108,7 +107,7 @@ none
 
 ### Attempt
 
-0
+{attempt}
 
 ### Spend cap
 
@@ -116,13 +115,12 @@ $1 / 5 min
 
 ### Scope
 
-no repository file changes
+{scope}
 
 ### Acceptance notes
 
-- Reaches `story:completed` and closed, with no human lifecycle edit.
-- Exactly one worker acknowledgement.
-- No branch, commit, pull request or file change.
+- Reaches a terminal state through the factory, with no human lifecycle edit.
+- Creates no branch, commit, pull request or file change unless the scenario says so.
 """
 
 
@@ -150,9 +148,11 @@ def observed(value) -> str:
 @dataclass
 class Run:
     repo: str
-    fixture: int | None = None
     checks: list[Check] = field(default_factory=list)
     aborted: str = ""
+    fixtures: list[int] = field(default_factory=list)
+    exercised: set = field(default_factory=set)
+    attested: set = field(default_factory=set)
 
     def check(self, name: str, passed: bool, evidence: str = "") -> bool:
         self.checks.append(Check(name, bool(passed), evidence))
@@ -177,6 +177,185 @@ def lifecycle_events(events: list[dict]) -> list[dict]:
             if e.get("event") in ("labeled", "unlabeled")
             and (dispatcher.merge_gate.label_name(e.get("label", {}))
                  .startswith(dispatcher.STORY_LIFECYCLE))]
+
+
+# --------------------------------------------------------------------------
+# Fixtures — created by the test, terminated by the factory
+# --------------------------------------------------------------------------
+
+
+class Fixture:
+    """A disposable Story, and the guarantee that the factory ends it.
+
+    Deliberately not a teardown. §9.3 forbids any component cancelling a Story,
+    and a test that closed its own fixture would both break that rule and delete
+    the evidence of a failure. So a fixture ends when the factory ends it, and
+    one still open at the end of a default-tier scenario is reported as a
+    finding — the fixture *is* the report.
+    """
+
+    def __init__(self, repo: str, token: str, project: int, purpose: str,
+                 depends: str = "none", attempt: str = "0",
+                 scope: str = "no repository file changes",
+                 body_overrides: dict | None = None):
+        self.repo, self.token, self.project = repo, token, project
+        self.purpose = purpose
+        created = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        body = FIXTURE_BODY.format(project=project, created=created, purpose=purpose,
+                                   depends=depends, attempt=attempt, scope=scope)
+        for old, new in (body_overrides or {}).items():
+            body = body.replace(old, new)
+        issue = api(repo, "/issues", token, method="POST", payload={
+            "title": f"[Verification] Disposable — {purpose}",
+            "body": body,
+            "labels": ["type:story", "story:ready", "phase:test"],
+        })
+        self.number: int = issue["number"]
+
+    def issue(self) -> dict:
+        return dispatcher.fetch_issue(self.repo, self.number, self.token)
+
+    def lifecycle(self) -> str | None:
+        return dispatcher.lifecycle_of(self.issue(), dispatcher.STORY_LIFECYCLE)
+
+    def state(self) -> tuple[str, str | None]:
+        issue = self.issue()
+        return issue.get("state"), issue.get("state_reason")
+
+    def section(self, name: str) -> str:
+        return (dispatcher.merge_gate.parse_section(
+            self.issue().get("body") or "", name) or "").strip()
+
+    def timeline(self) -> list[dict]:
+        return timeline(self.repo, self.number, self.token)
+
+    def applied_labels(self) -> list[str]:
+        return [dispatcher.merge_gate.label_name(e["label"])
+                for e in lifecycle_events(self.timeline()) if e["event"] == "labeled"]
+
+    def comments(self) -> list[dict]:
+        return dispatcher.fetch_pages(
+            f"https://api.github.com/repos/{self.repo}/issues/{self.number}/comments",
+            self.token)
+
+    def terminal(self) -> bool:
+        return self.lifecycle() in (dispatcher.COMPLETED, dispatcher.MERGED)
+
+
+# --------------------------------------------------------------------------
+# Scenarios
+# --------------------------------------------------------------------------
+
+
+@dataclass
+class Cost:
+    issues: int = 0
+    engine_calls: int = 0
+
+    def __add__(self, other: "Cost") -> "Cost":
+        return Cost(self.issues + other.issues,
+                    self.engine_calls + other.engine_calls)
+
+
+class Scenario:
+    """One requirement, proven against the live repository.
+
+    `key` must name a requirement in `e2e_requirements.py`; the registry asserts
+    it, so a scenario cannot drift away from the thing it claims to prove.
+    """
+
+    key = ""
+    proves: tuple[str, ...] = ()      # requirements this scenario covers; defaults to (key,)
+    attests: tuple[str, ...] = ()     # requirements verified from durable history, not caused here
+    cost = Cost()
+
+    @classmethod
+    def covers(cls) -> tuple[str, ...]:
+        return cls.proves or (cls.key,)
+
+    def __init__(self, repo: str, commitment: int, project: int, token: str):
+        self.repo, self.commitment, self.project, self.token = repo, commitment, project, token
+        self.fixtures: list[Fixture] = []
+
+    # -- helpers ---------------------------------------------------------
+
+    def fixture(self, purpose: str, **kwargs) -> Fixture:
+        made = Fixture(self.repo, self.token, self.project, purpose, **kwargs)
+        self.fixtures.append(made)
+        return made
+
+    def wait_until(self, predicate, what: str, timeout: float = 20.0) -> bool:
+        """Wait for a bounded time for GitHub's issue listing to catch up.
+
+        **Measured, not assumed.** `GET /issues?state=open` lags writes by roughly
+        three seconds in both directions: a newly created issue does not appear
+        at once, and a newly closed one lingers. A probe run on 2026-08-21 saw
+        both take three polls to settle.
+
+        This is a property of the substrate, and the factory is unharmed by it
+        because every component that *writes* re-reads its subject **by number**
+        immediately beforehand — `dispatcher.claim`, `poison`, `apply_recovery`,
+        `completion.apply_outcome`, `review_link.apply_outcome` all do — and a
+        read by number is strongly consistent. A stale listing therefore costs a
+        poll of latency and can never cause a duplicate write. The one direction
+        it could bias, WIP accounting, over-counts rather than under-counts, so
+        it under-dispatches: the safe way to be wrong.
+
+        A test asserting immediately after a write has no such protection, which
+        is why this exists. It is a bounded wait with a named failure, never a
+        blind sleep.
+        """
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if predicate():
+                return True
+            time.sleep(1.0)
+        return False
+
+    def visible(self, numbers: list[int]) -> bool:
+        listing = dispatcher.fetch_issues(self.repo, self.token)
+        return all(n in listing for n in numbers)
+
+    def claimed_now(self) -> int:
+        return sum(1 for issue in dispatcher.fetch_issues(self.repo, self.token).values()
+                   if dispatcher.lifecycle_of(issue, dispatcher.STORY_LIFECYCLE)
+                   == dispatcher.CLAIMED)
+
+    def dispatch(self, claim: bool = True) -> str:
+        """The real dispatcher, in-process, against the live repository."""
+        buffer = io.StringIO()
+        argv = ["--repo", self.repo, "--commitment", str(self.commitment)]
+        with redirect_stdout(buffer):
+            dispatcher.main(argv + (["--claim"] if claim else []))
+        return buffer.getvalue()
+
+    def poll(self) -> str:
+        return run_poll(self.repo, self.commitment)
+
+    def run(self, run: Run) -> None:  # pragma: no cover - overridden
+        raise NotImplementedError
+
+    def settle(self, run: Run) -> None:
+        """Poll until every fixture is terminal, or report the ones that are not.
+
+        Bounded: a fixture that will not terminate must surface as a finding
+        rather than spin. WIP_LIMIT caps how many can be in flight, so the bound
+        is the number of fixtures plus a margin.
+        """
+        # Bound generously: with real work in flight the free capacity can be one
+        # slot, so draining N fixtures takes N polls. Bounded, never unbounded —
+        # a fixture that will not terminate must surface, not spin.
+        for _ in range(len(self.fixtures) * 2 + 3):
+            if all(f.terminal() for f in self.fixtures):
+                break
+            self.poll()
+        stuck = [f for f in self.fixtures if not f.terminal()]
+        run.check(f"[{self.key}] every fixture reached a terminal state",
+                  not stuck,
+                  observed("all terminal" if not stuck else
+                           ", ".join(f"#{f.number} is {f.lifecycle()}" for f in stuck)
+                           + " — left as-is; §9.3 reserves disposal to a human "
+                             "and tidying it would delete the evidence"))
 
 
 # --------------------------------------------------------------------------
@@ -272,182 +451,152 @@ def runlog_events(story: int) -> list[dict]:
     return events
 
 
-def verify(run: Run, repo: str, commitment: int, token: str) -> None:
-    number = run.fixture
-
-    # 1 — the whole lifecycle, in one real poll.
-    output = run_poll(repo, commitment)
-
-    events = runlog_events(number)
-    kinds = [e.get("event") for e in events]
-
-    dispatches = [e for e in events if e.get("event") == "dispatch.received"]
-    run.check("the dispatcher produced exactly one dispatch for this story",
-              len(dispatches) == 1,
-              observed(f"{len(dispatches)} dispatch.received event(s)"
-                       + (f", project=#{dispatches[0].get('project')} "
-                          f"agent={dispatches[0].get('agent')}" if dispatches else "")))
-
-    wakes = re.findall(rf"(?m)^\[poller\] woke .* story #{number}\b.*$", output)
-    run.check("exactly one worker was woken",
-              len(wakes) == 1,
-              observed(wakes[0] if wakes else f"{len(wakes)} wake line(s) in the poll output"))
-
-    launches = [e for e in events if e.get("event") == "worker.launch.end"]
-    run.check("the worker was launched through the bridge and reported a definite result",
-              (len(launches) == 1 and launches[0].get("result") == "LAUNCHED"
-               and "bridge.dispatch" in kinds),
-              observed(f"{len(launches)} launch(es)"
-                       + (f", result={launches[0].get('result')}, "
-                          f"elapsed_ms={launches[0].get('elapsed_ms')}, "
-                          f"pid={launches[0].get('pid')}" if launches else "")
-                       + f"; bridge.dispatch recorded: {'bridge.dispatch' in kinds}"))
-
-    run.check("the run is reconstructable from the log alone",
-              {"dispatch.received", "worker.launch.start", "worker.launch.end",
-               "story.completion"} <= set(kinds),
-              observed(sorted(set(kinds))))
-
-    # 2 — durable state is the only thing that counts.
-    issue = dispatcher.fetch_issue(repo, number, token)
-    labels = dispatcher.labels_of(issue)
-    run.check("the story reached story:completed",
-              dispatcher.lifecycle_of(issue, dispatcher.STORY_LIFECYCLE)
-              == dispatcher.COMPLETED,
-              observed(f"labels = {sorted(labels)}"))
-    run.check("the issue is closed as completed (§9.3)",
-              (issue.get("state") == "closed"
-               and issue.get("state_reason") == "completed"),
-              observed(f"state={issue.get('state')} state_reason={issue.get('state_reason')}"))
-    run.check("Attempt records the one dispatched attempt",
-              (dispatcher.merge_gate.parse_section(issue.get("body") or "",
-                                                   "Attempt") or "").strip() == "1",
-              observed("Attempt = " + (dispatcher.merge_gate.parse_section(
-                  issue.get("body") or "", "Attempt") or "?").strip()
-                  + " — incremented once at dispatch, untouched by completion"))
-
-    # 3 — exactly one acknowledgement, and a recorded reason.
-    comments = dispatcher.fetch_pages(
-        f"https://api.github.com/repos/{repo}/issues/{number}/comments", token)
-    acks = [c for c in comments if (c.get("body") or "").lstrip().startswith(ACK_HEADING)]
-    run.check("exactly one worker acknowledgement exists",
-              len(acks) == 1, observed(f"{len(acks)} acknowledgement(s)"))
-    completions = [c for c in comments
-                   if (c.get("body") or "").lstrip().startswith(COMPLETION_HEADING)]
-    run.check("the completion decision is recorded on the story",
-              len(completions) == 1,
-              f"{len(completions)} completion record(s) citing the evidence")
-
-    # 4 — the property the whole factory exists for.
-    events = lifecycle_events(timeline(repo, number, token))
-    applied = [dispatcher.merge_gate.label_name(e["label"])
-               for e in events if e["event"] == "labeled"]
-    run.check("no human wrote a lifecycle label",
-              applied == [dispatcher.READY, dispatcher.CLAIMED, dispatcher.COMPLETED],
-              observed(f"applied in order: {applied}"))
-
-    pairs = {}
-    for event in events:
-        pairs.setdefault(event["created_at"], []).append(event["event"])
-    transitions = [stamp for stamp, kinds in pairs.items() if set(kinds) == {"labeled", "unlabeled"}]
-    run.check("each transition was one atomic label-set replacement (§9.2)",
-              len(transitions) == 2,
-              f"{len(transitions)} transitions, each with its unlabeled/labeled pair "
-              f"sharing a timestamp")
-
-    # 5 — replay. A second poll must do nothing at all.
-    before = len(timeline(repo, number, token))
-    second = run_poll(repo, commitment)
-    after = len(timeline(repo, number, token))
-    run.check("a replay poll changed nothing",
-              after == before and f"story=#{number}" not in second,
-              f"timeline length {before} -> {after}; no DISPATCH for #{number}")
-
-    # 6 — a terminal story is not waiting on anyone.
-    queue_output = io.StringIO()
-    with redirect_stdout(queue_output):
-        humanqueue.run(repo, token)
-    run.check("the completed story is not in the human queue",
-              f"artifact=#{number}" not in queue_output.getvalue(),
-              "human-queue pass did not list it — terminal work waits for nobody")
-
-    # 7 — the fixture built nothing.
-    prs = dispatcher.fetch_pull_requests(repo, token)
-    linked, _ = dispatcher.linked_delivery_prs(number, prs)
-    run.check("no pull request was created for the fixture",
-              not linked, observed(f"{len(linked)} linked pull request(s)"))
-    branches = api(repo, "/branches?per_page=100", token)
-    run.check("no branch was created for the fixture",
-              not any(str(number) in b.get("name", "") for b in branches),
-              f"{len(branches)} branch(es), none naming #{number}")
-
-
 # --------------------------------------------------------------------------
 # CLI
 # --------------------------------------------------------------------------
 
 
-def render(run: Run) -> str:
+def render(run: Run, requested: list[str]) -> str:
+    import e2e_requirements as reqs
+
     lines = ["End-to-end verification — real repository, real engine, nothing mocked", ""]
-    if run.fixture:
-        lines.append(f"  fixture: #{run.fixture}")
-        lines.append("")
     if run.aborted:
-        lines.append(f"  ABORTED before creating a fixture: {run.aborted}")
-        lines.append("")
-        lines.append("  Nothing was written. Aborting early is correct: a run that "
-                     "half-executes")
-        lines.append("  leaves a Story behind and reports a failure it did not cause.")
+        lines += [f"  ABORTED before creating any fixture: {run.aborted}", "",
+                  "  Nothing was written. Aborting early is correct: a run that half-executes",
+                  "  leaves a Story behind and reports a failure it did not cause."]
         return "\n".join(lines)
+
     for check in run.checks:
         lines.append(check.line())
     passed = sum(1 for c in run.checks if c.passed)
-    lines += ["", f"  {passed}/{len(run.checks)} check(s) passed"]
+    lines += ["", f"  {passed}/{len(run.checks)} check(s) passed", ""]
+
+    # Requirement coverage — including what this run did not and cannot reach.
+    lines.append("  Phase 2 requirement coverage")
+    for requirement in reqs.REQUIREMENTS:
+        if requirement.tier == reqs.UNREACHABLE:
+            mark = "UNREACHABLE"
+        elif requirement.key in run.attested:
+            # Verified against durable state the real system produced, but not
+            # caused by this run. A weaker claim, and it must read as one.
+            mark = "attested"
+        elif requirement.key in run.exercised:
+            mark = "exercised"
+        elif requirement.tier == reqs.DEFAULT:
+            mark = "not run"
+        else:
+            mark = f"not run ({requirement.tier})"
+        lines.append(f"    {mark:<18} {requirement.key:<15} {requirement.behaviour} "
+                     f"({requirement.reference})")
+
+    summary = reqs.summary()
+    exercised = len(run.exercised - run.attested)
+    attested = len(run.attested)
+    lines += ["",
+              f"    {exercised + attested}/{summary['reachable']} reachable requirement(s) "
+              f"covered — {exercised} exercised live, {attested} attested from durable "
+              f"history; {summary['unreachable']} unreachable"]
+
+    for requirement in reqs.REQUIREMENTS:
+        if requirement.tier == reqs.UNREACHABLE:
+            lines += ["", f"    UNREACHABLE — {requirement.key}: {requirement.note}"]
+
+    if run.fixtures:
+        lines += ["", f"  fixtures created: "
+                      + ", ".join(f"#{n}" for n in sorted(run.fixtures))]
     if not run.ok:
-        lines.append("")
-        lines.append(f"  FAIL. The fixture #{run.fixture} is deliberately left as it is — "
-                     f"it is the report.")
-        lines.append("  Cleanup here is the completion path working; a run that tidied up "
-                     "after itself")
-        lines.append("  would delete the evidence and hide the defect.")
+        lines += ["",
+                  "  FAIL. Fixtures are left exactly as they are — they are the report.",
+                  "  §9.3 reserves disposal to a human, and tidying up would delete the "
+                  "evidence."]
     return "\n".join(lines)
 
 
 def main(argv: list[str]) -> int:
+    import e2e_requirements as reqs
+
     parser = argparse.ArgumentParser(
         description="End-to-end verification against a live repository")
-    parser.add_argument("--repo", required=True, help="owner/name")
-    parser.add_argument("--commitment", required=True, type=int)
-    parser.add_argument("--project", required=True, type=int,
-                        help="an active project to hang the fixture under")
+    parser.add_argument("--repo", help="owner/name")
+    parser.add_argument("--commitment", type=int)
+    parser.add_argument("--project", type=int,
+                        help="an active project to hang fixtures under")
+    parser.add_argument("--only", help="comma-separated requirement keys to run")
+    parser.add_argument("--list", action="store_true",
+                        help="print the requirement map and exit, touching nothing")
     parser.add_argument("--json", help="write the report here")
     args = parser.parse_args(argv)
+
+    import e2e_scenarios  # noqa: F401 — importing registers the scenarios
+
+    if args.list:
+        print("Phase 2 requirements and their end-to-end reach\n")
+        for requirement in reqs.REQUIREMENTS:
+            available = any(requirement.key in s.covers() for s in e2e_scenarios.REGISTRY)
+            print(f"  {requirement.tier:<12} {'scenario' if available else 'none    '}  "
+                  f"{requirement.key:<15} {requirement.behaviour}")
+            if requirement.note:
+                print(f"                                 {requirement.note}")
+        summary = reqs.summary()
+        print(f"\n  {summary['reachable']}/{summary['total']} reachable, "
+              f"{summary['unreachable']} unreachable")
+        return 0
+
+    for required in ("repo", "commitment", "project"):
+        if getattr(args, required) is None:
+            parser.error(f"--{required} is required unless --list is given")
 
     token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or ""
     run = Run(repo=args.repo)
     if not token:
         run.aborted = "no GITHUB_TOKEN/GH_TOKEN — this test writes to a real repository"
-        print(render(run))
+        print(render(run, []))
         return 2
 
-    if preflight(run, args.repo, args.commitment, args.project, token):
-        run.fixture = create_fixture(args.repo, args.project, token)
-        print(f"created fixture #{run.fixture}; running the factory against it "
-              f"(this spends a real engine invocation)", flush=True)
-        try:
-            verify(run, args.repo, args.commitment, token)
-        except Exception as exc:  # noqa: BLE001 — a crash is a failed run, not a silent one
-            import traceback
-            run.check("the run completed without crashing", False,
-                      f"{type(exc).__name__}: {exc}")
-            traceback.print_exc(file=sys.stdout)
+    wanted = [k.strip() for k in args.only.split(",")] if args.only else None
+    selected = [cls for cls in e2e_scenarios.REGISTRY
+                if (wanted is None and reqs.BY_KEY[cls.key].tier == reqs.DEFAULT)
+                or (wanted is not None and cls.key in wanted)]
+    if not selected:
+        print(f"no scenario matches {args.only!r}; --list shows what exists")
+        return 2
 
-    print(render(run))
+    total = Cost()
+    for cls in selected:
+        total = total + cls.cost
+    print(f"running {len(selected)} scenario(s): "
+          f"{total.issues} issue(s) will be created, "
+          f"~{total.engine_calls} engine invocation(s) spent", flush=True)
+
+    if not preflight(run, args.repo, args.commitment, args.project, token):
+        print(render(run, []))
+        return 2
+
+    for cls in selected:
+        instance = cls(args.repo, args.commitment, args.project, token)
+        try:
+            instance.run(run)
+            run.exercised.update(cls.covers())
+            run.attested.update(cls.attests)
+        except Exception as exc:  # noqa: BLE001 — a crash is a failed scenario
+            import traceback
+            run.check(f"[{cls.key}] the scenario completed without crashing", False,
+                      observed(f"{type(exc).__name__}: {exc}"))
+            traceback.print_exc(file=sys.stdout)
+        run.fixtures.extend(f.number for f in instance.fixtures)
+
+    print(render(run, wanted or []))
 
     if args.json:
         with open(args.json, "w", encoding="utf-8") as handle:
-            json.dump({"repo": run.repo, "fixture": run.fixture,
+            json.dump({"repo": run.repo, "fixtures": sorted(run.fixtures),
                        "aborted": run.aborted, "passed": run.ok,
+                       "exercised": sorted(run.exercised),
+                       "requirements": {r.key: {"tier": r.tier,
+                                                "behaviour": r.behaviour,
+                                                "reference": r.reference,
+                                                "note": r.note}
+                                        for r in reqs.REQUIREMENTS},
                        "checks": [{"name": c.name, "passed": c.passed,
                                    "evidence": c.evidence} for c in run.checks]},
                       handle, indent=2, sort_keys=True)
