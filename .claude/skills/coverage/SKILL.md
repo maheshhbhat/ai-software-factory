@@ -12,6 +12,20 @@ mistake this skill exists to stop.
 python3 factory/coverage_report.py --python <interpreter-with-coverage>
 ```
 
+## Two different questions — pick the right one
+
+**"Does every requirement have a test?"** — `factory/acceptance/requirement_coverage.py`.
+Fully deterministic: reads declarations, runs nothing, needs no credential. Ask
+this **first**. A requirement with zero tests is invisible to any percentage, and
+this is the only check that surfaces it.
+
+**"How many lines do the tests execute?"** — `factory/coverage_report.py`, below.
+
+They were conflated once here, and the cost was a measurement answering a
+question nobody asked. Line coverage would not have caught #107: every line was
+covered while the dispatcher was rejecting every satisfied dependency in
+production for two days.
+
 ## Why a script rather than shell commands
 
 The first time this measurement was made here it was done with ad-hoc `coverage`
@@ -65,6 +79,18 @@ were covered and the composition was wrong.
 that leads somewhere.
 
 ## Rules this skill holds to
+
+**The end-to-end layer is opt-in and reported apart.** `--with-e2e REPO
+COMMITMENT PROJECT` measures it — but it **writes to a real repository** and
+spends real engine invocations, and what it covers depends on what was in that
+repository when it ran. That is irreducibly non-deterministic, so it is never
+folded into the figure `--check` verifies; `--check` and `--with-e2e` are
+mutually exclusive and the error says why.
+
+Non-deterministic does not mean advisory: a failed end-to-end run reaches the
+exit code, and the failing checks are printed by name. An earlier version
+reported `46/47 check(s) passed`, discarded which one, and exited `0` — a
+failure shaped so that nobody would act on it.
 
 **Never gate on a coverage threshold.** Coverage is reported, never enforced. A
 required check with a coverage floor is a number the code under test can raise

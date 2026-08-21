@@ -1,5 +1,21 @@
 #!/usr/bin/env python3
-"""The Phase 2 requirements, and what an end-to-end run can honestly reach.
+"""The **Phase 2** requirements, and what an end-to-end run can honestly reach.
+
+Named for its phase on purpose. An earlier name — `e2e_requirements` — read as
+though it held every requirement there would ever be, which is an invitation for
+someone reaching Phase 4 to append to it. Phase 2's requirements are Phase 2's;
+a later phase gets its own file, and the difference will matter more than it
+looks, because the later phases are not all this shape.
+
+`implementation-plan-v1.md` puts it plainly for Phase 3: *"is the plan digest one
+you would sign?"* That is a human judgement with no test to have, and a coverage
+report demanding one for it would be measuring the wrong thing loudly. Phase 4 —
+one toy story through the full loop with no manual step — does decompose like
+this. Phase 5 is KPI measurement, different again.
+
+So the *mechanism* here generalises to some phases and not others, and the
+honest time to extract it is when a second real instance exists to extract it
+against, not now on a guess about the shape of one.
 
 This file exists so that end-to-end coverage is a **statement** rather than an
 impression. `e2e.py` prints it on every run, including the requirements no
@@ -61,12 +77,15 @@ REQUIREMENTS: tuple[Requirement, ...] = (
         "authorization", "authorization chain, each link refused by name", "§9.9, §3.2", DEFAULT,
         "one fixture mutated link by link, ending valid so it completes and cleans itself up"),
     Requirement(
-        "trust-boundary", "an untrusted author cannot cause a dispatch", "§9.9", UNREACHABLE,
-        "`author_association` is computed by GitHub from repository membership, so this "
-        "credential cannot author an untrusted issue. Decision #27 chose a single identity, "
-        "which makes this blocked by a recorded architectural choice rather than by effort. "
-        "Unlocked by a second GitHub identity (#26); proven hermetically meanwhile by "
-        "acceptance scenario S3, which drives the real dispatcher against a NONE-authored issue"),
+        "trust-boundary", "an untrusted author cannot cause a dispatch", "§9.9", DEFAULT,
+        "covered live in the strongest form one identity allows. A public repository "
+        "accumulates artifacts from non-collaborators, and this one has: GitHub stamped a "
+        "real comment `author_association: NONE`, which this credential cannot forge. The "
+        "scenario refuses that real artifact through the production check and proves the "
+        "rule reads live data. What it CANNOT do is open an untrusted *story* and watch the "
+        "dispatcher refuse it — that needs an account which is not a collaborator, and #27 "
+        "chose a single identity. Acceptance scenario S3 covers that half; a second "
+        "identity (#26) would close it"),
     Requirement(
         "scope-gate", "the required gate is enforced and unbypassable", "§9.6, §9.14", DEFAULT,
         "asserts the enforcement surface from live repository configuration, which §9.14 "

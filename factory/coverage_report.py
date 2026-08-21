@@ -84,9 +84,28 @@ ACCEPTANCE = {
 }
 LAYERS = ("unit", "integration", "acceptance")
 
+# The fourth layer, and the reason it is not in `LAYERS`.
+#
+# `e2e.py` runs against a live repository with a live engine, so what it covers
+# depends on what happens to be in the repository that day: dispatch a story and
+# the dispatch path is covered; run when nothing is eligible and it is not. Same
+# code, different number, no bug. That is irreducibly non-deterministic, and this
+# tool's entire promise is that two runs agree.
+#
+# So it is measured **separately, on request**, reported apart from the
+# deterministic figure, and excluded from `--check`. Folding it into the total
+# would quietly destroy the property the rest of the file exists to hold.
+#
+# It is here rather than left to ad-hoc shell commands because that is the defect
+# this tool was written to fix — twice now, the coverage of this repository has
+# been measured by hand and the numbers lived only in a transcript.
+E2E = "acceptance/e2e.py"
+
 # Production code is what a coverage number is about. Test files cover
 # themselves trivially and including them flatters the total by ~7 points.
 OMIT = "*/test_*.py,factory/acceptance/*,factory/coverage_report.py"
+
+E2E_ENV = ("GITHUB_TOKEN", "GH_TOKEN")
 
 EXIT_OK, EXIT_TEST_FAILURE, EXIT_NO_COVERAGE, EXIT_NONDETERMINISTIC = 0, 1, 3, 4
 
@@ -216,8 +235,45 @@ def combine(python: str, sources: list[Path], target: Path, env: dict) -> None:
             f"Reporting a wrong number here would be worse than stopping.")
 
 
-def measure(python: str, workdir: Path) -> dict:
-    """The whole measurement. Pure with respect to the repository — reads only."""
+def run_e2e(python: str, data_file: Path, target: dict, env: dict) -> tuple[bool, str]:
+    """Measure the end-to-end suite. Writes to a real repository — see `E2E`.
+
+    The environment is *not* the sanitised one: E2E needs the credential the
+    other layers are deliberately stripped of, and needs whatever
+    `FACTORY_WORKER_*` configuration the operator actually runs with, because
+    covering a worker path means launching a real worker.
+    """
+    data_file.unlink(missing_ok=True)
+    live = {**os.environ, "COVERAGE_FILE": str(data_file),
+            "PYTHONDONTWRITEBYTECODE": "1"}
+    result = subprocess.run(
+        [python, "-m", "coverage", "run", "--source=factory", "--branch",
+         str(FACTORY / "acceptance" / "e2e.py"),
+         "--repo", target["repo"], "--commitment", str(target["commitment"]),
+         "--project", str(target["project"])],
+        cwd=ROOT, capture_output=True, text=True, env=live)
+    lines = (result.stdout or result.stderr or "").strip().splitlines()
+    summary = next((line.strip() for line in reversed(lines)
+                    if "check(s) passed" in line or "ABORTED" in line), "no report")
+    # Keep the failures themselves, not merely the count. The first version
+    # reported "46/47 check(s) passed" and discarded which one — a number that
+    # tells you something is wrong and refuses to say what, which is the least
+    # useful shape a failure report can take.
+    failures = []
+    for index, line in enumerate(lines):
+        if line.lstrip().startswith("FAIL"):
+            failures.append(line.strip())
+            if index + 1 < len(lines) and lines[index + 1].lstrip().startswith("·"):
+                failures.append(lines[index + 1].strip())
+    return result.returncode == 0, summary, failures
+
+
+def measure(python: str, workdir: Path, e2e: dict | None = None) -> dict:
+    """The deterministic measurement. Pure with respect to the repository — reads only.
+
+    `e2e` is the exception and is kept structurally apart for that reason: it is
+    reported beside the figure, never inside it.
+    """
     env = clean_environment()
     purge_pycache()
     workdir.mkdir(parents=True, exist_ok=True)
@@ -247,7 +303,7 @@ def measure(python: str, workdir: Path) -> dict:
             "contribution": round(combined["total"] - without, 1),
         }
 
-    return {
+    result = {
         "tool": "factory/coverage_report.py",
         "scope": "production code only (tests omitted)",
         "layers": {layer: {"files": grouped[layer], "tests": len(grouped[layer]),
@@ -256,6 +312,33 @@ def measure(python: str, workdir: Path) -> dict:
         "combined": combined,
         "failing_layers": failures,
     }
+
+    if e2e is not None:
+        data_file = workdir / "data.e2e"
+        passed, summary, failures = run_e2e(python, data_file, e2e, env)
+        if not data_file.exists():
+            result["e2e"] = {"deterministic": False, "passed": passed,
+                             "summary": summary, "failures": failures,
+                             "total": 0.0, "modules": {},
+                             "combined_with_e2e": combined["total"], "adds": 0.0}
+            return result
+
+        measured = report(python, data_file, env)
+        with_e2e_file = workdir / "data.combined-with-e2e"
+        combine(python, [combined_file, data_file], with_e2e_file, env)
+        with_e2e = report(python, with_e2e_file, env)["total"]
+        result["e2e"] = {
+            "deterministic": False,
+            "passed": passed,
+            "summary": summary,
+            "failures": failures,
+            "total": measured["total"],
+            "modules": measured["modules"],
+            "combined_with_e2e": with_e2e,
+            "adds": round(with_e2e - combined["total"], 1),
+        }
+
+    return result
 
 
 def render(result: dict) -> str:
@@ -282,6 +365,21 @@ def render(result: dict) -> str:
         lines.append(f"    {percent:>5.1f}%  {name}")
     lines.append("")
 
+    if "e2e" in result:
+        e2e = result["e2e"]
+        lines.append("  End-to-end — measured separately, and NOT deterministic")
+        lines.append(f"    e2e alone     {e2e['total']:>5.1f}%   ({e2e['summary']})")
+        lines.append(f"    combined      {e2e['combined_with_e2e']:>5.1f}%   "
+                     f"({e2e['adds']:+.1f} pts over the deterministic figure)")
+        lines.append("    What it covers depends on what was in the repository when it")
+        lines.append("    ran, so it is reported beside the figure above and never inside")
+        lines.append("    it. --check does not cover this layer and cannot.")
+        if not e2e["passed"]:
+            lines.append("    FAILED — the checks that did not pass:")
+            for failure in e2e.get("failures", []) or ["    (no detail captured)"]:
+                lines.append(f"      {failure}")
+        lines.append("")
+
     if result["failing_layers"]:
         lines.append(f"  WARNING: tests failed in {', '.join(result['failing_layers'])}. "
                      f"These numbers are measured against failing tests.")
@@ -307,7 +405,24 @@ def main(argv: list[str]) -> int:
                         help="measure twice in separate processes and diff")
     parser.add_argument("--workdir", default=None,
                         help="where coverage data files live (default: a temp dir)")
+    parser.add_argument("--with-e2e", nargs=3, metavar=("REPO", "COMMITMENT", "PROJECT"),
+                        help="also measure the end-to-end suite. WRITES TO A REAL "
+                             "REPOSITORY and spends real engine invocations; the result "
+                             "is non-deterministic and is reported separately")
     args = parser.parse_args(argv)
+
+    e2e = None
+    if args.with_e2e:
+        repo, commitment, project = args.with_e2e
+        if not any(os.environ.get(key) for key in E2E_ENV):
+            print("--with-e2e needs GITHUB_TOKEN or GH_TOKEN: the end-to-end suite "
+                  "writes to a real repository.", file=sys.stderr)
+            return EXIT_NO_COVERAGE
+        e2e = {"repo": repo, "commitment": int(commitment), "project": int(project)}
+        if args.check:
+            parser.error("--check and --with-e2e are contradictory: the end-to-end "
+                         "layer is not deterministic, which is the whole reason it is "
+                         "reported apart from the figure --check verifies")
 
     if not coverage_available(args.python):
         print("coverage.py is not importable by "
@@ -324,7 +439,7 @@ def main(argv: list[str]) -> int:
     import tempfile
     with tempfile.TemporaryDirectory(prefix="factory-coverage-") as tmp:
         workdir = Path(args.workdir) if args.workdir else Path(tmp)
-        result = measure(args.python, workdir / "first")
+        result = measure(args.python, workdir / "first", e2e)
         print(render(result))
 
         if args.check:
@@ -343,7 +458,14 @@ def main(argv: list[str]) -> int:
             handle.write("\n")
         print(f"\n  report written to {args.json}")
 
-    return EXIT_TEST_FAILURE if result["failing_layers"] else EXIT_OK
+    if result["failing_layers"]:
+        return EXIT_TEST_FAILURE
+    if "e2e" in result and not result["e2e"]["passed"]:
+        # Non-deterministic does not mean advisory. A run that failed is a run
+        # that failed, and exiting 0 beside a printed FAILED is how a failure
+        # becomes a number nobody acts on.
+        return EXIT_TEST_FAILURE
+    return EXIT_OK
 
 
 if __name__ == "__main__":
