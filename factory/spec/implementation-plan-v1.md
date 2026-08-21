@@ -69,15 +69,24 @@ templates; walk them through every legal transition manually; log the touches.
 ## Phase 2 — Deterministic rails (no AI)
 
 Deliverables:
-- **Merge gate**: a required CI status check that verifies (a) review approval
-  exists for the exact head SHA, (b) tests green, (c) diff paths within the
-  story's declared scope, (d) test files not deleted/weakened without a
+- **Merge gate**: a required CI status check that verifies ~~(a) review approval
+  exists for the exact head SHA,~~ (b) tests green, (c) diff paths within the
+  story's declared scope, ~~(d) test files not deleted/weakened without a
   distinct `test-change` label, (e) no hazard paths touched — or if touched,
-  a human ack label from an allowed identity is present.
-- **Hazard paths**: CODEOWNERS covering dependency manifests, CI/workflow
+  a human ack label from an allowed identity is present.~~
+  **(a), (d) and (e) are withdrawn** — see `state-schema.md` §9.17. All three
+  rest on an artifact the agent's own credential can write, which §9.14
+  prohibits as a trust anchor; under the single-identity decision (#27) they
+  would report enforcement the gate does not have.
+- ~~**Hazard paths**: CODEOWNERS covering dependency manifests, CI/workflow
   files, migrations, secrets config, and `factory/spec/**` + `factory/gates/**`
   (the factory may never modify its own rules without human ack). Agent
-  identities excluded from ownership.
+  identities excluded from ownership.~~ **Withdrawn** with (e), and for the
+  same reason: with one identity the owner and the agent are the same account,
+  so code-owner review cannot distinguish them. Hazard paths are still
+  enumerated, still pre-flagged on stories, and still surfaced by the advisory
+  `merge-gate-surface` check; what is withdrawn is the claim that CODEOWNERS
+  *enforces* them.
 - **Dispatcher**: cron every 60s. Reads current labels via the API (not
   search), diffs against last-seen state versions, applies routing table:
   `ready-for-planning → invoke planning`, `story:ready → assign + invoke
@@ -95,11 +104,20 @@ Deliverables:
 Verification (still no AI): a fake "worker" script that opens a trivial PR when
 invoked. Confirm: dispatch happens once and only once per transition (proven by
 the §9.15 replay of Phase 1's recorded events); the merge gate blocks on each
-violation class independently; a hazard-path edit blocks without ack; and three
-*dispatched* attempts followed by a fourth dispatch attempt produce poison at
-`Attempt = 3` plus notification — per `state-schema.md` §4.3.5 the check precedes
-the increment, so asserting "3 failures then poison" without that distinction
-would pass against a wrong implementation.
+violation class independently; and three *dispatched* attempts followed by a
+fourth dispatch attempt produce poison at `Attempt = 3` plus notification — per
+`state-schema.md` §4.3.5 the check precedes the increment, so asserting "3
+failures then poison" without that distinction would pass against a wrong
+implementation. ~~a hazard-path edit blocks without ack~~ is withdrawn with
+deliverable (e) above.
+
+The whole of the above is executed as one runnable suite —
+`factory/acceptance/run_acceptance.py` — rather than as a checklist walked by
+hand. Sixteen scenarios drive the real entry points against one in-memory
+repository and assert on durable state. That distinction is not cosmetic: the
+dependency defect in #107 passed every component test in the repository, because
+every one of them handed the evaluator a pre-built map instead of making it go
+and look.
 
 Trust and sequencing constraints, frozen in Increment 1 (#28): the gate derives
 its verdict only from inputs the agent's credential cannot fabricate — diff,
