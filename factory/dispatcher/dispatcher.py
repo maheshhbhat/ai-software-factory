@@ -71,9 +71,17 @@ READY = "story:ready"
 CLAIMED = "story:claimed"
 IN_REVIEW = "story:in-review"
 MERGED = "story:merged"
-CANCELLED = "story:cancelled"     # §9.3 — finished with no deliverable
+COMPLETED = "story:completed"     # §9.16 — succeeded, nothing to merge
+CANCELLED = "story:cancelled"     # §9.3 — deliberately stopped; human decision only
 POISON = "story:blocked:poison"
 PROJECT_ACTIVE = "project:active"
+
+# The two ways a story can be *done and successful*. They differ only in whether
+# the work produced something to merge, which is a fact about the assignment and
+# not about whether it succeeded — so a dependency is satisfied by either
+# (§9.10). Nothing here decides that a story is finished; both labels are
+# written elsewhere and this only reads them.
+TERMINAL_SUCCESS = frozenset({MERGED, COMPLETED})
 
 ISSUE_REF_RE = re.compile(r"^#(\d+)$")
 
@@ -96,6 +104,7 @@ class Reason:
     PROJECT_NOT_ACTIVE = "PROJECT_NOT_ACTIVE"
     COMMITMENT_LINK_MISSING = "COMMITMENT_LINK_MISSING"
     COMMITMENT_MISMATCH = "COMMITMENT_MISMATCH"
+    COMPLETED = "COMPLETED"
     DEPENDENCY_UNMET = "DEPENDENCY_UNMET"
     DEPENDS_ON_MALFORMED = "DEPENDS_ON_MALFORMED"
     SCOPE_INVALID = "SCOPE_INVALID"
@@ -336,9 +345,13 @@ def evaluate_story(story: dict, projects: dict, stories: dict,
     if lifecycle is None:
         return Decision(number, False, Reason.AMBIGUOUS_LIFECYCLE,
                         detail="zero or multiple story:* labels")
+    if lifecycle == COMPLETED:
+        return Decision(number, False, Reason.COMPLETED,
+                        detail="terminal: the bounded assignment succeeded and required "
+                               "no deliverable (§9.16)")
     if lifecycle == CANCELLED:
         return Decision(number, False, Reason.CANCELLED,
-                        detail="terminal: finished with no deliverable (§9.3)")
+                        detail="terminal: work deliberately stopped (§9.3)")
     if lifecycle != READY:
         return Decision(number, False, Reason.NOT_READY, detail=lifecycle)
 
@@ -377,7 +390,8 @@ def evaluate_story(story: dict, projects: dict, stories: dict,
         return Decision(number, False, err, project=project_number)
     for dep in deps:
         dep_issue = stories.get(dep)
-        if dep_issue is None or lifecycle_of(dep_issue, STORY_LIFECYCLE) != MERGED:
+        if (dep_issue is None
+                or lifecycle_of(dep_issue, STORY_LIFECYCLE) not in TERMINAL_SUCCESS):
             return Decision(number, False, Reason.DEPENDENCY_UNMET, project=project_number,
                             detail=f"#{dep}")
 

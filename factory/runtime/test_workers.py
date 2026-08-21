@@ -17,9 +17,17 @@ from __future__ import annotations
 
 import os
 import subprocess
+import tempfile
 import unittest
 
 import workers as w
+
+
+def setUpModule():
+    """Operational logging is a side effect of these tests, not their subject."""
+    os.environ["FACTORY_RUNTIME_LOG_STDERR"] = "0"
+    os.environ.setdefault("FACTORY_RUNTIME_LOG",
+                          os.path.join(tempfile.gettempdir(), "factory-runtime-test.jsonl"))
 
 
 def spec(name="claude-delivery", launch="/usr/bin/true", health="",
@@ -275,6 +283,64 @@ class TestNoPolicyInAdapters(unittest.TestCase):
         for leaked in ("api.github.com", "urllib", "GITHUB_TOKEN", "gh "):
             self.assertNotIn(leaked, body,
                              f"worker contract must not touch GitHub ({leaked})")
+
+
+class TestLaunchIsObservable(unittest.TestCase):
+    """#104 — a run must be diagnosable afterwards with no live session. None of
+    this may change a verdict; it only records what produced one."""
+
+    def test_a_successful_launch_records_what_was_observed(self):
+        report = w.launch(spec(), 104, 95,
+                          runner=runner_returning(0, stdout="ok", stderr="noise"))
+        self.assertEqual(0, report.exit_code)
+        self.assertEqual("ok", report.stdout)
+        self.assertIsNotNone(report.elapsed_ms)
+
+    def test_both_streams_are_kept_whichever_way_it_exits(self):
+        """The verdict used to decide which stream survived — a launched
+        worker's stderr and a failed worker's stdout were discarded, and for a
+        hang that was the half with the explanation in it."""
+        launched = w.launch(spec(), 104, 95,
+                            runner=runner_returning(0, stdout="out", stderr="err"))
+        failed = w.launch(spec(), 104, 95,
+                          runner=runner_returning(3, stdout="out", stderr="err"))
+        for report in (launched, failed):
+            self.assertEqual("out", report.stdout)
+            self.assertEqual("err", report.stderr)
+
+    def test_a_timeout_keeps_whatever_the_worker_managed_to_print(self):
+        """The ambiguous case is the one that most needs its output kept."""
+        timeout = subprocess.TimeoutExpired(cmd="w", timeout=1,
+                                            output="half a line", stderr="")
+        report = w.launch(spec(), 104, 95, runner=runner_returning(raises=timeout))
+        self.assertEqual(w.Result.AMBIGUOUS, report.result)
+        self.assertEqual("half a line", report.stdout)
+
+    def test_observation_never_changes_a_verdict(self):
+        """The routing contract is `result`; the rest is evidence."""
+        for code, expected in ((0, w.Result.LAUNCHED), (1, w.Result.FAILED)):
+            self.assertEqual(expected,
+                             w.launch(spec(), 104, 95,
+                                      runner=runner_returning(code)).result)
+
+    def test_a_real_launch_reports_the_worker_pid(self):
+        """The first question about a hang is which process to look at, and
+        `subprocess.run` never exposes it."""
+        report = w.launch(spec(launch="/bin/echo hello"), 104, 95)
+        self.assertEqual(w.Result.LAUNCHED, report.result)
+        self.assertIsInstance(report.pid, int)
+        self.assertGreater(report.pid, 0)
+
+    def test_run_observed_matches_subprocess_run_on_success(self):
+        completed = w.run_observed(["/bin/echo", "hi"], timeout=30)
+        self.assertEqual(0, completed.returncode)
+        self.assertEqual("hi\n", completed.stdout)
+
+    def test_run_observed_kills_the_child_and_raises_like_run(self):
+        """Timeout semantics must be identical, or the caller's ambiguous-outcome
+        handling — the rule that stops two workers on one Story — changes."""
+        with self.assertRaises(subprocess.TimeoutExpired):
+            w.run_observed(["/bin/sleep", "5"], timeout=0.2)
 
 
 if __name__ == "__main__":

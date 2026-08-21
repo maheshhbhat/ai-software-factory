@@ -463,7 +463,7 @@ class TestRecoveryBudget(unittest.TestCase):
 
 
 class TestCancelledTerminalState(unittest.TestCase):
-    """§9.3 — a canonical end for work that legitimately has no deliverable."""
+    """§9.3 — a canonical end for work that was deliberately stopped."""
 
     def test_cancelled_story_is_never_dispatched(self):
         cancelled = story(10, lifecycle="story:cancelled")
@@ -484,3 +484,104 @@ class TestCancelledTerminalState(unittest.TestCase):
         second = dp.plan_dispatch(stories, {901: project()}, COMMITMENT)
         self.assertEqual(first.selected, second.selected)
         self.assertEqual(first.selected, [])
+
+
+class TestCompletedTerminalState(unittest.TestCase):
+    """§9.16 — a bounded assignment that succeeded and had nothing to merge.
+
+    A terminal *success*, and the distinction from cancellation is the reason it
+    exists: one says the work was done, the other says it was called off. The
+    dispatcher never writes this label — it is reached by the runtime completion
+    path — but it must read it as terminal, or a story that succeeded goes round
+    again."""
+
+    def completed(self, number=10):
+        return story(number, lifecycle="story:completed")
+
+    def test_completed_story_is_never_dispatched(self):
+        done = self.completed()
+        decision = dp.evaluate_story(done, {901: project()}, {10: done}, COMMITMENT)
+        self.assertFalse(decision.eligible)
+        self.assertEqual(decision.reason, R.COMPLETED)
+
+    def test_it_is_reported_as_a_success_not_as_a_cancellation(self):
+        """Two terminal states, two reasons. A trail that cannot tell a factory's
+        successes from its abandonments cannot report on the factory."""
+        done = self.completed()
+        decision = dp.evaluate_story(done, {901: project()}, {10: done}, COMMITMENT)
+        self.assertNotEqual(decision.reason, R.CANCELLED)
+        self.assertIn("succeeded", decision.detail)
+
+    def test_completed_story_releases_its_wip_slot(self):
+        stories = {10: self.completed(), 11: story(11)}
+        plan = dp.plan_dispatch(stories, {901: project()}, COMMITMENT, wip_limit=2)
+        self.assertEqual(plan.wip_in_use, 0)
+        self.assertEqual([d.number for d in plan.selected], [11])
+
+    def test_replay_over_a_completed_story_is_inert(self):
+        """The property #104 exists for: a story that succeeded is not launched
+        again, on this poll or any later one."""
+        stories = {10: self.completed()}
+        first = dp.plan_dispatch(stories, {901: project()}, COMMITMENT)
+        second = dp.plan_dispatch(stories, {901: project()}, COMMITMENT)
+        self.assertEqual(first.selected, second.selected)
+        self.assertEqual(first.selected, [])
+
+    def test_a_completed_dependency_is_satisfied(self):
+        """§9.10 — `### Depends-on` asks whether the work is done, and both
+        terminal successes answer yes. Only the delivery path differs."""
+        stories = {10: self.completed(), 11: story(11, depends="#10")}
+        decision = dp.evaluate_story(stories[11], {901: project()}, stories, COMMITMENT)
+        self.assertTrue(decision.eligible, decision.reason)
+
+    def test_a_cancelled_dependency_is_still_unmet(self):
+        """Cancellation is not success, and widening the terminal-success set to
+        'anything closed' is exactly the mistake this pair of tests guards."""
+        stories = {10: story(10, lifecycle="story:cancelled"),
+                   11: story(11, depends="#10")}
+        decision = dp.evaluate_story(stories[11], {901: project()}, stories, COMMITMENT)
+        self.assertEqual(decision.reason, R.DEPENDENCY_UNMET)
+
+    def test_a_claimed_dependency_is_still_unmet(self):
+        stories = {10: story(10, lifecycle="story:claimed", attempt="1"),
+                   11: story(11, depends="#10")}
+        decision = dp.evaluate_story(stories[11], {901: project()}, stories, COMMITMENT)
+        self.assertEqual(decision.reason, R.DEPENDENCY_UNMET)
+
+    def test_the_recovery_pass_never_touches_a_completed_story(self):
+        """§9.4 reconciles claims. A completed story is not a claim."""
+        stories = {10: self.completed()}
+        decisions = dp.reconcile_claims(stories, {}, [], datetime.now(timezone.utc))
+        self.assertEqual([], decisions)
+
+
+class TestLifecycleVocabularyMatchesTheSchema(unittest.TestCase):
+    """The labels this module routes on are the ones `state-schema.md` defines.
+
+    A constant that drifts from the schema is a lifecycle the contract does not
+    describe and no reader can audit — and the drift is silent, because every
+    behavioural test in this file would pass against a misspelled label so long
+    as it were misspelled consistently."""
+
+    def schema(self) -> str:
+        import os
+        path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(dp.__file__))),
+                            "spec", "state-schema.md")
+        with open(path, encoding="utf-8") as handle:
+            return handle.read()
+
+    def test_every_story_label_this_module_names_is_in_the_schema(self):
+        schema = self.schema()
+        for label in (dp.READY, dp.CLAIMED, dp.IN_REVIEW, dp.MERGED, dp.COMPLETED,
+                      dp.CANCELLED, dp.POISON):
+            self.assertIn(f"`{label}`", schema, f"{label} is not defined in §2.1")
+
+    def test_completed_is_documented_as_a_terminal_success(self):
+        schema = self.schema()
+        self.assertIn(f"| `{dp.COMPLETED}` | closed | completed |", schema,
+                      "§9.3 must close a completed story as a success")
+        self.assertIn("§9.16", schema, "the completion contract must be stated")
+
+    def test_the_terminal_successes_are_exactly_merged_and_completed(self):
+        self.assertEqual({dp.MERGED, dp.COMPLETED}, set(dp.TERMINAL_SUCCESS))
+        self.assertNotIn(dp.CANCELLED, dp.TERMINAL_SUCCESS)

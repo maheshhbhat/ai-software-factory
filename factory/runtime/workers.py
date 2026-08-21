@@ -41,7 +41,14 @@ import os
 import re
 import shlex
 import subprocess
+import sys
+import time
 from dataclasses import dataclass, field
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+if HERE not in sys.path:
+    sys.path.insert(0, HERE)
+import runlog  # noqa: E402 — operational record; never a control surface (#104)
 
 # How long a health probe may take before it is considered unusable. A slow
 # probe is a routing signal, not an error: the worker simply is not selected.
@@ -101,9 +108,24 @@ class HealthReport:
 
 @dataclass
 class LaunchReport:
+    """The verdict, plus what was observed producing it.
+
+    `result` and `detail` are the routing contract and are unchanged by #104.
+    The fields below carry no routing meaning whatsoever — they exist so that a
+    run can be diagnosed afterwards without an interactive session, and nothing
+    may branch on them. Keeping them here rather than in a parallel structure is
+    deliberate: the evidence and the verdict it produced travel together, so a
+    trail entry cannot be read without the observation behind it.
+    """
+
     worker: str
     result: str
     detail: str = ""
+    exit_code: int | None = None
+    elapsed_ms: int | None = None
+    pid: int | None = None
+    stdout: str = ""
+    stderr: str = ""
 
     @property
     def launched(self) -> bool:
@@ -206,6 +228,12 @@ def select(specs: list[WorkerSpec], required: str = "delivery",
         reports.append(report)
         if report.healthy:
             eligible.append(spec)
+    for report in reports:
+        runlog.event("worker.health", worker=report.worker, healthy=report.healthy,
+                     reason=report.reason, detail=report.detail)
+    runlog.event("worker.selected", required=required,
+                 configured=[s.name for s in specs],
+                 eligible=[s.name for s in eligible])
     return eligible, reports
 
 
@@ -227,57 +255,166 @@ def launch_command(spec: WorkerSpec, story: int, project: int) -> list[str]:
             for part in shlex.split(spec.launch)]
 
 
+def run_observed(cmd, capture_output=True, text=True, timeout=None):
+    """`subprocess.run`, plus the child's PID.
+
+    The default runner for a launch, and the only reason it exists: `run()`
+    never exposes the PID, so a hung worker could not be found in `ps`, attached
+    to, or killed — the first question anyone asks about a hang was the one
+    question the runtime could not answer (#104).
+
+    Semantics match `subprocess.run` exactly, timeout included: the child is
+    killed and reaped before `TimeoutExpired` propagates, so the caller's
+    ambiguous-outcome handling is unchanged. The PID rides back on the returned
+    object rather than via a new parameter, which keeps every injected test
+    runner a plain `subprocess.run` stand-in.
+    """
+    process = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE if capture_output else None,
+        stderr=subprocess.PIPE if capture_output else None,
+        text=text)
+    runlog.event("process.started", pid=process.pid, cmd=runlog.command(cmd))
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        stdout, stderr = process.communicate()
+        raise subprocess.TimeoutExpired(cmd, timeout, output=stdout, stderr=stderr)
+    completed = subprocess.CompletedProcess(cmd, process.returncode, stdout, stderr)
+    completed.pid = process.pid
+    return completed
+
+
 def launch(spec: WorkerSpec, story: int, project: int,
-           runner=subprocess.run) -> LaunchReport:
+           runner=None) -> LaunchReport:
     """Hand one Story to one worker.
 
     The distinction that matters: a timeout is `AMBIGUOUS`, not `FAILED`. The
     worker may have started and simply not returned in time, so the caller must
     not try anyone else — that is how one Story acquires two workers.
+
+    Every path returns a report carrying what was observed — command, PID, exit
+    status, elapsed time, and *both* output streams. Both, always: the verdict
+    used to decide which stream survived, so a launched worker's stderr and a
+    failed worker's stdout were discarded, and for a hang that was the half with
+    the explanation in it.
     """
     cmd = launch_command(spec, story, project)
+    runner = runner or run_observed
+    started = time.monotonic()
+    runlog.event("worker.launch.start", worker=spec.name, story=story, project=project,
+                 cmd=runlog.command(cmd), timeout_s=LAUNCH_TIMEOUT_SECONDS)
+
+    def finish(report: LaunchReport) -> LaunchReport:
+        runlog.event("worker.launch.end", worker=spec.name, story=story, project=project,
+                     result=report.result, exit=report.exit_code, pid=report.pid,
+                     elapsed_ms=report.elapsed_ms, detail=report.detail,
+                     stdout=report.stdout, stderr=report.stderr)
+        return report
+
     try:
         completed = runner(cmd, capture_output=True, text=True,
                            timeout=LAUNCH_TIMEOUT_SECONDS)
-    except subprocess.TimeoutExpired:
-        return LaunchReport(spec.name, Result.AMBIGUOUS,
-                            f"launch exceeded {LAUNCH_TIMEOUT_SECONDS}s; the worker may be "
-                            f"running. Not falling back — a second worker on one Story is "
-                            f"worse than a late one. The §9.4 lease will recover the claim "
-                            f"if nothing was started.")
+    except subprocess.TimeoutExpired as exc:
+        return finish(LaunchReport(
+            spec.name, Result.AMBIGUOUS,
+            f"launch exceeded {LAUNCH_TIMEOUT_SECONDS}s; the worker may be "
+            f"running. Not falling back — a second worker on one Story is "
+            f"worse than a late one. The §9.4 lease will recover the claim "
+            f"if nothing was started.",
+            elapsed_ms=runlog.elapsed_ms(started),
+            stdout=runlog.tail(_stream(exc.output)),
+            stderr=runlog.tail(_stream(exc.stderr))))
     except FileNotFoundError as exc:
-        return LaunchReport(spec.name, Result.FAILED, f"not launchable: {exc}")
+        return finish(LaunchReport(spec.name, Result.FAILED, f"not launchable: {exc}",
+                                   elapsed_ms=runlog.elapsed_ms(started)))
     except (OSError, ValueError) as exc:
-        return LaunchReport(spec.name, Result.AMBIGUOUS,
-                            f"launch outcome unknown: {exc}")
-    if completed.returncode != 0:
-        return LaunchReport(spec.name, Result.FAILED,
-                            f"exit {completed.returncode}: "
-                            f"{(completed.stderr or '').strip()[:200]}")
-    return LaunchReport(spec.name, Result.LAUNCHED, (completed.stdout or "").strip()[:200])
+        return finish(LaunchReport(spec.name, Result.AMBIGUOUS,
+                                   f"launch outcome unknown: {exc}",
+                                   elapsed_ms=runlog.elapsed_ms(started)))
+
+    return finish(report_from(spec.name, completed, started))
+
+
+def report_from(worker: str, completed, started: float) -> LaunchReport:
+    """One report from a process that finished: the verdict and its evidence.
+
+    Shared with the poller's legacy single-command adapter, so both paths agree
+    on what an exit code means *and* record the same observations. Two places
+    deciding that separately is how one adapter quietly stops being diagnosable.
+    """
+    launched = completed.returncode == 0
+    return LaunchReport(
+        worker,
+        Result.LAUNCHED if launched else Result.FAILED,
+        (completed.stdout or "").strip()[:200] if launched
+        else f"exit {completed.returncode}: {(completed.stderr or '').strip()[:200]}",
+        exit_code=completed.returncode,
+        elapsed_ms=runlog.elapsed_ms(started),
+        pid=getattr(completed, "pid", None),
+        stdout=runlog.tail(completed.stdout),
+        stderr=runlog.tail(completed.stderr))
+
+
+def _stream(value) -> str:
+    """Output off a `TimeoutExpired`, which carries `bytes` or `str` depending on
+    how the child was opened."""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", "replace")
+    return value or ""
 
 
 def dispatch_to_worker(specs: list[WorkerSpec], story: int, project: int,
                        required: str = "delivery",
-                       runner=subprocess.run) -> tuple[LaunchReport | None, list]:
+                       runner=None) -> tuple[LaunchReport | None, list]:
     """Give one Story to exactly one worker, or to none.
 
     Returns (successful report or None, the trail of every attempt). The trail is
     the audit record: a Story that ran nowhere must say why, for each engine.
     """
-    eligible, health_reports = select(specs, required, runner=runner)
+    eligible, health_reports = select(specs, required,
+                                      runner=runner or subprocess.run)
     trail: list = list(health_reports)
 
     if not eligible:
+        runlog.event("worker.outcome", story=story, project=project, worker=None,
+                     result="NO_ELIGIBLE_WORKER",
+                     detail="no configured worker is both capable and healthy")
         return None, trail
 
-    for spec in eligible:
+    for index, spec in enumerate(eligible):
         report = launch(spec, story, project, runner=runner)
         trail.append(report)
+        remaining = [s.name for s in eligible[index + 1:]]
         if report.launched:
+            runlog.event("worker.failover", story=story, project=project,
+                         worker=spec.name, decision="NOT_NEEDED",
+                         result=report.result, skipped=remaining,
+                         reason="the worker accepted the assignment")
+            runlog.event("worker.outcome", story=story, project=project,
+                         worker=spec.name, result=report.result, detail=report.detail,
+                         exit=report.exit_code, elapsed_ms=report.elapsed_ms)
             return report, trail
         if not report.may_fall_back:
             # AMBIGUOUS: stop. The worker may be running, and starting another
             # would put two workers on one Story.
+            runlog.event("worker.failover", story=story, project=project,
+                         worker=spec.name, decision="SUPPRESSED",
+                         result=report.result, skipped=remaining,
+                         reason="the outcome is ambiguous — the worker may be running, "
+                                "and a second worker on one Story is worse than a late "
+                                "one. The §9.4 lease recovers the claim.")
+            runlog.event("worker.outcome", story=story, project=project,
+                         worker=spec.name, result=report.result, detail=report.detail,
+                         exit=report.exit_code, elapsed_ms=report.elapsed_ms)
             return None, trail
+        runlog.event("worker.failover", story=story, project=project,
+                     worker=spec.name, decision="FELL_BACK" if remaining else "EXHAUSTED",
+                     result=report.result, next=remaining[0] if remaining else None,
+                     skipped=[], reason="a definite failure proves the worker did not "
+                                        "start, so trying another is safe")
+    runlog.event("worker.outcome", story=story, project=project, worker=None,
+                 result="NO_WORKER_LAUNCHED",
+                 detail="every eligible worker failed definitely")
     return None, trail

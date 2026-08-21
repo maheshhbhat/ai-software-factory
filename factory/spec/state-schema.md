@@ -5,7 +5,7 @@
 > All state lives in GitHub (issues + labels + PRs + issue comments). Any cache is derivable and disposable.
 > No component other than GitHub is authoritative. Ref: `architecture-v2.1.md` §1, §4; `implementation-plan-v1.md` Phase 1.
 >
-> **`SCHEMA_VERSION = 2.0.0`** — §1–§8 are the Phase 1 state model, verified and unchanged in substance. §9 freezes the executable contracts Phase 2 implements (§9.1 defines versioning and compatibility).
+> **`SCHEMA_VERSION = 2.1.0`** — §1–§8 are the Phase 1 state model, verified and unchanged in substance. §9 freezes the executable contracts Phase 2 implements (§9.1 defines versioning and compatibility).
 
 ---
 
@@ -66,11 +66,21 @@ story:blocked → story:ready → story:claimed → story:in-review → story:me
                      ↑                             │
                      └───────── findings ──────────┘        (no attempt increment; §4.3)
 
+  story:claimed → story:completed    (the bounded assignment succeeded and required
+                                      no deliverable; terminal success, §9.16)
+
 exceptions:
   story:ready → story:blocked:poison        (attempt budget exhausted at dispatch time; §4.3)
   * → story:blocked:scope → story:blocked | story:ready
   story:blocked:poison → story:ready        (human rescue; §4.3)
 ```
+
+Two terminal successes, and they are not interchangeable. `story:merged` is
+success **through the PR/merge path**. `story:completed` is success where the
+assignment required no deliverable, so there is nothing to review or merge
+(§9.16). Neither may stand in for the other, and neither is `story:cancelled` —
+that state means work was deliberately stopped, which is a different fact about
+the world and stays a human decision.
 
 | Label | Description |
 |---|---|
@@ -78,8 +88,9 @@ exceptions:
 | `story:ready` | Unblocked; eligible for dispatch/assignment |
 | `story:claimed` | Assigned to a worker (dispatcher-assigned, never self-claimed) |
 | `story:in-review` | PR open, awaiting review |
-| `story:merged` | PR merged; terminal success |
-| `story:cancelled` | Finished with no deliverable; terminal (§9.3). Human decision only — never applied by a component |
+| `story:merged` | PR merged; terminal success through the delivery path |
+| `story:completed` | Bounded assignment succeeded and required no deliverable; terminal success (§9.3, §9.16). Applied only on durable proof — never on an assumption |
+| `story:cancelled` | Work deliberately stopped, with or without a deliverable; terminal (§9.3). Human decision only — never applied by a component |
 | `story:blocked:poison` | Attempt budget exhausted; human rescue required; terminal until a human rescues per §4.3 |
 | `story:blocked:scope` | Scope dispute; human decision required |
 
@@ -217,7 +228,7 @@ All transitions are effected by editing the single lifecycle label (Phase 1: by 
 | `project:awaiting-ready` | `project:active` | human | approves the criteria; **approval comment posted first** (§5.1) | **yes** `plan-approval` / `decision` | sequencer may mark stories ready |
 | `project:awaiting-ready` | `project:planning` | human | requests changes to the plan | yes `plan-approval` / `decision` (note explains) | planning re-invoked; returns to `awaiting-ready` |
 | `project:active` | `project:awaiting-ready` | human | **criteria amended after approval** — the standing approval is superseded (§5.2) | no (no human bell rung; supersession comment required) | human re-approval gate |
-| `project:active` | `project:awaiting-acceptance` | human (manual in P1) / sequencer | every story reached `story:merged` | no | human queue |
+| `project:active` | `project:awaiting-acceptance` | human (manual in P1) / sequencer | every story reached a terminal success — `story:merged` or `story:completed` | no | human queue |
 | `project:awaiting-acceptance` | `project:accepted` | human | acceptance comment records **pass for every criterion** (§5.3) | **yes** `acceptance` / `decision` | terminal |
 | `project:awaiting-acceptance` | `project:active` | human | acceptance comment records **any criterion failed** (§5.3) | **yes** `acceptance` / `rescue` or `decision` | new story or re-planning spawned; returns to `awaiting-acceptance` when merged |
 | `project:accepted` | — | — | terminal — issue **closed as completed** (§9.3) | — | — |
@@ -232,6 +243,7 @@ Both former self-loops (`awaiting-ready → awaiting-ready`, `awaiting-acceptanc
 | `story:ready` | `story:claimed` | human (manual in P1) / dispatcher assigns | worker attempt dispatched | workers never self-claim; **`Attempt` increments here** (§4.3) |
 | `story:claimed` | `story:in-review` | worker (human in P1) | PR opened referencing story | PR links to the story per §9.5 |
 | `story:claimed` | `story:ready` | dispatcher | **claim lease expired** with no linked PR | **`Attempt` decrements by 1** (restores the pre-dispatch value); see §9.4 |
+| `story:claimed` | `story:completed` | runtime completion path | the dispatched worker returned a **definite success** and durable evidence proves the bounded assignment was carried out, with **no PR linked** per §9.5 | terminal success; the issue is **closed as completed** (§9.3). **No `Attempt` change** — the attempt was dispatched and it succeeded. Every precondition in §9.16 must hold; anything short of all of them leaves the story claimed for §9.4 |
 | `story:in-review` | `story:merged` | merge gate (human in P1) | PR merged | terminal success; the issue is **closed as completed** (§9.3) |
 | `story:in-review` | `story:ready` | review (manual in P1) / review skill | findings posted | **no `Attempt` change**; attach findings as a comment |
 | `story:ready` | `story:blocked:poison` | dispatcher (human in P1) | `Attempt >= 3` and another attempt would otherwise be dispatched | **raises** the `poison-rescue` bell; no dispatch occurs. No touch is logged here — the touch belongs to the rescue (§4.3.8) |
@@ -358,14 +370,21 @@ Nothing in §9 rewrites Phase 1: artifacts created before it (Project #1, storie
 This document is the contract, so the contract carries the version:
 
 ```
-SCHEMA_VERSION = 2.0.0
+SCHEMA_VERSION = 2.1.0
 ```
 
 Semantics: **major** changes break a component that has not been updated (a lifecycle label renamed, a field's meaning changed); **minor** adds contract that older components can ignore; **patch** is editorial. Phase 1 was authored under an implicit `1.x`.
 
+**Version history.**
+
+| Version | Change |
+|---|---|
+| `2.0.0` | §9 executable contracts frozen for Phase 2 |
+| `2.1.0` | `story:completed` added (§9.16), with the §9.10 dependency rule and the §9.3 cancellation description narrowed to match (#104). **Minor:** a component that does not know the label reads it as not-ready and waits, which is the fail-closed direction. Nothing was renamed and no field changed meaning, so the major stays `2` and every pinned component keeps working |
+
 Every Phase 2 component pins the major version it implements and, on encountering state written under a different major version, **halts and routes to the human queue** — it must never guess. Fail-closed is the rule wherever §9 is silent.
 
-Version is asserted, not stamped on every issue: issue bodies are rendered forms and carry no room for a marker. The dispatcher records the pinned version in its own run log, and any artifact it writes that has a free-text field carries `schema-version: 2.0.0`.
+Version is asserted, not stamped on every issue: issue bodies are rendered forms and carry no room for a marker. The dispatcher records the pinned version in its own run log, and any artifact it writes that has a free-text field carries `schema-version: 2.1.0`.
 
 ### 9.2 Atomic lifecycle transitions
 
@@ -388,6 +407,7 @@ Required behaviour:
 | Terminal state | Issue | Reason |
 |---|---|---|
 | `story:merged` | closed | completed |
+| `story:completed` | closed | completed |
 | `story:blocked:poison` after the §4.3.7 rescue cap | closed | not planned |
 | `story:cancelled` | closed | not planned |
 | `project:accepted` | closed | completed |
@@ -395,9 +415,31 @@ Required behaviour:
 
 Closure is part of the transition, written in the same operation wherever the API allows. The dispatcher's work queue is therefore **open issues carrying a `type:story` label**, which makes "is this story still live?" a single cheap query rather than a label scan.
 
-**`story:cancelled` — finished with no deliverable.** Added by #77. Some work legitimately ends without a pull request: a verification fixture that only had to prove something, a story overtaken by events, a spike whose answer was "don't build it". Before this state existed such stories had to masquerade as `story:merged` (nothing merged) or `story:blocked:poison` (nothing failed), and #64 sat closed-as-not-planned while still labelled `story:claimed` — honest about the outcome but unnamed by the contract.
+**`story:completed` — succeeded with nothing to merge.** Added by #104. Some
+assignments are complete when they have been *carried out*, not when something
+lands: a transport verification, a probe, an acknowledgement. Their success is
+real and it produces no pull request, so neither `story:merged` (nothing merged)
+nor `story:cancelled` (nothing was called off) describes it. Before this state
+existed, a factory that could prove such an assignment had succeeded had nowhere
+honest to record it, and #103 sat at `story:claimed` after a verified success —
+which is not a resting state but a lease, so §9.4 would have recovered it and
+dispatched a second worker onto finished work.
 
-A cancellation is a human decision, recorded as a comment on the story saying what was decided and why. The dispatcher never cancels a story on its own; it only recognises the state, treats it as terminal, and stops offering it. Because a cancelled story is not `story:claimed`, it releases its WIP slot immediately.
+It is a **terminal success**, closed as completed, and it is the only lifecycle
+state a component may reach on evidence of its own dispatch's outcome. §9.16
+states the preconditions; they are exhaustive, and every one of them is checked
+against durable GitHub state at the moment of the write.
+
+**`story:completed` is not `story:cancelled`.** The distinction is the point of
+having both. Completed says the work succeeded; cancelled says it was stopped.
+Overloading cancellation to mean success would put a factory's own successes and
+its abandonments in one bucket, and no later reader could tell them apart.
+
+**`story:cancelled` — deliberately stopped.** Added by #77, narrowed by #104. Some work legitimately stops: a story overtaken by events, a spike whose answer was "don't build it", work the CTO calls off. Before this state existed such stories had to masquerade as `story:merged` (nothing merged) or `story:blocked:poison` (nothing failed), and #64 sat closed-as-not-planned while still labelled `story:claimed` — honest about the outcome but unnamed by the contract.
+
+A cancellation is a **human decision** and stays one, recorded as a comment on the story saying what was decided and why. No component cancels a story: the dispatcher only recognises the state, treats it as terminal, and stops offering it. Because a cancelled story is not `story:claimed`, it releases its WIP slot immediately.
+
+Work that *succeeded* with no deliverable is `story:completed`, not this. #77 originally described cancellation as "finished with no deliverable", which conflated the two; #104 separates them, because a factory that records its successes as cancellations cannot report on itself.
 
 A closed issue is never reopened by a component; only a human reopens, which is itself a decision.
 
@@ -419,9 +461,11 @@ A closed issue is never reopened by a component; only a human reopens, which is 
 
 **Why the policy is deliberately dumb.** Durable evidence **cannot** distinguish a worker that died before starting from one that ran correctly and produced no pull request — both leave an expired claim and no PR. Rather than infer which occurred, the dispatcher recovers a fixed number of times and then asks a human.
 
+*Amended by #104.* That statement is about what an **expired claim** proves, and it remains true: by the time a lease elapses, the two cases are indistinguishable. It is not a claim that the difference can never be known. §9.16 describes the one case where it is: a worker whose launch the factory itself waited on, which returned a definite success and left durable proof of the assignment. That evidence exists at the moment the worker returns, long before any lease expires, and §9.16 spends it then or not at all. A story that reaches expiry is a story with no such proof, and this paragraph governs it unchanged.
+
 **The rule.** Recoveries are counted from the issue timeline: a `story:claimed → story:ready` transition with no `story:in-review` between them is an expiry recovery, while a findings-driven return passes through review and is not counted. Nothing is stored — GitHub is the source of record and no local counter may contradict it (§9.12). When the count reaches `RECOVERY_MAX`, the next expiry transitions `story:claimed → story:blocked:poison` with reason `RECOVERY_BUDGET_EXHAUSTED` instead of recovering. `Attempt` is left untouched: the question for the human is why no PR ever appeared, not how many attempts remain.
 
-**The bound, stated as a number.** A story can be dispatched through the expiry path at most **`RECOVERY_MAX + 1` = 3 times** before reaching a terminal or human-queue state. The human's options are then explicit: rescue it per §4.3.6 if the failure was infrastructural, or cancel it per §9.3 if it legitimately produces no deliverable.
+**The bound, stated as a number.** A story can be dispatched through the expiry path at most **`RECOVERY_MAX + 1` = 3 times** before reaching a terminal or human-queue state. The human's options are then explicit: rescue it per §4.3.6 if the failure was infrastructural, or cancel it per §9.3 if the work should stop. Reaching this point means no proof of success was ever produced, so `story:completed` is not among the options — §9.16 is not a disposition a human reaches for after the fact.
 
 **Duplicate-worker rule.** The claim is the mutex: only `story:ready` is dispatchable, so a claimed story is never dispatched twice. The residual race is a live-but-slow worker whose lease expires and whose story is re-dispatched. Both workers must therefore treat the story state as authoritative at the moment they act: a worker **must** re-read the story before opening its PR and **must abort without opening one** if the story is no longer `story:claimed`, or if it is claimed under a later lease than the one it was dispatched with. The late worker's branch is abandoned; nothing merges.
 
@@ -526,7 +570,7 @@ WIP_LIMIT = 2      concurrent stories in story:claimed, repository-wide
 
 Chosen to match `architecture-v2.1.md` §8's "2–3 concurrent workers" at customer-zero scale; raising it is a contract change, not a runtime tweak.
 
-**Selection, fully deterministic.** Eligible stories are those that are open, `type:story`, `story:ready`, and whose every `### Depends-on` reference is `story:merged`. Order them by:
+**Selection, fully deterministic.** Eligible stories are those that are open, `type:story`, `story:ready`, and whose every `### Depends-on` reference reached a **terminal success** — `story:merged` or `story:completed` (§9.16). Both mean the depended-on work is done; only the delivery path differs, and a dependency that cares which one it was is a dependency the `### Depends-on` field cannot express. Order them by:
 
 1. parent project issue number, ascending;
 2. then story issue number, ascending.
@@ -623,3 +667,57 @@ Before the dispatcher is permitted to write anything, it must pass a replay of P
 * **Read-only:** the replay asserts decisions the dispatcher *would* make; it must not write to any issue.
 
 The events include the retry sequence, the poison threshold, the rescue, and the scope detour, so the replay exercises the exception paths and not merely the happy one.
+
+### 9.16 Completion — proving a bounded assignment succeeded
+
+Added by #104. The one path by which a component may reach a terminal state on
+the strength of its own dispatch's outcome, and it is deliberately the narrowest
+rule in this document.
+
+**Applies to:** a `story:claimed` story whose worker the factory *launched and
+waited on*, at the moment that launch returns. Nowhere else. This is not a
+reconciliation pass, not a sweep over claimed stories, and not a disposition a
+human or a later pass may reach for — a story that has gone quiet is §9.4's, and
+a story that reaches expiry is §9.4.1's.
+
+**All of the following must hold**, each read from durable GitHub state at
+decision time:
+
+1. the launch reported a **definite success** — an ambiguous outcome means the
+   worker may still be running, and closing a story out from under a live worker
+   is strictly worse than waiting for the lease
+2. the story still carries exactly `story:claimed`
+3. **no pull request links to the story** under §9.5 — a worker that produced a
+   deliverable belongs to review and the merge gate, and this path must never
+   touch it
+4. the timeline carries a `story:claimed` `labeled` event, which fixes the
+   instant the current lease began — the *latest* such event, since a recovered
+   story has several and proof from an earlier lease says nothing about this
+   worker
+5. durable evidence of the assignment having been carried out exists, created at
+   or after that instant
+
+**Effect:** `story:claimed → story:completed`, closed as completed (§9.3), with
+`Attempt` unchanged, written per §9.2 — re-read, verify the `from` state, then
+one PATCH carrying the complete final label set and the closure.
+
+**A reason comment is required**, naming the worker, the verdict and the
+evidence, so the conclusion can be checked against GitHub rather than taken on
+trust. It is written **before** the transition: a failure between the two writes
+must leave a claimed story carrying an explanation — visible, and recoverable by
+§9.4 — rather than a terminal story with no recorded reason, which no component
+may reopen (§9.3).
+
+**Anything short of all five leaves the story exactly as it is**, with a named
+reason, for §9.4 to resolve. The asymmetry is deliberate and is the whole safety
+argument: a wrong refusal costs one lease period and a recovery; a wrong
+completion closes a story whose work never happened, and closure is the one
+thing this contract does not let a component undo.
+
+**The evidence must belong to the assignment.** What counts as proof is defined
+by whatever issues the assignment, so that the two cannot drift apart — a
+completion path that accepts weaker evidence than the worker was asked to
+produce is a path that closes stories on something else's output. Equally,
+precondition 3 is what keeps the rule honest as assignments grow: it is only
+ever true that "no deliverable was required" while the assignment forbids
+producing one, and that coupling must be asserted mechanically, not remembered.

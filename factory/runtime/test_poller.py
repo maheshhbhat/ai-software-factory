@@ -12,10 +12,19 @@ nobody authorized.
 from __future__ import annotations
 
 import os
+import tempfile
 import unittest
 from unittest import mock
 
 import poller
+import workers
+
+
+def setUpModule():
+    """Operational logging is a side effect of these tests, not their subject."""
+    os.environ["FACTORY_RUNTIME_LOG_STDERR"] = "0"
+    os.environ.setdefault("FACTORY_RUNTIME_LOG",
+                          os.path.join(tempfile.gettempdir(), "factory-runtime-test.jsonl"))
 
 
 CANONICAL = "DISPATCH story=#64 project=#55 agent=claude-delivery"
@@ -99,14 +108,23 @@ class TestWorkerAdapter(unittest.TestCase):
 class TestPollOnce(unittest.TestCase):
     def setUp(self):
         self._env = dict(os.environ)
+        # A declared worker in the ambient environment would route these through
+        # the contract instead of the legacy path they are written for.
+        for key in list(os.environ):
+            if key.startswith("FACTORY_WORKER"):
+                del os.environ[key]
         os.environ["FACTORY_WORKER_CMD"] = "/usr/bin/true"
-        # Continuation is a separate concern with its own tests; stub it so
-        # these exercise dispatch only and make no network call.
+        # Continuation and completion are separate concerns with their own
+        # tests; stub both so these exercise dispatch only and make no network
+        # call.
         self._continuation = mock.patch.object(poller, "run_continuation",
                                                return_value=[])
         self._continuation.start()
+        self._completion = mock.patch.object(poller, "complete_story")
+        self.completion = self._completion.start()
 
     def tearDown(self):
+        self._completion.stop()
         self._continuation.stop()
         os.environ.clear()
         os.environ.update(self._env)
@@ -215,8 +233,11 @@ class TestWorkerContractRouting(unittest.TestCase):
                 del os.environ[key]
         self._continuation = mock.patch.object(poller, "run_continuation", return_value=[])
         self._continuation.start()
+        self._completion = mock.patch.object(poller, "complete_story")
+        self.completion = self._completion.start()
 
     def tearDown(self):
+        self._completion.stop()
         self._continuation.stop()
         os.environ.clear()
         os.environ.update(self._env)
@@ -252,3 +273,69 @@ class TestWorkerContractRouting(unittest.TestCase):
         with mock.patch.object(poller, "run_dispatcher", return_value=REPORT):
             woken = poller.poll_once("o/r", 54, seen)
         self.assertEqual([d["story"] for d in woken], [64])
+
+
+class TestCompletionIsDelegated(unittest.TestCase):
+    """#104 — the poll asks whether a finished worker ends its Story, and holds
+    none of the reasoning that answers it."""
+
+    def setUp(self):
+        self._env = dict(os.environ)
+        for key in list(os.environ):
+            if key.startswith("FACTORY_WORKER"):
+                del os.environ[key]
+        os.environ["FACTORY_WORKER_CMD"] = "/usr/bin/true"
+        self._continuation = mock.patch.object(poller, "run_continuation", return_value=[])
+        self._continuation.start()
+
+    def tearDown(self):
+        self._continuation.stop()
+        os.environ.clear()
+        os.environ.update(self._env)
+
+    def test_a_successful_wake_asks_the_completion_path(self):
+        with mock.patch.object(poller, "run_dispatcher", return_value=REPORT), \
+             mock.patch.object(poller, "complete_story") as complete:
+            poller.poll_once("o/r", 54, set())
+        self.assertEqual(1, complete.call_count)
+        dispatch, report, claim = complete.call_args[0]
+        self.assertEqual(64, dispatch["story"])
+        self.assertEqual("o/r", dispatch["repo"])
+        self.assertEqual(workers.Result.LAUNCHED, report.result)
+        self.assertTrue(claim)
+
+    def test_a_failed_wake_never_reaches_the_completion_path(self):
+        """Nothing succeeded, so there is nothing to complete."""
+        os.environ["FACTORY_WORKER_CMD"] = "/usr/bin/false"
+        with mock.patch.object(poller, "run_dispatcher", return_value=REPORT), \
+             mock.patch.object(poller, "complete_story") as complete:
+            with self.assertRaises(poller.WorkerLaunchFailed):
+                poller.poll_once("o/r", 54, set())
+        complete.assert_not_called()
+
+    def test_a_dry_run_does_not_authorise_a_lifecycle_write(self):
+        with mock.patch.object(poller, "run_dispatcher", return_value=REPORT), \
+             mock.patch.object(poller, "complete_story") as complete:
+            poller.poll_once("o/r", 54, set(), claim=False)
+        self.assertFalse(complete.call_args[0][2])
+
+    def test_a_completion_failure_does_not_stop_the_poll(self):
+        """The Story stays claimed, which the §9.4 lease already resolves. A
+        dispatch that already happened must not be undone by a later failure."""
+        with mock.patch.object(poller, "run_dispatcher", return_value=REPORT), \
+             mock.patch.object(poller, "complete_story",
+                               side_effect=RuntimeError("github is down")):
+            woken = poller.poll_once("o/r", 54, set())
+        self.assertEqual([64], [d["story"] for d in woken])
+
+    def test_the_poller_holds_no_completion_policy(self):
+        """Every precondition and the target state live in `completion.py`. A
+        check smuggled in here is invisible until it disagrees with GitHub."""
+        with open(poller.__file__, encoding="utf-8") as handle:
+            body = handle.read().split('"""', 2)[-1]
+        for leaked in ("story:completed", "story:cancelled", "story:in-review",
+                       "story:merged",
+                       "looks_like_acknowledgement", "linked_delivery_prs",
+                       "state_reason"):
+            self.assertNotIn(leaked, body,
+                             f"the runtime must not decide lifecycle ({leaked})")
