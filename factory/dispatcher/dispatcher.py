@@ -321,12 +321,81 @@ def is_trusted(issue: dict) -> bool:
     return (issue.get("author_association") or "").upper() in TRUSTED_ASSOCIATIONS
 
 
+class DependencyIndex:
+    """Resolves `### Depends-on` references to issues, closed ones included.
+
+    The dispatch queue is open issues and stays that way (§9.3): nothing this
+    index loads becomes a dispatch candidate, because `plan_dispatch` iterates
+    the queue it was handed and never this. The index answers a different
+    question — *what happened to the issue this story names* — and that question
+    cannot be answered from the queue at all, because both terminal successes
+    close the issue (§9.3, §9.16). A dependency that succeeded is therefore
+    always missing from the queue, which is why reading dependencies out of the
+    queue rejected every satisfied dependency as unmet (#106, #107).
+
+    Resolution is lazy and cached: a story with no dependency outside the queue
+    costs no request, and a dependency named by several stories costs one.
+    Unreadable is not satisfied — a fetch that fails resolves to `None`, which
+    `dependency_satisfied` reports as unmet, so a transport failure delays work
+    instead of authorizing it.
+    """
+
+    def __init__(self, open_issues: dict, fetch=None):
+        self._open = open_issues
+        self._fetch = fetch
+        self._resolved: dict[int, dict | None] = {}
+
+    def get(self, number: int) -> dict | None:
+        if number in self._open:
+            return self._open[number]
+        if number not in self._resolved:
+            self._resolved[number] = self._load(number)
+        return self._resolved[number]
+
+    def _load(self, number: int) -> dict | None:
+        if self._fetch is None:
+            return None
+        try:
+            return self._fetch(number)
+        except Exception:  # noqa: BLE001 — unreadable state is unmet, never satisfied
+            return None
+
+
+def dependency_satisfied(issue: dict | None) -> tuple[bool, str]:
+    """Did the issue a story depends on reach a trusted terminal success?
+
+    Every rejection names itself, because "#104 unmet" with no reason is exactly
+    what made the live defect hard to see. The trust boundary applies here for
+    the same reason it applies to the story itself (§9.9): a dependency is state
+    that authorizes work, so a stranger's issue claiming to be `story:merged`
+    must not unblock anything.
+    """
+    if issue is None:
+        return False, "no such issue, or it could not be read"
+    if "type:story" not in labels_of(issue):
+        return False, "not a story"
+    if not is_trusted(issue):
+        return False, f"untrusted author_association={issue.get('author_association')}"
+    lifecycle = lifecycle_of(issue, STORY_LIFECYCLE)
+    if lifecycle is None:
+        return False, "zero or multiple story:* labels"
+    if lifecycle not in TERMINAL_SUCCESS:
+        return False, lifecycle
+    return True, lifecycle
+
+
 def evaluate_story(story: dict, projects: dict, stories: dict,
-                   commitment: int) -> Decision:
+                   commitment: int,
+                   dependencies: DependencyIndex | None = None) -> Decision:
     """Decide whether one story is authorized and eligible for dispatch.
 
     Order matters only for the quality of the reported reason; every check is
     independent and any failure means no dispatch.
+
+    `dependencies` resolves `### Depends-on` references; it defaults to the
+    dispatch queue alone, which can only answer for issues that are still open.
+    Callers reading live GitHub pass an index that can also reach closed issues
+    (#107) — see `DependencyIndex`.
     """
     number = story.get("number", 0)
 
@@ -388,12 +457,12 @@ def evaluate_story(story: dict, projects: dict, stories: dict,
     deps, err = parse_depends_on(body)
     if err:
         return Decision(number, False, err, project=project_number)
+    index = dependencies if dependencies is not None else DependencyIndex(stories)
     for dep in deps:
-        dep_issue = stories.get(dep)
-        if (dep_issue is None
-                or lifecycle_of(dep_issue, STORY_LIFECYCLE) not in TERMINAL_SUCCESS):
+        satisfied, why = dependency_satisfied(index.get(dep))
+        if not satisfied:
             return Decision(number, False, Reason.DEPENDENCY_UNMET, project=project_number,
-                            detail=f"#{dep}")
+                            detail=f"#{dep} ({why})")
 
     patterns, scope_err = merge_gate.parse_scope(body)
     if scope_err:
@@ -412,8 +481,15 @@ def evaluate_story(story: dict, projects: dict, stories: dict,
 
 
 def plan_dispatch(stories: dict, projects: dict, commitment: int,
-                  wip_limit: int = WIP_LIMIT) -> Plan:
-    """Evaluate every story, then select deterministically (§9.10)."""
+                  wip_limit: int = WIP_LIMIT,
+                  dependencies: DependencyIndex | None = None) -> Plan:
+    """Evaluate every story, then select deterministically (§9.10).
+
+    `stories` is the dispatch queue and the only source of candidates. A
+    `dependencies` index widens what a *dependency reference* can see without
+    widening that queue: it is read, never iterated, so an issue it resolves can
+    never be selected.
+    """
     plan = Plan(capacity=wip_limit)
 
     plan.wip_in_use = sum(
@@ -424,7 +500,7 @@ def plan_dispatch(stories: dict, projects: dict, commitment: int,
 
     for number in sorted(stories):
         plan.decisions.append(
-            evaluate_story(stories[number], projects, stories, commitment))
+            evaluate_story(stories[number], projects, stories, commitment, dependencies))
 
     # Total ordering by (project number, story number): no ties, no randomness.
     ordered = sorted(plan.eligible(), key=lambda d: (d.project or 0, d.number))
@@ -645,8 +721,12 @@ def main(argv: list[str]) -> int:
             data = json.load(handle)
         stories = {int(k): v for k, v in data.get("stories", {}).items()}
         projects = {int(k): v for k, v in data.get("projects", {}).items()}
+        # `dependencies` holds issues that are not in the queue — closed ones,
+        # typically — exactly as the live path resolves them one at a time.
+        closed = {int(k): v for k, v in data.get("dependencies", {}).items()}
         plan = plan_dispatch(stories, projects, data["commitment"],
-                             data.get("wip_limit", args.wip_limit))
+                             data.get("wip_limit", args.wip_limit),
+                             DependencyIndex(stories, fetch=closed.get))
         print(render(plan, [], dry_run=True))
         for decision in plan.selected:
             print(dispatch_line(decision.number, decision.project))
@@ -687,7 +767,12 @@ def main(argv: list[str]) -> int:
         stories = {n: i for n, i in issues.items() if "type:story" in labels_of(i)}
         projects = {n: i for n, i in issues.items() if "type:project" in labels_of(i)}
 
-    plan = plan_dispatch(stories, projects, args.commitment, args.wip_limit)
+    # §9.3 keeps the queue to open issues; a dependency question is not a queue
+    # question. Resolution reads whatever issue a story names, closed included,
+    # and nothing it reads is added to `stories` (#107).
+    dependencies = DependencyIndex(
+        issues, fetch=lambda number: fetch_issue(args.repo, number, token))
+    plan = plan_dispatch(stories, projects, args.commitment, args.wip_limit, dependencies)
 
     claimed: list[tuple[int, str]] = []
     dispatched: list[Decision] = []

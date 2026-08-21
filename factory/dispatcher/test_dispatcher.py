@@ -10,8 +10,13 @@ plausible-looking story with a broken chain, cause the factory to run code".
 
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
+import io
+import re
 import unittest
+import urllib.error
+import urllib.parse
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
@@ -361,9 +366,6 @@ class TestDispatchLine(unittest.TestCase):
         self.assertNotIn("Scope", line)
 
 
-if __name__ == "__main__":
-    unittest.main(verbosity=2)
-
 
 class TestRecoveryBudget(unittest.TestCase):
     """§9.4.1 — the fix for the unbounded loop found live on story #64 (#65)."""
@@ -585,3 +587,258 @@ class TestLifecycleVocabularyMatchesTheSchema(unittest.TestCase):
     def test_the_terminal_successes_are_exactly_merged_and_completed(self):
         self.assertEqual({dp.MERGED, dp.COMPLETED}, set(dp.TERMINAL_SUCCESS))
         self.assertNotIn(dp.CANCELLED, dp.TERMINAL_SUCCESS)
+
+
+class TestClosedDependencyResolution(unittest.TestCase):
+    """#107 — a dependency that succeeded is closed, and closed is not in the queue.
+
+    §9.3 makes the dispatch queue open issues, and §9.10 satisfies `### Depends-on`
+    with a terminal success. Both terminal successes close the issue, so reading
+    dependencies out of the queue asks about the one population that provably
+    cannot contain a satisfied dependency: observed live on #106, which was
+    rejected as DEPENDENCY_UNMET after #104 was correctly closed `story:merged`.
+
+    The fix widens what a *dependency lookup* can see, not what the queue holds —
+    so these tests care as much about what stays out of the plan as what enters it.
+    """
+
+    def closed(self, number, lifecycle, **kwargs):
+        return story(number, state="CLOSED", lifecycle=lifecycle, **kwargs)
+
+    def decide(self, dependent, *closed_issues):
+        queue = {dependent["number"]: dependent}
+        index = dp.DependencyIndex(
+            queue, fetch={c["number"]: c for c in closed_issues}.get)
+        return dp.evaluate_story(dependent, {901: project()}, queue, COMMITMENT, index)
+
+    def test_a_closed_merged_dependency_is_satisfied(self):
+        decision = self.decide(story(11, depends="#10"),
+                               self.closed(10, "story:merged"))
+        self.assertTrue(decision.eligible, decision.detail)
+        self.assertEqual(decision.reason, R.ELIGIBLE)
+
+    def test_a_closed_completed_dependency_is_satisfied(self):
+        """§9.16 — nothing to merge is still success, and closes the issue."""
+        decision = self.decide(story(11, depends="#10"),
+                               self.closed(10, "story:completed"))
+        self.assertTrue(decision.eligible, decision.detail)
+
+    def test_closed_non_successes_remain_unmet(self):
+        """Being closed is not the property that satisfies a dependency; being a
+        terminal *success* is. Widening to 'anything closed' is the failure mode
+        this fix is one step away from."""
+        for lifecycle in ("story:cancelled", "story:blocked:poison",
+                          "story:blocked:scope", "story:ready"):
+            decision = self.decide(story(11, depends="#10"),
+                                   self.closed(10, lifecycle))
+            self.assertEqual(decision.reason, R.DEPENDENCY_UNMET, lifecycle)
+            self.assertIn(lifecycle, decision.detail, lifecycle)
+
+    def test_an_ambiguous_closed_dependency_is_unmet(self):
+        ambiguous = self.closed(10, "story:merged", extra_labels=("story:cancelled",))
+        decision = self.decide(story(11, depends="#10"), ambiguous)
+        self.assertEqual(decision.reason, R.DEPENDENCY_UNMET)
+        self.assertIn("multiple", decision.detail)
+
+    def test_an_untrusted_dependency_never_authorizes_work(self):
+        """§9.9 applies to every issue read as factory state, and a dependency is
+        read as factory state: it decides whether work starts. A stranger who can
+        open an issue must not be able to unblock a story by labelling their own."""
+        decision = self.decide(story(11, depends="#10"),
+                               self.closed(10, "story:merged", assoc="NONE"))
+        self.assertEqual(decision.reason, R.DEPENDENCY_UNMET)
+        self.assertIn("untrusted", decision.detail)
+
+    def test_a_dependency_that_is_not_a_story_is_unmet(self):
+        not_a_story = {"number": 10, "state": "CLOSED", "author_association": "OWNER",
+                       "labels": labels("type:project", "story:merged"), "body": ""}
+        decision = self.decide(story(11, depends="#10"), not_a_story)
+        self.assertEqual(decision.reason, R.DEPENDENCY_UNMET)
+        self.assertIn("not a story", decision.detail)
+
+    def test_an_unresolvable_dependency_is_unmet(self):
+        decision = self.decide(story(11, depends="#10"))
+        self.assertEqual(decision.reason, R.DEPENDENCY_UNMET)
+        self.assertIn("#10", decision.detail)
+
+    def test_an_unreadable_dependency_is_unmet_rather_than_fatal(self):
+        """A transport failure must delay work, never authorize it — and never
+        take the whole poll down with it."""
+        def explode(number):
+            raise urllib.error.HTTPError("url", 502, "Bad Gateway", {}, io.BytesIO(b""))
+
+        queue = {11: story(11, depends="#10")}
+        index = dp.DependencyIndex(queue, fetch=explode)
+        decision = dp.evaluate_story(queue[11], {901: project()}, queue, COMMITMENT, index)
+        self.assertEqual(decision.reason, R.DEPENDENCY_UNMET)
+
+    def test_a_resolved_dependency_never_becomes_a_dispatch_candidate(self):
+        """The queue is what §9.3 says it is. Resolution reads; it does not enrol."""
+        queue = {11: story(11, depends="#10")}
+        index = dp.DependencyIndex(queue, fetch={10: self.closed(10, "story:merged")}.get)
+        plan = dp.plan_dispatch(queue, {901: project()}, COMMITMENT, 2, index)
+        self.assertEqual([d.number for d in plan.decisions], [11])
+        self.assertEqual([d.number for d in plan.selected], [11])
+
+    def test_resolution_is_lazy_and_cached(self):
+        """One request per dependency outside the queue, none for one inside it."""
+        fetched = []
+
+        def counting_fetch(number):
+            fetched.append(number)
+            return self.closed(10, "story:merged")
+
+        queue = {11: story(11, depends="#10"), 12: story(12, depends="#10"),
+                 13: story(13, depends="#12")}
+        index = dp.DependencyIndex(queue, fetch=counting_fetch)
+        dp.plan_dispatch(queue, {901: project()}, COMMITMENT, 2, index)
+        self.assertEqual(fetched, [10], "#12 is in the queue and must not be fetched")
+
+    def test_an_open_dependency_is_still_read_from_the_queue(self):
+        """The pre-existing path is untouched: nothing needs fetching to answer
+        for an issue the queue already carries."""
+        queue = {10: story(10, lifecycle="story:merged"), 11: story(11, depends="#10")}
+        plan = dp.plan_dispatch(queue, {901: project()}, COMMITMENT)
+        self.assertEqual([d.number for d in plan.selected], [11])
+
+
+class FakeGitHub:
+    """A GitHub that answers exactly what the real one answers.
+
+    The single property that matters here is the one the live defect turned on:
+    **the open-issue listing does not contain closed issues**, and the only way
+    to see a closed issue is to ask for it by number. A fake that serves closed
+    issues from the listing would pass against the broken dispatcher and prove
+    nothing, which is why `state=open` is enforced rather than assumed.
+    """
+
+    def __init__(self, issues, pulls=()):
+        self.issues = {issue["number"]: dict(issue) for issue in issues}
+        self.pulls = list(pulls)
+        self.requests: list[tuple[str, str]] = []
+        self.patched: list[tuple[int, dict]] = []
+
+    def __call__(self, url, token, method="GET", payload=None):
+        self.requests.append((method, urllib.parse.urlparse(url).path))
+        parsed = urllib.parse.urlparse(url)
+        page = int(urllib.parse.parse_qs(parsed.query).get("page", ["1"])[0])
+
+        if parsed.path.endswith("/issues"):
+            assert "state=open" in parsed.query, "the queue is open issues (§9.3)"
+            if page > 1:
+                return []
+            return [dict(i) for i in self.issues.values()
+                    if (i.get("state") or "OPEN").upper() == "OPEN"]
+        if parsed.path.endswith("/pulls"):
+            return [dict(pr) for pr in self.pulls] if page == 1 else []
+        if parsed.path.endswith("/timeline"):
+            return []
+
+        match = re.search(r"/issues/(\d+)$", parsed.path)
+        if not match:
+            raise AssertionError(f"unexpected request: {method} {url}")
+        number = int(match.group(1))
+        issue = self.issues.get(number)
+        if issue is None:
+            raise urllib.error.HTTPError(url, 404, "Not Found", {}, io.BytesIO(b""))
+        if method == "PATCH":
+            self.patched.append((number, payload))
+            if "labels" in payload:
+                issue["labels"] = labels(*payload["labels"])
+            if "body" in payload:
+                issue["body"] = payload["body"]
+            if "state" in payload:
+                issue["state"] = payload["state"].upper()
+        return dict(issue)
+
+    def fetched_by_number(self) -> list[int]:
+        return [int(path.rsplit("/", 1)[1]) for method, path in self.requests
+                if method == "GET" and re.search(r"/issues/\d+$", path)]
+
+
+class TestClosedDependencyThroughTheRealLoadingPath(unittest.TestCase):
+    """#107 — the same test at production shape: `main`, over the HTTP layer.
+
+    The unit tests above hand `evaluate_story` an index and prove the rule. They
+    cannot prove the defect is fixed, because the defect was never in the rule —
+    it was in what the dispatcher *loaded* before applying it. So this drives the
+    real entry point through a fake transport and lets `fetch_issues` /
+    `fetch_issue` behave exactly as they do live.
+    """
+
+    def run_main(self, github, *extra):
+        argv = ["--repo", "owner/repo", "--commitment", str(COMMITMENT), *extra]
+        out = io.StringIO()
+        with patch.object(dp, "_api", github), \
+             patch.dict("os.environ", {"GITHUB_TOKEN": "t"}, clear=False), \
+             contextlib.redirect_stdout(out):
+            code = dp.main(argv)
+        self.assertEqual(code, 0, out.getvalue())
+        return out.getvalue()
+
+    def test_open_story_depending_on_a_closed_success_is_dispatched(self):
+        """The live #106 case: dependency #104 closed `story:merged`, dependent
+        open and ready. Before the fix this printed DEPENDENCY_UNMET forever."""
+        github = FakeGitHub([
+            project(901),
+            story(104, state="CLOSED", lifecycle="story:merged"),
+            story(106, depends="#104"),
+        ])
+        output = self.run_main(github, "--claim")
+
+        self.assertIn("DISPATCH story=#106", output)
+        self.assertIn(104, github.fetched_by_number(),
+                      "the closed dependency must be resolved by number — the "
+                      "open-issue listing can never contain it")
+        self.assertEqual([number for number, _ in github.patched], [106],
+                         "only the dependent story is written to")
+
+    def test_a_closed_completed_dependency_dispatches_the_same_way(self):
+        github = FakeGitHub([
+            project(901),
+            story(104, state="CLOSED", lifecycle="story:completed"),
+            story(106, depends="#104"),
+        ])
+        self.assertIn("DISPATCH story=#106", self.run_main(github, "--claim"))
+
+    def test_a_closed_unsuccessful_dependency_still_blocks_dispatch(self):
+        """The inverse, at the same shape. Closed is not the property that
+        satisfies a dependency, and this is the test that says so end to end."""
+        for lifecycle in ("story:cancelled", "story:blocked:poison"):
+            github = FakeGitHub([
+                project(901),
+                story(104, state="CLOSED", lifecycle=lifecycle),
+                story(106, depends="#104"),
+            ])
+            output = self.run_main(github, "--claim")
+            self.assertIn(R.DEPENDENCY_UNMET, output, lifecycle)
+            self.assertNotIn("DISPATCH", output, lifecycle)
+            self.assertEqual(github.patched, [], lifecycle)
+
+    def test_the_closed_dependency_is_never_itself_dispatched(self):
+        """It was loaded, it is `type:story`, and it is a terminal success — and
+        it must still be invisible to selection. Loading for one purpose must not
+        enrol an issue in another."""
+        github = FakeGitHub([
+            project(901),
+            story(104, state="CLOSED", lifecycle="story:merged"),
+            story(106, depends="#104"),
+        ])
+        output = self.run_main(github, "--claim")
+        self.assertNotIn("DISPATCH story=#104", output)
+        self.assertNotRegex(output, r"(?m)^\s+#104\s",
+                            "a closed issue is not a dispatch candidate and must "
+                            "not appear among the considered decisions")
+        self.assertIn("1 issue(s) considered", output)
+
+    def test_a_dependency_the_repository_does_not_have_blocks_dispatch(self):
+        """404 on the dependency: unresolvable is unmet, and the poll survives."""
+        github = FakeGitHub([project(901), story(106, depends="#999")])
+        output = self.run_main(github, "--claim")
+        self.assertIn(R.DEPENDENCY_UNMET, output)
+        self.assertNotIn("DISPATCH", output)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)
+
