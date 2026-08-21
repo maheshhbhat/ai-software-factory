@@ -87,10 +87,11 @@ class Route:
 # §9.16 the completion route added after both. Keyed by (from, to), where `None`
 # is "the issue did not exist yet".
 #
-# Two routes are marked DEFERRED here and are promoted to LIVE by story #111,
-# which is the increment that implements them. That is deliberate: the table
-# states what the factory *does*, not what it intends to do, so a route becomes
-# live in this table on the commit that makes it live in the world.
+# The table states what the factory *does*, not what it intends to do: a route
+# goes live here on the commit that makes it live in the world. #111 promoted
+# `claimed → in-review` and `in-review → merged` when `review_link.py` landed.
+# Before that commit both were DEFERRED and the replay reported them as
+# unrouted, which was equally true at the time.
 ROUTES: dict[tuple[str | None, str], Route] = {
     # ---- story (§4.2) -----------------------------------------------------
     (None, "story:blocked"): Route(CREATION, "issue created; §9.12 — creation authorizes nothing"),
@@ -98,9 +99,9 @@ ROUTES: dict[tuple[str | None, str], Route] = {
     ("story:blocked", "story:ready"): Route(DEFERRED, "sequencer marks deps satisfied (Phase 3)"),
     ("story:ready", "story:claimed"): Route(LIVE, "dispatch a worker, increment Attempt (§4.3.2)"),
     ("story:claimed", "story:ready"): Route(LIVE, "claim lease expiry, restore Attempt (§9.4)"),
-    ("story:claimed", "story:in-review"): Route(DEFERRED, "PR opened referencing the story (§9.5)"),
+    ("story:claimed", "story:in-review"): Route(LIVE, "a §9.5-linked PR is open; review_link.py"),
     ("story:claimed", "story:completed"): Route(LIVE, "bounded success with nothing to merge (§9.16)"),
-    ("story:in-review", "story:merged"): Route(DEFERRED, "delivery PR merged (gated on §9.13)"),
+    ("story:in-review", "story:merged"): Route(LIVE, "delivery PR merged, §9.13 satisfied; review_link.py"),
     ("story:in-review", "story:ready"): Route(DEFERRED, "review findings returned (Phase 4)"),
     ("story:ready", "story:blocked:poison"): Route(LIVE, "attempt threshold reached; notify, do not dispatch (§4.3.5)"),
     ("story:claimed", "story:blocked:poison"): Route(LIVE, "recovery budget exhausted; notify (§9.4.1)"),

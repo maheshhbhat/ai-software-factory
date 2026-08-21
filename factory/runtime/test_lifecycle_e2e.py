@@ -377,11 +377,19 @@ class TestUnprovenWorkKeepsTheOldSafeBehaviour(LifecycleCase):
         self.assertEqual("open", self.hub.issues[STORY]["state"])
 
 
-class TestADeliveredStoryIsLeftToReview(LifecycleCase):
-    def test_a_story_with_a_linked_pull_request_is_not_completed(self):
-        """A worker that produced a deliverable belongs to review and the merge
-        gate. This is the precondition that keeps the completion path safe as
-        worker assignments grow beyond an acknowledgement."""
+class TestADeliveredStoryWalksTheReviewPath(LifecycleCase):
+    """The other terminal success, end to end: `ready → claimed → in-review →
+    merged`, with every label written by the factory and none by a person.
+
+    Before #111 this class ended at its first assertion, because the two review
+    routes had no implementation and a human moved both labels on every story
+    the factory delivered. #97 sat open at `story:in-review` for four days with
+    its delivery pull request merged, which is what that gap looks like from
+    outside.
+    """
+
+    def deliver(self):
+        """A worker that produces a deliverable rather than an acknowledgement."""
         def worker_with_a_pr(cmd, capture_output=True, text=True, timeout=None):
             self.hub.advance(minutes=1)
             self.hub.post_comment(STORY, ACKNOWLEDGEMENT)
@@ -389,10 +397,82 @@ class TestADeliveredStoryIsLeftToReview(LifecycleCase):
                                    "body": f"Story: #{STORY}\n", "merged_at": None})
             import subprocess
             return subprocess.CompletedProcess(cmd, 0, "opened a PR", "")
+        return worker_with_a_pr
 
-        self.poll(worker_with_a_pr)
+    def merge_the_pr(self):
+        self.hub.advance(minutes=5)
+        self.hub.pulls[0].update({"state": "closed", "merged_at": self.hub.stamp()})
+
+    def test_a_story_with_a_linked_pull_request_is_not_completed(self):
+        """A worker that produced a deliverable belongs to review and the merge
+        gate. This is the precondition that keeps the completion path safe as
+        worker assignments grow beyond an acknowledgement."""
+        self.poll(self.deliver())
         self.assertIn("story:claimed", self.hub.labels(STORY))
+        self.assertNotIn("story:completed", self.hub.labels(STORY))
         self.assertEqual("open", self.hub.issues[STORY]["state"])
+
+    def test_the_next_poll_moves_it_into_review(self):
+        self.poll(self.deliver())
+        self.poll(self.deliver(), seen={STORY})
+        self.assertIn("story:in-review", self.hub.labels(STORY))
+        self.assertNotIn("story:claimed", self.hub.labels(STORY))
+        self.assertEqual("open", self.hub.issues[STORY]["state"])
+
+    def test_review_releases_the_wip_slot_the_claim_held(self):
+        """§9.10 counts `story:claimed`. A story waiting on review is not
+        occupying a worker, and holding the slot would cap the factory at
+        WIP_LIMIT stories in flight rather than WIP_LIMIT being worked on."""
+        self.poll(self.deliver())
+        self.poll(self.deliver(), seen={STORY})
+        claimed = [n for n, issue in self.hub.issues.items()
+                   if "story:claimed" in self.hub.labels(n)]
+        self.assertEqual(claimed, [])
+
+    def test_merging_the_delivery_closes_the_story_as_a_success(self):
+        self.poll(self.deliver())
+        self.poll(self.deliver(), seen={STORY})
+        self.merge_the_pr()
+        self.poll(self.deliver(), seen={STORY})
+
+        self.assertIn("story:merged", self.hub.labels(STORY))
+        self.assertNotIn("story:in-review", self.hub.labels(STORY))
+        self.assertEqual("closed", self.hub.issues[STORY]["state"])
+        self.assertEqual("completed", self.hub.issues[STORY].get("state_reason"),
+                         "§9.3 — merged is a success, not an abandonment")
+
+    def test_the_attempt_counter_is_untouched_by_either_review_route(self):
+        """§4.2: neither `claimed → in-review` nor `in-review → merged` changes
+        `Attempt`. The attempt was dispatched once and it delivered."""
+        self.poll(self.deliver())
+        after_dispatch = self.hub.section(STORY, "Attempt")
+        self.poll(self.deliver(), seen={STORY})
+        self.merge_the_pr()
+        self.poll(self.deliver(), seen={STORY})
+        self.assertEqual(self.hub.section(STORY, "Attempt"), after_dispatch)
+
+    def test_a_later_poll_over_the_finished_story_changes_nothing(self):
+        self.poll(self.deliver())
+        self.poll(self.deliver(), seen={STORY})
+        self.merge_the_pr()
+        self.poll(self.deliver(), seen={STORY})
+        before = (dict(self.hub.issues[STORY]), len(self.hub.timelines[STORY]))
+        self.poll(self.deliver(), seen=set())
+        self.assertEqual(dict(self.hub.issues[STORY]), before[0])
+        self.assertEqual(len(self.hub.timelines[STORY]), before[1],
+                         "a replay wrote nothing — the state write is the "
+                         "duplicate suppressor (§9.10)")
+
+    def test_the_whole_walk_is_written_by_the_factory(self):
+        """The property the relay deleted: every lifecycle label on this story
+        was written by a component, in one atomic replacement each (§9.2)."""
+        self.poll(self.deliver())
+        self.poll(self.deliver(), seen={STORY})
+        self.merge_the_pr()
+        self.poll(self.deliver(), seen={STORY})
+        applied = [event["label"]["name"] for event in self.hub.timelines[STORY]
+                   if event["event"] == "labeled"]
+        self.assertEqual(applied, ["story:claimed", "story:in-review", "story:merged"])
 
 
 if __name__ == "__main__":

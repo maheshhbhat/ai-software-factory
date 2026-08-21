@@ -57,6 +57,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import completion   # noqa: E402  — post-worker-success transition (#104)
 import continuation  # noqa: E402  — decision-comment consumption (#71)
+import humanqueue   # noqa: E402  — what is waiting on a person (#111)
+import review_link  # noqa: E402  — delivery-PR lifecycle reconciliation (#111)
 import runlog       # noqa: E402  — operational record (#104)
 import workers      # noqa: E402  — standard worker contract (#84)
 
@@ -234,8 +236,37 @@ def complete_story(dispatch: dict, report, claim: bool) -> None:
               + (f" — {outcome.detail}" if outcome.detail else ""), flush=True)
 
 
+def run_review_link(repo: str, claim: bool = True) -> list:
+    """Turn a delivery pull request into the lifecycle transitions it implies.
+
+    Kept in its own module for the same reason continuation and completion are:
+    whether a pull request is open or merged is a different question from
+    dispatch eligibility, and GitHub's merge state is a verdict the delivering
+    credential cannot fabricate (§9.14) — which is what makes these two
+    transitions mechanical at all.
+    """
+    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or ""
+    return review_link.run(repo, token, apply=claim)
+
+
+def run_human_queue(repo: str) -> list:
+    """Say what is waiting on a person. Reads durable state, writes nothing."""
+    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or ""
+    return humanqueue.run(repo, token)
+
+
 def poll_once(repo: str, commitment: int, seen: set[int], claim: bool = True) -> list[dict]:
     """One cycle. Returns the dispatches that produced a wake-up."""
+    # Reconciliation runs first: a story whose delivery merged should leave
+    # `story:claimed` before WIP is counted, or finished work keeps a worker slot
+    # it no longer needs. Isolated like every other pass — one failing pass must
+    # never stop authorized work from dispatching.
+    try:
+        run_review_link(repo, claim)
+    except Exception as exc:  # noqa: BLE001 — reported, never fatal to dispatch
+        print(f"[poller] review-link pass failed, dispatch continues: "
+              f"{type(exc).__name__}: {exc}", flush=True)
+
     # A decision consumed now can unblock work the same cycle. Isolated: a
     # continuation failure must not stop already-authorized work from
     # dispatching — the two answer different questions, and coupling their
@@ -244,6 +275,14 @@ def poll_once(repo: str, commitment: int, seen: set[int], claim: bool = True) ->
         run_continuation(repo, claim)
     except Exception as exc:  # noqa: BLE001 — reported, never fatal to dispatch
         print(f"[poller] continuation pass failed, dispatch continues: "
+              f"{type(exc).__name__}: {exc}", flush=True)
+
+    # Said on every poll, after the passes that can change what is waiting and
+    # before dispatch, so the list describes this cycle rather than the last one.
+    try:
+        run_human_queue(repo)
+    except Exception as exc:  # noqa: BLE001 — reported, never fatal to dispatch
+        print(f"[poller] human-queue pass failed, dispatch continues: "
               f"{type(exc).__name__}: {exc}", flush=True)
 
     stdout = run_dispatcher(repo, commitment, claim)

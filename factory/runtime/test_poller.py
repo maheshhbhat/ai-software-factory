@@ -114,18 +114,23 @@ class TestPollOnce(unittest.TestCase):
             if key.startswith("FACTORY_WORKER"):
                 del os.environ[key]
         os.environ["FACTORY_WORKER_CMD"] = "/usr/bin/true"
-        # Continuation and completion are separate concerns with their own
-        # tests; stub both so these exercise dispatch only and make no network
-        # call.
-        self._continuation = mock.patch.object(poller, "run_continuation",
-                                               return_value=[])
-        self._continuation.start()
+        # Reconciliation, continuation, the human queue and completion are
+        # separate concerns with their own tests; stub all four so these
+        # exercise dispatch only and make no network call.
+        self._passes = [
+            mock.patch.object(poller, "run_review_link", return_value=[]),
+            mock.patch.object(poller, "run_continuation", return_value=[]),
+            mock.patch.object(poller, "run_human_queue", return_value=[]),
+        ]
+        for patcher in self._passes:
+            patcher.start()
         self._completion = mock.patch.object(poller, "complete_story")
         self.completion = self._completion.start()
 
     def tearDown(self):
         self._completion.stop()
-        self._continuation.stop()
+        for patcher in reversed(self._passes):
+            patcher.stop()
         os.environ.clear()
         os.environ.update(self._env)
 
@@ -137,6 +142,47 @@ class TestPollOnce(unittest.TestCase):
              mock.patch.object(poller, "run_dispatcher", return_value=REPORT):
             woken = poller.poll_once("o/r", 54, seen)
         self.assertEqual([d["story"] for d in woken], [64])
+
+    def test_review_link_failure_does_not_block_dispatch(self):
+        """A reconciliation failure must not halt authorized work, for the same
+        reason a continuation failure must not: they answer different questions,
+        and coupling their failure modes lets one bad pull request stop the
+        factory."""
+        seen: set[int] = set()
+        with mock.patch.object(poller, "run_review_link",
+                               side_effect=RuntimeError("boom")), \
+             mock.patch.object(poller, "run_dispatcher", return_value=REPORT):
+            woken = poller.poll_once("o/r", 54, seen)
+        self.assertEqual([d["story"] for d in woken], [64])
+
+    def test_human_queue_failure_does_not_block_dispatch(self):
+        seen: set[int] = set()
+        with mock.patch.object(poller, "run_human_queue",
+                               side_effect=RuntimeError("boom")), \
+             mock.patch.object(poller, "run_dispatcher", return_value=REPORT):
+            woken = poller.poll_once("o/r", 54, seen)
+        self.assertEqual([d["story"] for d in woken], [64])
+
+    def test_every_poll_says_what_is_waiting_on_a_human(self):
+        """Not once per change — once per poll. A queue that reports only
+        transitions goes quiet about a problem precisely because it is old."""
+        seen: set[int] = set()
+        with mock.patch.object(poller, "run_human_queue", return_value=[]) as queue, \
+             mock.patch.object(poller, "run_dispatcher", return_value=REPORT):
+            poller.poll_once("o/r", 54, seen)
+            poller.poll_once("o/r", 54, seen)
+        self.assertEqual(queue.call_count, 2)
+
+    def test_reconciliation_runs_before_the_dispatcher(self):
+        """A story whose delivery merged must leave `story:claimed` before WIP is
+        counted, or finished work keeps a worker slot it no longer needs."""
+        order = []
+        with mock.patch.object(poller, "run_review_link",
+                               side_effect=lambda *a, **k: order.append("review-link")), \
+             mock.patch.object(poller, "run_dispatcher",
+                               side_effect=lambda *a, **k: (order.append("dispatch"), REPORT)[1]):
+            poller.poll_once("o/r", 54, set())
+        self.assertEqual(order, ["review-link", "dispatch"])
 
     def test_dispatch_wakes_the_worker_once(self):
         seen: set[int] = set()
@@ -212,7 +258,9 @@ class TestNoLocalAuthority(unittest.TestCase):
         """A fresh process re-derives behaviour from the dispatcher alone: if the
         story is claimed, the dispatcher stops offering it, so a restart is
         latency, not a duplicate."""
-        with mock.patch.object(poller, "run_continuation", return_value=[]), \
+        with mock.patch.object(poller, "run_review_link", return_value=[]), \
+             mock.patch.object(poller, "run_continuation", return_value=[]), \
+             mock.patch.object(poller, "run_human_queue", return_value=[]), \
              mock.patch.object(poller, "run_dispatcher",
                                return_value="Dispatcher — no eligible work"):
             self.assertEqual(poller.poll_once("o/r", 54, set()), [])
@@ -231,14 +279,20 @@ class TestWorkerContractRouting(unittest.TestCase):
         for key in list(os.environ):
             if key.startswith("FACTORY_WORKER"):
                 del os.environ[key]
-        self._continuation = mock.patch.object(poller, "run_continuation", return_value=[])
-        self._continuation.start()
+        self._passes = [
+            mock.patch.object(poller, "run_review_link", return_value=[]),
+            mock.patch.object(poller, "run_continuation", return_value=[]),
+            mock.patch.object(poller, "run_human_queue", return_value=[]),
+        ]
+        for patcher in self._passes:
+            patcher.start()
         self._completion = mock.patch.object(poller, "complete_story")
         self.completion = self._completion.start()
 
     def tearDown(self):
         self._completion.stop()
-        self._continuation.stop()
+        for patcher in reversed(self._passes):
+            patcher.stop()
         os.environ.clear()
         os.environ.update(self._env)
 
@@ -285,11 +339,17 @@ class TestCompletionIsDelegated(unittest.TestCase):
             if key.startswith("FACTORY_WORKER"):
                 del os.environ[key]
         os.environ["FACTORY_WORKER_CMD"] = "/usr/bin/true"
-        self._continuation = mock.patch.object(poller, "run_continuation", return_value=[])
-        self._continuation.start()
+        self._passes = [
+            mock.patch.object(poller, "run_review_link", return_value=[]),
+            mock.patch.object(poller, "run_continuation", return_value=[]),
+            mock.patch.object(poller, "run_human_queue", return_value=[]),
+        ]
+        for patcher in self._passes:
+            patcher.start()
 
     def tearDown(self):
-        self._continuation.stop()
+        for patcher in reversed(self._passes):
+            patcher.stop()
         os.environ.clear()
         os.environ.update(self._env)
 
