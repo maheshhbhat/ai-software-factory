@@ -84,6 +84,55 @@ that one.
 | S15 | Human queue | §9.11's no-silent-drops, and the repetition property |
 | S16 | Contract conformance | every routed label and contract value matches the schema |
 
+## The layer above this one — `e2e.py`
+
+Everything above is hermetic. `dispatcher._api` and `workers.run_observed` are
+both replaced, so this suite never touches the real GitHub API, the real `claude`
+binary, the subprocess boundary in `poller.run_dispatcher`, or any network
+failure mode. It is a **high-fidelity integration suite that asserts acceptance
+criteria** — calling it "production-shaped" describes its shape, not its reach.
+
+`e2e.py` is the layer that does reach:
+
+```bash
+GITHUB_TOKEN=$(gh auth token) python3 factory/acceptance/e2e.py \
+    --repo owner/name --commitment 54 --project 109
+```
+
+It creates a disposable Story, runs the real factory against it, and asserts the
+durable state that comes out — 16 checks covering dispatch, launch through the
+bridge, the acknowledgement, completion, atomicity, replay safety, the human
+queue, and that nothing was built. It is named `e2e.py` rather than `test_e2e.py`
+precisely so `unittest discover -p 'test_*.py'` cannot collect it by accident.
+
+**It costs a real engine invocation and writes a real issue**, and it says so
+before it does either. An E2E test that looks free gets run in a loop by someone
+who did not read this.
+
+**Cleanup is the behaviour under test.** §9.3 forbids any component from
+cancelling a Story, so this cannot close its own fixture — a teardown would be a
+component doing what the contract reserves to a human, and would delete the
+evidence besides. The fixture is a bounded no-deliverable assignment, so the
+worker acknowledges it and the completion path closes it under §9.16. A fixture
+left behind means something is broken, and the fixture is the report.
+
+**It never gates a merge.** An E2E run depends on live repository state and on an
+external engine being reachable. A required check that fails for reasons the
+author cannot fix is a check people learn to route around.
+
+### What building it found
+
+The first live run scored 14/15, and the failure was in the test rather than the
+factory: it asserted the canonical `DISPATCH` line against the poller's stdout,
+where it never appears — `run_dispatcher` captures the dispatcher subprocess's
+output and parses it. The assertion now reads the runlog, which is both the
+durable record and what an operator actually reads after the fact.
+
+The same run exposed a worse habit: evidence strings written from the
+*expectation* rather than the observation, so a failing check printed
+"appears once in the poll output" while reporting FAIL. Evidence is now rendered
+from what was seen, which is why a failing check is worth reading.
+
 ## The kill criterion
 
 If a scenario cannot be made to pass without changing a frozen contract in
