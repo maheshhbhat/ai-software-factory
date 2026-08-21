@@ -12,6 +12,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.error
 
 HERE = pathlib.Path(__file__).resolve().parent
@@ -71,7 +72,61 @@ def read_repository(client: artifacts.GitHubStore) -> tuple[str, list[dict], dic
                  if path.lower().endswith(".md") and
                  ("/adr" in f"/{path.lower()}" or "/decisions/" in f"/{path.lower()}/")]
     adrs = [{"path": path, "content": content(path)} for path in adr_paths]
-    return product, adrs, {"default_branch": branch, "files": files}
+    source_paths = [path for path in files if path != product_paths[0] and
+                    path.lower().endswith((".js", ".mjs", ".cjs", ".json", ".md",
+                                           ".yml", ".yaml"))]
+    sources, total = {}, 0
+    for path in source_paths:
+        text = content(path)
+        total += len(text.encode())
+        if total > 500_000:
+            raise InvocationError(
+                "repository read constraint failed: grounded source context exceeds 500KB")
+        sources[path] = text
+    return product, adrs, {"default_branch": branch, "files": files, "sources": sources}
+
+
+def prompt_version() -> str:
+    return hashlib.sha256(HERE.joinpath("prompt.md").read_bytes()).hexdigest()[:12]
+
+
+def review_comments(client: artifacts.GitHubStore, number: int) -> list[dict]:
+    """Ground revisions in human comments, excluding the agent's own artifacts."""
+    return [{"id": item.get("id"), "author": (item.get("user") or {}).get("login"),
+             "created_at": item.get("created_at"), "body": item.get("body") or ""}
+            for item in client.list_comments(number)
+            if f"<!-- {artifacts.MARKER}:" not in (item.get("body") or "")]
+
+
+def feedback_version(comments: list[dict]) -> str:
+    stable = json.dumps(comments, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(stable).hexdigest()[:12]
+
+
+def existing_plan(client: artifacts.GitHubStore, artifact: int) -> dict:
+    prefix = f"<!-- {artifacts.MARKER}:{artifact}:"
+    issues = [{"number": item["number"], "title": item.get("title"),
+               "labels": labels_of(item), "body": item.get("body") or ""}
+              for item in client.list_issues("all")
+              if prefix in (item.get("body") or "") and
+              (":adr -->" in item["body"] or ":story:" in item["body"])]
+    digests = [{"id": item.get("id"), "body": item.get("body") or ""}
+               for item in client.list_comments(artifact)
+               if prefix in (item.get("body") or "") and ":digest -->" in item["body"]]
+    return {"issues": issues, "digests": digests}
+
+
+def verify_with_retry(client, trigger, key, altitude, attempts=5, sleeper=time.sleep):
+    """Retry GitHub's eventually-consistent issue listing for a bounded window."""
+    error = None
+    for attempt in range(attempts):
+        try:
+            return artifacts.verify(client, trigger, key, altitude)
+        except artifacts.ArtifactError as exc:
+            error = exc
+            if attempt + 1 < attempts:
+                sleeper(attempt + 1)
+    raise error
 
 
 def model_command(input_path: str, timeout: int, max_usd: float) -> list[str]:
@@ -81,10 +136,15 @@ def model_command(input_path: str, timeout: int, max_usd: float) -> list[str]:
                 .replace("{max_usd}", str(max_usd)).replace("{timeout}", str(timeout))
                 for part in shlex.split(template)]
     prompt = HERE.joinpath("prompt.md").read_text()
-    payload = (prompt + "\n\n## Invocation input\n\nRead the JSON input at `" + input_path
-               + "`. Return only the contract JSON object; do not write GitHub directly.")
+    input_value = json.loads(pathlib.Path(input_path).read_text())
+    altitude = contract.select_altitude(set(input_value["trigger"]["labels"]))
+    payload = (prompt + "\n\n## Invocation input\n\n"
+               + json.dumps(input_value, indent=2)
+               + "\n\nReturn only the contract JSON object; do not write GitHub directly.")
     return ["claude", "-p", payload, "--output-format", "json",
-            "--max-budget-usd", str(max_usd)]
+            "--json-schema", json.dumps(contract.json_schema(altitude), separators=(",", ":")),
+            "--max-budget-usd", str(max_usd), "--permission-mode", "dontAsk",
+            "--no-session-persistence"]
 
 
 def run_model(value: dict, timeout: int, max_usd: float,
@@ -102,7 +162,9 @@ def run_model(value: dict, timeout: int, max_usd: float,
             f"planning model failed ({result.returncode}): {(result.stderr or '')[:300]}")
     try:
         envelope = json.loads(result.stdout)
-        if isinstance(envelope, dict) and isinstance(envelope.get("result"), str):
+        if isinstance(envelope, dict) and isinstance(envelope.get("structured_output"), dict):
+            envelope = envelope["structured_output"]
+        elif isinstance(envelope, dict) and isinstance(envelope.get("result"), str):
             envelope = json.loads(envelope["result"])
     except (json.JSONDecodeError, TypeError) as exc:
         raise InvocationError("planning model returned malformed JSON") from exc
@@ -123,15 +185,19 @@ def execute(repo: str, artifact: int, token: str, timeout: int, max_usd: float,
                 f"repository read constraint failed: GitHub returned {exc.code}; "
                 "no planning artifacts were written") from exc
         raise
+    feedback = review_comments(client, artifact)
+    prior_plan = existing_plan(client, artifact)
     value = {"trigger": {**issue, "labels": labels_of(issue)}, "product": product,
-             "adrs": adrs, "repository": repository}
+             "adrs": adrs, "repository": repository, "review_comments": feedback,
+             "existing_plan": prior_plan}
     validated = contract.validate_input(value)
     altitude = contract.select_altitude(set(validated.trigger["labels"]))
-    key = f"{artifact}:{state_version(client, issue)}:{altitude.value}"
+    key = (f"{artifact}:{state_version(client, issue)}:{altitude.value}:"
+           f"prompt-{prompt_version()}:feedback-{feedback_version(feedback)}")
     output = run_model(value, timeout, max_usd, runner=runner)
     contract.validate_output(altitude, output)
     artifacts.write(client, value["trigger"], key, output)
-    verified = artifacts.verify(client, value["trigger"], key, altitude)
+    verified = verify_with_retry(client, value["trigger"], key, altitude)
     if altitude is contract.Altitude.PROJECT:
         fresh = client.get_issue(artifact)
         labels = set(labels_of(fresh))

@@ -72,6 +72,11 @@ class PlanningE2E(unittest.TestCase):
         runner = runner or mock.Mock(return_value=Result(stdout=json.dumps(output)))
         return invoke.execute("product/repo", number, "token", 30, 2.0, runner=runner)
 
+    def key(self, number):
+        feedback = invoke.review_comments(self.store, number)
+        return (f"{number}:{1000 + number}:project:prompt-{invoke.prompt_version()}:"
+                f"feedback-{invoke.feedback_version(feedback)}")
+
     def test_01_two_altitudes_write_only_their_authorized_artifacts(self):
         campaign = self.execute(1, campaign_output())
         self.assertEqual(contract.Altitude.CAMPAIGN, campaign.altitude)
@@ -84,8 +89,9 @@ class PlanningE2E(unittest.TestCase):
         self.assertEqual(3, project.adr)
         self.assertEqual((4, 5), project.stories)
         self.assertIn("project:awaiting-ready", self.store.get_issue(2)["labels"])
+        key = self.key(2)
         self.assertEqual(project, artifacts.verify(
-            self.store, self.store.get_issue(2), "2:1002:project", contract.Altitude.PROJECT))
+            self.store, self.store.get_issue(2), key, contract.Altitude.PROJECT))
 
     def test_02_duplicate_campaign_delivery_creates_nothing_new(self):
         first = self.execute(1, campaign_output())
@@ -98,7 +104,7 @@ class PlanningE2E(unittest.TestCase):
         campaign = self.execute(1, campaign_output())
         self.store.activate_for_planning(campaign.project)
         trigger = self.store.get_issue(campaign.project)
-        key = f"{campaign.project}:1002:project"
+        key = self.key(campaign.project)
         first = artifacts.write(self.store, trigger, key, project_output())
         second = artifacts.write(self.store, trigger, key, project_output())
         self.assertEqual(first, second)
@@ -140,14 +146,43 @@ class PlanningE2E(unittest.TestCase):
         campaign = self.execute(1, campaign_output())
         self.store.activate_for_planning(campaign.project)
         trigger = self.store.get_issue(campaign.project)
-        key = f"{campaign.project}:1002:project"
+        key = self.key(campaign.project)
         written = artifacts.write(self.store, trigger, key, project_output())
         story = next(item for item in self.store.issues if item["number"] == written.stories[0])
         story["labels"].remove("phase:build")
         with self.assertRaises(artifacts.ArtifactError):
             artifacts.verify(self.store, trigger, key, contract.Altitude.PROJECT)
 
+    def test_08_feedback_revision_updates_in_place_and_replays_idempotently(self):
+        campaign = self.execute(1, campaign_output())
+        self.store.activate_for_planning(campaign.project)
+        first = self.execute(campaign.project, project_output())
+        issue_count = len(self.store.issues)
+
+        self.store.create_comment(campaign.project,
+                                  "## Review\n\nDefine the comparison rule before results.")
+        self.store.activate_for_planning(campaign.project)
+        revised = copy.deepcopy(project_output())
+        revised["adr"]["decision"] = "Write product artifacts here and fix the rule first."
+        revised["stories"][0]["spec"] = "Calculate a projection using the fixed rule."
+        revised["digest"] = revised["digest"].replace(
+            "Build the model, then show it.", "Fix the rule, build the model, then show it.")
+
+        second = self.execute(campaign.project, revised)
+        self.assertEqual(first, second)
+        self.assertEqual(issue_count, len(self.store.issues))
+        self.assertIn("fix the rule first", self.store.get_issue(first.adr)["body"])
+        self.assertIn("fixed rule", self.store.get_issue(first.stories[0])["body"])
+        digests = [item for item in self.store.comments[campaign.project]
+                   if "planning-artifact:" in item["body"]]
+        self.assertEqual(1, len(digests))
+        self.assertIn("Fix the rule", digests[0]["body"])
+
+        self.store.activate_for_planning(campaign.project)
+        third = self.execute(campaign.project, revised)
+        self.assertEqual(second, third)
+        self.assertEqual(issue_count, len(self.store.issues))
+
 
 if __name__ == "__main__":
     unittest.main()
-
