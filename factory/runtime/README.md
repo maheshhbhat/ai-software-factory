@@ -9,25 +9,114 @@ number and typed `work #N`. The labels had already made the decision, so that
 touch carried no judgment — a *relay* touch, the one class
 `architecture-v2.1.md` §7 requires to trend to zero.
 
-## Two passes per cycle
+## Five passes per cycle
 
-**1 · Continuation** (`continuation.py`) — consume human decision comments on
+**1 · Review link** (`review_link.py`) — turn a delivery pull request into the
+lifecycle transitions it implies: `story:claimed → story:in-review` when a
+§9.5-linked PR is open, and `story:in-review → story:merged` (closed as
+completed) when it merges. See *The review link* below.
+
+**2 · Continuation** (`continuation.py`) — consume human decision comments on
 projects sitting at `project:awaiting-ready` or `project:awaiting-acceptance`.
 This exists because a bell is rung as a *comment on an existing issue*, which
 new-issue discovery cannot see. Observed live three times (#55, #61, #66): a
 valid approval sat in GitHub while the lifecycle waited for someone to type
 `work #N`.
 
-**2 · Dispatch** (`poller.py` + the dispatcher) — claim and wake, as below.
+**3 · Human queue** (`humanqueue.py`) — say what is waiting on a person. See
+*The human queue* below.
 
-**3 · Completion** (`completion.py`) — when a worker finishes successfully, ask
+**4 · Dispatch** (`poller.py` + the dispatcher) — claim and wake, as below.
+
+**5 · Completion** (`completion.py`) — when a worker finishes successfully, ask
 whether its Story is done. See *The completion path* below.
 
-Continuation runs first, so an approval and the work it unblocks can land in the
-same cycle. Its failures are isolated: a malformed decision comment reports and
-is skipped, and dispatch still runs. Coupling them would let one bad comment
-halt the whole factory. Completion is isolated the same way and for the same
-reason: if it fails, the Story stays claimed and the §9.4 lease resolves it.
+The order is load-bearing at both ends. Review link runs **first** so a story
+whose delivery merged leaves `story:claimed` before WIP is counted — otherwise
+finished work keeps a worker slot it no longer needs. Continuation runs before
+dispatch so an approval and the work it unblocks land in the same cycle. The
+human queue runs after both, so its list describes this cycle rather than the
+last one.
+
+Every pass is isolated: a failure reports and the poll continues. Coupling them
+would let one malformed comment, or one ambiguous pull request, halt the whole
+factory. Completion is isolated for the same reason — if it fails the Story
+stays claimed and the §9.4 lease resolves it.
+
+## The review link (#111)
+
+`story:claimed → story:in-review` and `story:in-review → story:merged` are
+transitions §4.2 has always specified and nothing ever performed. A human moved
+both labels on every story the factory delivered, which is the relay Phase 2
+exists to delete — and it was not hypothetical: **#97 sat open at
+`story:in-review` for four days with its delivery PR #98 merged**, because the
+second route had no implementation to run.
+
+§9.11 listed the merge route as documentation-only, "gated on §9.13". §9.13 is
+complete — `merge-gate` is required, approvals are at zero — so the gate that
+deferred it has been satisfied.
+
+**Why these two may be mechanical.** The only thing this reads is whether a pull
+request carrying the canonical `Story: #N` line is open or merged, and GitHub's
+merge state is not something a worker asserts: it is the outcome of the required
+gate the worker's own credential cannot influence (§9.14). That is the whole
+difference from `story:completed`, which needs §9.16's much narrower proof
+because nothing outside the factory had ruled on the work.
+
+**One writer per transition.** A `story:claimed` story whose linked PR has
+*already* merged is deliberately left alone here — the dispatcher's §9.4
+recovery pass already reconciles exactly that case, and two components writing
+one transition is how a lifecycle stops being auditable. This pass names that
+owner and stands down.
+
+Ambiguity writes nothing and says why: two linked PRs, a duplicate `Story:`
+line, or a PR closed without merging. The last is not an error the factory can
+resolve — work was delivered and then rejected, and what happens next is a
+human's decision.
+
+## The human queue (#111)
+
+§9.11 ends with a rule the factory did not keep: *"A transition with no live
+route is logged and surfaced, never discarded — an unrouted transition is a
+contract gap, and silence would hide it."*
+
+The silence was measurable. `continuation.run` skips a project whose outcome is
+`NO_DECISION` without printing anything, so a project at
+`project:awaiting-ready` with no approval produced **no output at all**, on
+every poll, indefinitely — which is how #55, #61 and #66 each sat waiting until
+somebody happened to look. A story at `story:blocked:scope` appeared only as one
+skip line among the ineligible, and a poisoned story appeared nowhere at all,
+because until #110 poisoning closed the issue.
+
+The pass is deliberately the dumbest thing that works: **enumerate everything
+waiting, every poll, from durable state.** One canonical line per artifact plus
+one structured runlog event, each carrying identity, state, link and the action
+required.
+
+```
+[human-queue] 2 artifact(s) waiting on a human
+HUMAN-QUEUE artifact=#109 state=project:awaiting-ready url=… action='approve the …'
+HUMAN-QUEUE artifact=#42 state=story:blocked:poison url=… action='rescue per §4.3.6 …'
+```
+
+**It holds no state, and that is the design.** Nothing records that an artifact
+was announced, so an artifact still waiting is announced again and one that
+stopped waiting stops being announced — with no cursor to go stale and nothing
+to reconcile after a restart. A notifier that remembers what it has already said
+goes quiet about a problem precisely because the problem is old. "Already
+notified" is not a state this pass can be in.
+
+The line names the artifact rather than describing it, like the dispatcher's
+`DISPATCH` line and for the same reason (`architecture-v2.1.md` §4). The
+transport is the monitor that already turns one stdout line into one
+notification — no webhook, no secret, no outbound dependency.
+
+**The trust boundary runs the other way here.** §9.9 says untrusted text may be
+read "for context, for a human's queue". A queue entry authorizes nothing, so an
+untrusted artifact is listed and *marked* rather than hidden; hiding it would be
+the worse error. It never mutates a lifecycle: an artifact waiting on a human is
+waiting because no component may decide it, and a notifier that could change
+what it reports on would not be a notifier.
 
 ### What continuation can and cannot prove
 
