@@ -522,6 +522,9 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--project", type=int,
                         help="an active project to hang fixtures under")
     parser.add_argument("--only", help="comma-separated requirement keys to run")
+    parser.add_argument("--resume", type=int, metavar="ISSUE",
+                        help="second phase of a deferred scenario, against the fixture "
+                             "issue the first phase left behind")
     parser.add_argument("--list", action="store_true",
                         help="print the requirement map and exit, touching nothing")
     parser.add_argument("--json", help="write the report here")
@@ -574,6 +577,11 @@ def main(argv: list[str]) -> int:
 
     for cls in selected:
         instance = cls(args.repo, args.commitment, args.project, token)
+        if args.resume is not None:
+            if not hasattr(cls, "resume"):
+                parser.error(f"--resume means nothing to {cls.key}; only a deferred "
+                             f"scenario has a second phase")
+            instance.resume = args.resume
         try:
             instance.run(run)
             run.exercised.update(cls.covers())

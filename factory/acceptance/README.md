@@ -165,6 +165,41 @@ The same run exposed a worse habit: evidence strings written from the
 "appears once in the poll output" while reporting FAIL. Evidence is now rendered
 from what was seen, which is why a failing check is worth reading.
 
+## The rule this suite keeps relearning
+
+**Assert on the timeline, never on the current label.**
+
+Three defects in this suite have had the same root cause, and all three passed
+review at the time:
+
+1. The `DISPATCH` line asserted against the poller's stdout, where it never
+   appears — `run_dispatcher` captures and parses it.
+2. The Dispatch scenario read `lifecycle == story:claimed` after a poll that had
+   already completed the fixture.
+3. The Recovery scenario read `lifecycle in (story:ready, story:claimed)` after a
+   recovery — a condition true whether or not anything happened, because §9.4
+   recovers *before* selection and the same run re-claims:
+
+```
+15:22:45  unlabeled story:claimed
+15:22:46  labeled   story:ready     <- the recovery
+15:22:47  unlabeled story:ready
+15:22:47  labeled   story:claimed   <- re-dispatched, same run
+```
+
+Net `Attempt 1 -> 1`, final label `story:claimed`, and `count_expiry_recoveries`
+= 1. Only the last number says what occurred.
+
+A label is a **current value** in a system whose whole design is that passes move
+it. The timeline is durable, ordered, and the thing every other component in this
+repository routes on. Assert there.
+
+**And never take a claim without dispatching a worker.** `dispatcher.main --claim`
+writes `story:claimed` and launches nothing, so the fixture strands until the
+sixty-minute lease expires. It has bitten this suite three times. It is not a
+state the factory produces — `poll_once` always dispatches and launches together
+— so a scenario that produces it is testing a system that does not exist.
+
 ## The kill criterion
 
 If a scenario cannot be made to pass without changing a frozen contract in
