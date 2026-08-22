@@ -12,6 +12,14 @@ import invoke
 
 
 class OutputTests(unittest.TestCase):
+    def test_default_command_can_only_write_the_outcome(self):
+        with mock.patch.object(pathlib.Path, "read_text", return_value="prompt"):
+            cmd = invoke.command(pathlib.Path("input.json"), pathlib.Path("out.json"))
+        self.assertIn("acceptEdits", cmd)
+        self.assertEqual("Write", cmd[cmd.index("--allowedTools") + 1])
+        self.assertEqual("Bash", cmd[cmd.index("--disallowedTools") + 1])
+        self.assertIn("--no-session-persistence", cmd)
+
     def test_private_git_auth_uses_github_basic_transport_shape(self):
         header = invoke.git_auth_header("secret")
         self.assertTrue(header.startswith("Authorization: Basic "))

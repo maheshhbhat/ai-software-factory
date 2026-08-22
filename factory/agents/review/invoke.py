@@ -79,7 +79,8 @@ def command(input_path: pathlib.Path, output_path: pathlib.Path) -> list[str]:
     payload = (HERE.joinpath("prompt.md").read_text()
                + f"\n\nWrite the JSON outcome to: {output_path}\n\nInput: "
                + input_path.read_text())
-    return ["claude", "-p", payload, "--permission-mode", "dontAsk",
+    return ["claude", "-p", payload, "--permission-mode", "acceptEdits",
+            "--allowedTools", "Write", "--disallowedTools", "Bash",
             "--no-session-persistence"]
 
 
