@@ -56,6 +56,13 @@ class AcceptanceTouchTests(unittest.TestCase):
                    "body": base["body"] + "\nNarrative mentions #999.\n"}
         self.assertEqual(ct.acceptance_identity(base)[0], ct.acceptance_identity(changed)[0])
 
+    def test_hyphenated_explanation_cannot_override_criterion_status(self):
+        base = decision(follow="#289")
+        explained = {**base, "body": base["body"].replace(
+            "- AT-01 — fail", "- AT-01 — fail: needs roll-back-pass correction")}
+        self.assertEqual(ct.acceptance_identity(base)[0],
+                         ct.acceptance_identity(explained)[0])
+
     def test_changed_follow_up_is_a_new_decision(self):
         one, two = decision(follow="#289"), decision(follow="#292")
         self.assertNotEqual(ct.acceptance_identity(one)[0], ct.acceptance_identity(two)[0])

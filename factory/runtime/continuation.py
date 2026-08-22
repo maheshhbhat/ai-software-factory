@@ -69,7 +69,7 @@ CRITERION_RE = re.compile(r"^- \[[ xX]\] .+$", re.M)
 FOLLOW_UP_RE = re.compile(r"^follow-up:\s*(?P<value>.+?)\s*$", re.M | re.I)
 ACTOR_RE = re.compile(r"^actor:\s*@?(?P<value>[A-Za-z0-9-]+)\s*$", re.M | re.I)
 SECONDS_RE = re.compile(r"^seconds-spent:\s*(?P<value>[0-9]+)\s*$", re.M | re.I)
-STATUS_RE = re.compile(r"(?:—|-)\s*(pass|fail)\b", re.I)
+STATUS_RE = re.compile(r"\s(?:—|-)\s+(pass|fail)\b", re.I)
 KEY_RE = re.compile(r"\b([A-Z][A-Z0-9]*-[0-9]+)\b")
 
 
