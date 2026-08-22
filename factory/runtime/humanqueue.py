@@ -135,6 +135,11 @@ HUMAN_QUEUE_FORMATS: dict[str, tuple[str, str] | None] = {
 
 PREFIXES = (dispatcher.STORY_LIFECYCLE, dispatcher.PROJECT_LIFECYCLE)
 
+SAMPLING_ACTION = (
+    "audit the sampled merged PR — post `## Sampling audit` with exactly one "
+    "`decision: pass` (or `decision: findings`) line, `seconds-spent: N`, and "
+    "for findings one or more `- actionable finding` lines")
+
 
 @dataclass(frozen=True)
 class Waiting:
@@ -176,6 +181,10 @@ def waiting_for(issue: dict) -> Waiting | None:
     """Is this artifact waiting on a person? Pure."""
     state = state_of(issue)
     action = WAITING_ON_A_HUMAN.get(state or "")
+    if (action is None and "type:audit" in dispatcher.labels_of(issue)
+            and "<!-- sampling-audit:" in (issue.get("body") or "")
+            and issue.get("state", "open") == "open"):
+        state, action = "sampling-audit", SAMPLING_ACTION
     if action is None:
         return None
     return Waiting(
