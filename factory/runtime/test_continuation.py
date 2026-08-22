@@ -23,12 +23,15 @@ CRITERIA = "- [ ] does the thing\n- [ ] does not do the other thing"
 def project(number=100, state=ct.AWAITING_READY, criteria=CRITERIA):
     body = (f"### Goal\n\ng\n\n### Falsifiable acceptance criteria\n\n{criteria}\n\n"
             f"### Stories\n\n#1\n\n### Roadmap commitment\n\n#54\n")
-    return {"number": number, "state": "OPEN",
+    value = {"number": number, "state": "OPEN",
             "labels": [{"name": "type:project"}, {"name": state}], "body": body}
+    if state == ct.AWAITING_ACCEPTANCE:
+        value["_bell_at"] = "2026-08-22T01:00:00Z"
+    return value
 
 
-def comment(body, assoc="OWNER"):
-    return {"body": body, "authorAssociation": assoc}
+def comment(body, assoc="OWNER", created_at="2026-08-22T01:01:00Z"):
+    return {"body": body, "authorAssociation": assoc, "created_at": created_at}
 
 
 def approval(criteria=CRITERIA, decision="approved"):
@@ -36,9 +39,10 @@ def approval(criteria=CRITERIA, decision="approved"):
                    f"Approved criteria:\n\n{criteria}\n")
 
 
-def acceptance(result="pass"):
+def acceptance(result="pass", created_at="2026-08-22T01:01:00Z"):
     return comment(f"## Acceptance\n\nresult: {result}\nactor: @maheshhbhat\n\n"
-                   f"- criterion 1 — {result}\n\nfollow-up: none\n")
+                   f"- criterion 1 — {result}\n\nfollow-up: none\n",
+                   created_at=created_at)
 
 
 class TestApprovalContinuation(unittest.TestCase):
@@ -183,7 +187,8 @@ class TestAcceptance(unittest.TestCase):
         Both comments remain present. The later result governs the new bell,
         and replay after acceptance is inert because the lifecycle left it.
         """
-        comments = [acceptance(result="fail"), acceptance(result="pass")]
+        comments = [acceptance(result="fail", created_at="2026-08-22T00:59:00Z"),
+                    acceptance(result="pass", created_at="2026-08-22T01:01:00Z")]
         outcome = ct.evaluate_project(project(state=ct.AWAITING_ACCEPTANCE), comments)
         self.assertEqual(outcome.action, ct.ACCEPTED)
         self.assertEqual(2, len(comments), "the earlier audit record must remain")
@@ -193,8 +198,27 @@ class TestAcceptance(unittest.TestCase):
     def test_latest_failure_after_an_earlier_pass_returns_to_active(self):
         outcome = ct.evaluate_project(
             project(state=ct.AWAITING_ACCEPTANCE),
-            [acceptance(result="pass"), acceptance(result="fail")])
+            [acceptance(result="pass", created_at="2026-08-22T00:59:00Z"),
+             acceptance(result="fail", created_at="2026-08-22T01:01:00Z")])
         self.assertEqual(outcome.action, ct.ACTIVE)
+
+    def test_conflicting_results_within_one_bell_fail_closed(self):
+        outcome = ct.evaluate_project(
+            project(state=ct.AWAITING_ACCEPTANCE),
+            [acceptance(result="fail", created_at="2026-08-22T01:01:00Z"),
+             acceptance(result="pass", created_at="2026-08-22T01:02:00Z")])
+        self.assertIsNone(outcome.action)
+        self.assertEqual(outcome.reason, R.CONFLICTING_DECISIONS)
+
+    def test_missing_or_malformed_bell_and_comment_times_fail_closed(self):
+        missing = project(state=ct.AWAITING_ACCEPTANCE)
+        del missing["_bell_at"]
+        self.assertEqual(ct.evaluate_project(missing, [acceptance()]).reason,
+                         R.BELL_TIME_UNAVAILABLE)
+        malformed = acceptance(created_at="not-a-time")
+        self.assertEqual(ct.evaluate_project(
+            project(state=ct.AWAITING_ACCEPTANCE), [malformed]).reason,
+            R.BELL_TIME_UNAVAILABLE)
 
     def test_approval_comment_does_not_satisfy_the_acceptance_bell(self):
         outcome = ct.evaluate_project(project(state=ct.AWAITING_ACCEPTANCE), [approval()])
