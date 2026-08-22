@@ -152,10 +152,26 @@ def validate_output(altitude: Altitude, value: dict) -> dict:
         digest = value.get("digest")
         if not isinstance(digest, str):
             raise ContractError("project digest must be a string")
-        required_sections = ("## Plan in plain language", "## How the plan works",
-                             "## Story dependencies")
-        missing_sections = [section for section in required_sections if section not in digest]
-        if missing_sections or len(re.findall(r"```mermaid\s*\n", digest)) < 2:
+        required_sections = ("Plan in plain language", "How the plan works",
+                             "Story dependencies")
+        sections = {}
+        for heading in required_sections:
+            match = re.search(
+                rf"(?ms)^## {re.escape(heading)}\s*\n(.*?)(?=^## |\Z)", digest)
+            if not match or not match.group(1).strip():
+                raise ContractError(f"project digest section {heading!r} is missing or empty")
+            sections[heading] = match.group(1)
+        for heading in ("How the plan works", "Story dependencies"):
+            section = sections[heading]
+            diagram = re.search(r"(?ms)```mermaid\s*\n.*?^```\s*$", section)
+            if not diagram:
+                raise ContractError(f"project digest section {heading!r} lacks a Mermaid diagram")
+            fallback = section[diagram.end():]
+            prose = re.sub(r"(?ms)```.*?^```\s*$", "", fallback).strip()
+            if not prose:
+                raise ContractError(
+                    f"project digest section {heading!r} lacks a textual fallback")
+        if len(re.findall(r"```mermaid\s*\n", digest)) < 2:
             raise ContractError(
                 "project digest must contain a plain-language explanation and two Mermaid "
                 "diagrams (system flow and story dependencies)")
