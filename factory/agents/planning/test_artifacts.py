@@ -69,7 +69,7 @@ def campaign_output():
 
 
 def project_output():
-    base = {"phase": "build", "hazard": False, "spend_cap": "$20 / 60 min",
+    base = {"phase": "build", "hazard": False, "spend_cap": "$5 / 60 min",
             "scope": ["src/model/**"], "acceptance_criteria": ["Example passes"]}
     return {"altitude": "project", "adr": {"title": "Artifact ownership",
             "context": "Product stories belong with code.", "decision": "Write product artifacts here.",

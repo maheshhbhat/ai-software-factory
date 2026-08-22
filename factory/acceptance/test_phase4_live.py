@@ -14,6 +14,7 @@ class Phase4LiveHarnessTests(unittest.TestCase):
     def test_story_is_bounded_isolated_and_deliberately_two_pass(self):
         body = live.story_body()
         self.assertIn("#212", body)
+        self.assertIn("### Spend cap\n\n$5 / 60 min", body)
         self.assertIn("Attempt 1 only", body)
         self.assertIn("Attempt 2", body)
         self.assertIn("runs/phase4/live_product/**", body)

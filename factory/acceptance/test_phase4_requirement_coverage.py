@@ -21,6 +21,15 @@ phase4_live = importlib.util.module_from_spec(LIVE_SPEC)
 LIVE_SPEC.loader.exec_module(phase4_live)
 
 class Phase4RequirementCoverageTests(unittest.TestCase):
+    def test_factory_authored_story_spend_defaults_do_not_drift(self):
+        issue_form = (ROOT / ".github" / "ISSUE_TEMPLATE" / "story.yml").read_text()
+        planner = (ROOT / "factory" / "agents" / "planning" / "prompt.md").read_text()
+        sampling_source = (ROOT / "factory" / "runtime" / "sampling.py").read_text()
+        self.assertIn('value: "$5 / 60 min"', issue_form)
+        self.assertIn('"spend_cap": "$5 / 60 min"', planner)
+        self.assertIn("### Spend cap\n\n$5 / 60 min", sampling_source)
+        self.assertIn("### Spend cap\n\n$5 / 60 min", phase4_live.story_body())
+
     def test_phase4_delivery_evidence_requires_project_story_and_both_checks(self):
         # The hermetic half of P4-15 proves that its live evidence collector is
         # tied to this Project and cannot report delivery with only one green

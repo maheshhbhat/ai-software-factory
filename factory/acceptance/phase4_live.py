@@ -83,7 +83,7 @@ build
 
 ### Spend cap
 
-$20 / 30 min
+$5 / 60 min
 
 ### Scope
 
