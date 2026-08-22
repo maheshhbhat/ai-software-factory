@@ -24,11 +24,12 @@ class OutputTests(unittest.TestCase):
     def test_outcome_is_written_and_parsed_inside_checkout(self):
         with tempfile.TemporaryDirectory() as temp:
             workspace = pathlib.Path(temp)
-            (workspace / "repo").mkdir()
+            (workspace / "repo" / ".git").mkdir(parents=True)
             output = invoke.outcome_path(workspace)
             output.write_text(json.dumps({"head": "a" * 40, "verdict": "approval",
                                           "summary": "checked"}))
             self.assertTrue(output.is_relative_to(workspace / "repo"))
+            self.assertEqual(workspace / "repo" / ".git", output.parent)
             self.assertEqual("approval", invoke.parse_result(output, "a" * 40)["verdict"])
 
     def test_private_git_auth_uses_github_basic_transport_shape(self):

@@ -105,7 +105,9 @@ def command(input_path: pathlib.Path, output_path: pathlib.Path) -> list[str]:
 
 
 def outcome_path(workspace: pathlib.Path) -> pathlib.Path:
-    return workspace / "repo" / ".factory-review-out.json"
+    # Inside the tool sandbox, but outside the PR-controlled worktree. A pull
+    # request can never pre-seed a path under the clone's .git metadata.
+    return workspace / "repo" / ".git" / "factory-review-out.json"
 
 
 def run(cmd, *, cwd, timeout=3600, env=None):

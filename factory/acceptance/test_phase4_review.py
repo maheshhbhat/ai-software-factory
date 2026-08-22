@@ -73,7 +73,7 @@ class ReviewAcceptanceTests(unittest.TestCase):
     def fake_subprocess(self, cmd, **kwargs):
         cwd = pathlib.Path(kwargs["cwd"])
         if cmd[:2] == ["git", "clone"]:
-            (cwd / "repo").mkdir()
+            (cwd / "repo" / ".git").mkdir(parents=True)
             self.assertIn("GIT_CONFIG_VALUE_0", kwargs["env"])
         else:
             self.assertNotIn("GH_TOKEN", kwargs["env"])
@@ -86,7 +86,7 @@ class ReviewAcceptanceTests(unittest.TestCase):
         self.assertNotIn("shared-token", cmd)
         self.serialized = json.loads((root / "input.json").read_text())
         self.workspace_entries = sorted(x.name for x in root.iterdir())
-        (pathlib.Path(cwd) / ".factory-review-out.json").write_text(json.dumps(
+        (pathlib.Path(cwd) / ".git" / "factory-review-out.json").write_text(json.dumps(
             {"head": self.client.head, "verdict": "approval", "summary": "safe"}))
 
     def deliver(self):
@@ -116,7 +116,7 @@ class ReviewAcceptanceTests(unittest.TestCase):
 
     def test_head_change_during_review_refuses_stale_result_without_a_write(self):
         def stale(_cmd, *, cwd, timeout, env=None):
-            (pathlib.Path(cwd) / ".factory-review-out.json").write_text(json.dumps(
+            (pathlib.Path(cwd) / ".git" / "factory-review-out.json").write_text(json.dumps(
                 {"head": SHA, "verdict": "approval", "summary": "old head"}))
             self.client.head = "b" * 40
         with mock.patch.object(invoke.subprocess, "run", side_effect=self.fake_subprocess), \
@@ -129,7 +129,7 @@ class ReviewAcceptanceTests(unittest.TestCase):
 
     def test_findings_are_bound_to_head_and_return_story_ready(self):
         def findings(_cmd, *, cwd, timeout, env=None):
-            (pathlib.Path(cwd) / ".factory-review-out.json").write_text(json.dumps(
+            (pathlib.Path(cwd) / ".git" / "factory-review-out.json").write_text(json.dumps(
                 {"head": SHA, "verdict": "findings", "findings": ["fix defect"]}))
         with mock.patch.object(invoke.subprocess, "run", side_effect=self.fake_subprocess), \
              mock.patch.object(invoke, "run", side_effect=findings), \
