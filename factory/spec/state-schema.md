@@ -271,7 +271,7 @@ This section is the single definition of attempt and poison behaviour. Where `im
 
 ## 5. Decision evidence — where human judgment is recorded
 
-GitHub is the system of record, so a human decision is not recorded until it exists **as a comment on the affected issue**. `factory/touchlog/touchlog.jsonl` is measurement/KPI evidence (how many touches, of what class, costing how long) and is never the decision itself. Every bell produces both: one comment, one touch-log line.
+GitHub is the system of record, so a human decision is not recorded until it exists **as a comment on the affected issue**. `factory/touchlog/touchlog.jsonl` is measurement/KPI evidence (how many touches, of what class, costing how long) and is never the decision itself. Every bell produces both: one comment, one touch-log line. Continuation may consume an authoritative acceptance comment and advance Project state only after its canonical touch evidence is durably appended and read back. The log does not decide; it is required evidence for consuming the decision. If append or verification fails, the decision remains unconsumed and the Project remains `project:awaiting-acceptance`.
 
 ### 5.1 Plan approval (`project:awaiting-ready → project:active`)
 
@@ -327,6 +327,13 @@ follow-up: <issue link for each failed criterion, or "none">
 
 All pass → `project:accepted`. Any fail → `project:active`, with a new story or re-planning input linked from `follow-up`. Acceptance happens once per project (`architecture-v2.1.md` §2.3).
 
+**Decision identity and replay.** Acceptance identity is the normalized tuple of
+verdict, complete criterion-key-to-pass/fail checklist, and canonical issue
+references on the `follow-up:` line. Comment IDs, timestamps, whitespace, and
+incidental issue numbers in prose do not create novelty. An unchanged tuple is
+replay/relay and writes no second touch; a changed verdict, checklist result, or
+canonical follow-up is a new human decision and receives a distinct touch.
+
 ### 5.4 Story-level bells
 
 `poison-rescue` (§4.3.6), `scope-decision` (§4.2), `hazard-ack`, `cutover-approval`, and `sampling` are recorded as comments on the affected story or PR, each stating the decision and the actor, and each accompanied by exactly one touch-log line.
@@ -337,7 +344,7 @@ All pass → `project:accepted`. Any fail → `project:active`, with a new story
 
 Every human bell is logged to `factory/touchlog/touchlog.jsonl` via `factory/touchlog/append.py`. Classifications are exactly `decision | audit | rescue | relay`. Bell types: `plan-approval`, `hazard-ack`, `poison-rescue`, `scope-decision`, `cutover-approval`, `acceptance`, `sampling`. This list is canonical and extends the six named in `implementation-plan-v1.md` core rule 6: `scope-decision` was added because §4.2 requires a bell for the `story:blocked:scope` decision and no existing type covered it. See `factory/touchlog/README.md` for the JSONL schema and helper usage. Only `relay` should trend to zero; other touches are expected.
 
-The touch log measures bells; §5 records what was decided. A bell with a touch-log line and no comment is an incomplete record, and so is a comment with no touch-log line.
+The touch log measures bells; §5 records what was decided. A bell with a touch-log line and no comment is an incomplete record, and so is a comment with no touch-log line. For acceptance, the latter remains an unconsumed decision at the bell until continuation can append and verify the missing measurement receipt.
 
 ---
 
