@@ -90,7 +90,30 @@ Text fallback."""
     def test_project_digest_requires_plain_language_and_two_diagrams(self):
         value = {"altitude": "project", "adr": {}, "stories": [],
                  "expected_bells": 2, "digest": "plan"}
-        with self.assertRaisesRegex(contract.ContractError, "plain-language"):
+        with self.assertRaisesRegex(contract.ContractError, "Plan in plain language"):
+            contract.validate_output(contract.Altitude.PROJECT, value)
+
+    def test_project_digest_requires_text_after_each_diagram(self):
+        for missing, digest in (
+            ("How the plan works", self.DIGEST.replace(
+                "\n\nText fallback.\n\n## Story dependencies",
+                "\n\n## Story dependencies")),
+            ("Story dependencies", self.DIGEST.rsplit("\n\nText fallback.", 1)[0]),
+        ):
+            value = {"altitude": "project", "adr": {}, "stories": [],
+                     "expected_bells": 2, "digest": digest}
+            with self.subTest(section=missing), self.assertRaisesRegex(
+                    contract.ContractError, f"{missing!r} lacks a textual fallback"):
+                contract.validate_output(contract.Altitude.PROJECT, value)
+
+    def test_code_block_or_following_section_text_is_not_a_fallback(self):
+        digest = self.DIGEST.replace(
+            "Text fallback.\n\n## Story dependencies",
+            "```text\nnot prose\n```\n\n## Story dependencies")
+        value = {"altitude": "project", "adr": {}, "stories": [],
+                 "expected_bells": 2, "digest": digest}
+        with self.assertRaisesRegex(contract.ContractError,
+                                    "How the plan works.*textual fallback"):
             contract.validate_output(contract.Altitude.PROJECT, value)
 
 
