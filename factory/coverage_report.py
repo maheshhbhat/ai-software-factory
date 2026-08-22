@@ -94,6 +94,7 @@ ACCEPTANCE = {
     "acceptance/test_acceptance_touch.py",
     "acceptance/test_acceptance_touch_live.py",
     "acceptance/test_acceptance_touch_requirements.py",
+    "acceptance/test_product_definition.py",
 }
 LAYERS = ("unit", "integration", "acceptance")
 
