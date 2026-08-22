@@ -258,6 +258,11 @@ def review_targets(pulls: list[dict], issues: dict[int, dict],
                    comments: dict[int, list[dict]]) -> list[review_route.ReviewTarget]:
     targets = []
     for pull in sorted(pulls, key=lambda x: x.get("number", 0)):
+        # This repository can carry pull requests unrelated to the factory.
+        # Absence of a Story declaration means "not ours"; a PR that does
+        # attempt the declaration remains subject to the strict parser below.
+        if "Story:" not in (pull.get("body") or ""):
+            continue
         try:
             number = review_route.story_number(pull)
             value = review_route.target(pull, issues.get(number, {}), comments.get(number, []))

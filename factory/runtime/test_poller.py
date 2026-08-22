@@ -41,6 +41,11 @@ Selected (claimed, in order): #64
 
 
 class TestParsing(unittest.TestCase):
+    def test_review_routing_ignores_an_unrelated_pull_request(self):
+        unrelated = {"number": 25, "body": "ordinary repository work",
+                     "state": "open", "draft": False}
+        self.assertEqual([], poller.review_targets([unrelated], {}, {}))
+
     def test_phase4_review_pass_reads_the_live_substrate(self):
         """The production pass imports its dispatcher dependency itself."""
         with mock.patch.object(poller.dispatcher, "fetch_issues", return_value={}), \
