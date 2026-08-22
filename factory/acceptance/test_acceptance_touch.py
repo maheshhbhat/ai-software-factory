@@ -100,6 +100,26 @@ class AcceptanceTouchTests(unittest.TestCase):
         self.assertLess(apply_body.index("ensure_acceptance_touch"),
                         apply_body.index('method="PATCH"'))
 
+    def test_committed_phase4_and_repair_bell_backfills_are_exact(self):
+        path = HERE.parent / "touchlog" / "touchlog.jsonl"
+        rows = [json.loads(line) for line in path.read_text().splitlines() if line]
+        phase4 = [row for row in rows
+                  if row.get("project") == "#212" and row.get("bell_type") == "acceptance"]
+        self.assertEqual(len(phase4), 3)
+        self.assertEqual({row["classification"] for row in phase4}, {"decision"})
+        self.assertEqual({row["timestamp"] for row in phase4}, {
+            "2026-08-22T15:51:12Z", "2026-08-22T17:31:01Z", "2026-08-22T17:42:13Z"})
+        self.assertEqual(len({row["note"].split(";", 1)[0] for row in phase4}), 3)
+        for reference in ("#289", "#292", "16 of 16"):
+            self.assertEqual(sum(reference in row["note"] for row in phase4), 1)
+
+        plan = [row for row in rows if row.get("project") == "#294"
+                and row.get("bell_type") == "plan-approval"]
+        hazard = [row for row in rows if row.get("project") == "#294"
+                  and row.get("story") == "#295" and row.get("bell_type") == "hazard-ack"]
+        self.assertEqual(len(plan), 1)
+        self.assertEqual(len(hazard), 1)
+
 
 if __name__ == "__main__":
     unittest.main()
