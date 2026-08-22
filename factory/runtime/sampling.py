@@ -1,7 +1,12 @@
 """Replay-safe post-merge 1-in-3 sampling and audit decisions."""
 from __future__ import annotations
+import json
+import os
+import pathlib
 import re
 import secrets
+import subprocess
+import sys
 from dataclasses import dataclass
 import runlog
 
@@ -81,6 +86,47 @@ def audit_issue(selection: Selection) -> dict:
                      f"{audit_marker(selection.pull_request, selection.head)}"),
             "labels": ["type:audit"]}
 
+def touchlog_path() -> pathlib.Path:
+    configured = os.environ.get("FACTORY_TOUCHLOG_FILE", "").strip()
+    if configured:
+        return pathlib.Path(configured)
+    return pathlib.Path(__file__).resolve().parents[1] / "touchlog" / "touchlog.jsonl"
+
+def touch_note(selection: Selection, audit_number: int) -> str:
+    return (f"Sampling audit #{audit_number} decided for PR #{selection.pull_request} "
+            f"at {selection.head}.")
+
+def touch_recorded(path: pathlib.Path, note: str) -> bool:
+    if not path.exists():
+        return False
+    try:
+        values = [json.loads(line) for line in path.read_text().splitlines() if line]
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SamplingError("canonical touch log is unreadable") from exc
+    matches = [value for value in values
+               if value.get("bell_type") == "sampling"
+               and value.get("classification") == "audit"
+               and value.get("note") == note]
+    if len(matches) > 1:
+        raise SamplingError("duplicate canonical audit touches fail closed")
+    return bool(matches)
+
+def append_touch(project: int, story: int, selection: Selection,
+                 audit_number: int, verdict: AuditDecision) -> None:
+    path = touchlog_path()
+    note = touch_note(selection, audit_number)
+    if touch_recorded(path, note):
+        return
+    actor = verdict.actor if verdict.actor.startswith("@") else f"@{verdict.actor}"
+    script = pathlib.Path(__file__).resolve().parents[1] / "touchlog" / "append.py"
+    result = subprocess.run(
+        [sys.executable, str(script), "--project", f"#{project}", "--story", f"#{story}",
+         "--bell-type", "sampling", "--classification", "audit",
+         "--seconds-spent", str(verdict.seconds_spent), "--actor", actor,
+         "--note", note, "--file", str(path)], capture_output=True, text=True)
+    if result.returncode:
+        raise SamplingError(f"canonical touch append failed: {(result.stderr or result.stdout)[:300]}")
+
 def corrective_story(project: int, story: int, selection: Selection,
                      audit: AuditDecision, scope: str = "_No response_") -> dict:
     bullets = "\n".join(f"- {x}" for x in audit.findings)
@@ -149,19 +195,23 @@ def process(client, pull: dict, *, draw=None) -> str:
     touch = touch_marker(pr, chosen.head)
     touches = [x for x in comments if touch in (x.get("body") or "")]
     if len(touches) > 1: raise SamplingError("duplicate audit touches fail closed")
+    story_match = re.search(r"(?m)^Story: #(\d+)$", pull.get("body") or "")
+    if not story_match: raise SamplingError("canonical Story link unavailable")
+    story_number = int(story_match.group(1))
+    story = client.api(f"/issues/{story_number}")
+    project_match = re.search(r"(?ms)^### Project\s*$\n\s*#(\d+)\s*$", story.get("body") or "")
+    if not project_match: raise SamplingError("canonical Project link unavailable")
+    project_number = int(project_match.group(1))
+    append_touch(project_number, story_number, chosen, audit["number"], verdict)
     if touches: return verdict.verdict
     if verdict.verdict == "findings":
         corrections = [x for x in issues
                        if correction_marker(pr, chosen.head) in (x.get("body") or "")]
         if len(corrections) > 1: raise SamplingError("duplicate corrective Stories fail closed")
         if not corrections:
-            story_match = re.search(r"(?m)^Story: #(\d+)$", pull.get("body") or "")
-            if not story_match: raise SamplingError("canonical Story link unavailable")
-            story = client.api(f"/issues/{story_match.group(1)}")
-            project_match = re.search(r"(?m)^#(\d+)$", story.get("body") or "")
             scope_match = re.search(r"(?ms)^### Scope\s*$\n(.*?)(?=^### |\Z)", story.get("body") or "")
-            if not project_match or not scope_match: raise SamplingError("corrective bounds unavailable")
-            payload = corrective_story(int(project_match.group(1)), int(story_match.group(1)),
+            if not scope_match: raise SamplingError("corrective bounds unavailable")
+            payload = corrective_story(project_number, story_number,
                                        chosen, verdict, scope_match.group(1).strip())
             payload["labels"] = ["type:story", "story:ready", "phase:build"]
             client.api("/issues", method="POST", value=payload)

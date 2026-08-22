@@ -1,6 +1,7 @@
 import importlib.util
 import json
 import pathlib
+import sys
 import tempfile
 import unittest
 
@@ -10,8 +11,19 @@ SPEC = importlib.util.spec_from_file_location("phase4_requirement_coverage",
                                               HERE / "requirement_coverage.py")
 coverage = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(coverage)
+sys.path.insert(0, str(ROOT / "factory" / "runtime"))
+import review_link
 
 class Phase4RequirementCoverageTests(unittest.TestCase):
+    def test_claimed_story_routes_through_linked_pr_before_merge(self):
+        merged = {"number": 50, "state": "closed", "merged_at": "now",
+                  "body": "Story: #218\n", "head": {"sha": "a" * 40}}
+        claimed = {"number": 218, "labels": [{"name": "story:claimed"}]}
+        first = review_link.reconcile(claimed, [merged])
+        self.assertEqual(first.action, "story:in-review")
+        reviewed = {"number": 218, "labels": [{"name": first.action}]}
+        self.assertEqual(review_link.reconcile(reviewed, [merged]).action, "story:merged")
+
     def test_every_criterion_has_named_hermetic_evidence(self):
         report = coverage.build_phase4(pathlib.Path("/definitely/missing"))
         self.assertEqual(set(coverage.PHASE4), {f"P4-{n:02d}" for n in range(1, 17)})
