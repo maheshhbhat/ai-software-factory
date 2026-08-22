@@ -259,9 +259,11 @@ def review_targets(pulls: list[dict], issues: dict[int, dict],
     targets = []
     for pull in sorted(pulls, key=lambda x: x.get("number", 0)):
         # This repository can carry pull requests unrelated to the factory.
-        # Absence of a Story declaration means "not ours"; a PR that does
-        # attempt the declaration remains subject to the strict parser below.
-        if "Story:" not in (pull.get("body") or ""):
+        # Zero canonical links means "not routable" and cannot advance. One is
+        # factory work. More than one remains an ambiguity that fails closed in
+        # story_number below.
+        if not review_route.LINK.findall(
+                (pull.get("body") or "").replace("\r\n", "\n")):
             continue
         try:
             number = review_route.story_number(pull)

@@ -42,7 +42,8 @@ Selected (claimed, in order): #64
 
 class TestParsing(unittest.TestCase):
     def test_review_routing_ignores_an_unrelated_pull_request(self):
-        unrelated = {"number": 25, "body": "ordinary repository work",
+        unrelated = {"number": 25,
+                     "body": "ordinary repository work mentioning Story: in prose",
                      "state": "open", "draft": False}
         self.assertEqual([], poller.review_targets([unrelated], {}, {}))
 
