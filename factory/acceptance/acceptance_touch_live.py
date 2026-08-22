@@ -176,8 +176,10 @@ def consume(client, secret: str, project: int) -> dict:
     runtime = OUT / "runtime.jsonl"
     OUT.mkdir(parents=True, exist_ok=True)
     before = client.issue(project)
-    if "project:awaiting-acceptance" not in labels(before):
-        raise RuntimeError("fixture is not awaiting the owner's acceptance")
+    before_labels = labels(before)
+    recovering = "project:accepted" in before_labels
+    if not recovering and "project:awaiting-acceptance" not in before_labels:
+        raise RuntimeError("fixture is neither awaiting acceptance nor recovering accepted evidence")
     comments = client.pages(f"/issues/{project}/comments")
     decisions = continuation.owner_decisions(comments, continuation.ACCEPTANCE_HEADING)
     if not decisions:
@@ -188,32 +190,45 @@ def consume(client, secret: str, project: int) -> dict:
         os.environ.update({"FACTORY_TOUCHLOG_FILE": str(touch),
                            "FACTORY_RUNTIME_LOG": str(runtime),
                            "FACTORY_RUNTIME_LOG_STDERR": "0"})
-        first = continuation.run(REPO, secret, apply=True)
+        first = [] if recovering else continuation.run(REPO, secret, apply=True)
         after_first = records(touch)
         second = continuation.run(REPO, secret, apply=True)
         after_replay = records(touch)
+        target_first = ([item for item in first if item.number == project]
+                        if not recovering else ["reconstructed-from-timeline"])
+        target_replay = [item for item in second if item.number == project]
         runlog.event("acceptance_touch.live", project=project,
                      fingerprint=fingerprint, first_transitions=len(first),
-                     replay_transitions=len(second), touch_entries=len(after_replay))
+                     target_first_transitions=len(target_first),
+                     replay_transitions=len(second),
+                     target_replay_transitions=len(target_replay),
+                     touch_entries=len(after_replay), recovering=recovering)
     finally:
         os.environ.clear(); os.environ.update(old_env)
     after = client.issue(project)
     matching = [row for row in after_replay
                 if row.get("project") == f"#{project}"
                 and f"acceptance-fingerprint:{fingerprint}" in row.get("note", "")]
-    passed = ("project:accepted" in labels(after) and len(first) == 1
-              and len(second) == 0 and len(after_first) == 1
-              and after_first == after_replay and len(matching) == 1)
+    timeline = client.pages(f"/issues/{project}/timeline")
+    accepted_events = [item for item in timeline
+                       if item.get("event") == "labeled"
+                       and (item.get("label") or {}).get("name") == "project:accepted"]
+    passed = ("project:accepted" in labels(after) and len(target_first) == 1
+              and len(target_replay) == 0 and len(after_first) == 1
+              and after_first == after_replay and len(matching) == 1
+              and (not recovering or bool(accepted_events)))
     if not passed:
         raise RuntimeError("live acceptance/touch/replay invariant failed")
-    timeline = client.pages(f"/issues/{project}/timeline")
     evidence = {
         "criteria": {key: "pass" for key in ("AT-03", "AT-05", "AT-06", "AT-07")},
         "fixture": {"project": project, "before": "project:awaiting-acceptance",
                     "after": "project:accepted", "cleanup": "accepted and closed"},
         "decision": {"comment_url": decisions[-1].get("html_url"),
                      "fingerprint": fingerprint, "canonical_payload": json.loads(payload)},
-        "touch": matching[0], "replay": {"new_entries": 0, "transitions": 0},
+        "touch": matching[0],
+        "transition": {"target_transitions": 1,
+                       "recovered_after_harness_assertion": recovering},
+        "replay": {"new_entries": 0, "transitions": 0},
         "runlog": "runs/acceptance-touch/runtime.jsonl",
         "timeline": [{"event": item.get("event"),
                       "label": (item.get("label") or {}).get("name"),

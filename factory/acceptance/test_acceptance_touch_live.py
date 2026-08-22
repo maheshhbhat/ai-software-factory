@@ -43,7 +43,7 @@ class AcceptanceTouchLiveTests(unittest.TestCase):
                 state["accepted"] = True
                 touch.write_text(json.dumps({"project": "#310", "bell_type": "acceptance",
                     "note": f"acceptance-fingerprint:{fingerprint}"}) + "\n")
-                return [object()]
+                return [mock.Mock(number=298), mock.Mock(number=310)]
 
             with mock.patch.object(live.continuation, "run", side_effect=first_run):
                 evidence = live.consume(Client(), "token", 310)
