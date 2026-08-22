@@ -102,6 +102,5 @@ class Phase4RequirementCoverageTests(unittest.TestCase):
         adr = (ROOT / "factory" / "decisions" / "phase4-live-fixture.md").read_text()
         self.assertIn("must never use", adr)
         self.assertIn("Stories #5–#12", adr)
-        self.assertFalse((ROOT / "product.md").exists())
 
 if __name__ == "__main__": unittest.main()

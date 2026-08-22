@@ -17,19 +17,22 @@ class Result:
 
 
 class Client(FakeStore):
-    def __init__(self):
+    def __init__(self, product_paths=None, product_text="# Product"):
         super().__init__([{"number": 1, "labels": ["type:roadmap-commitment"],
                            "body": "Retirement direction"}])
         self.repo, self.token = "o/r", "token"
+        self.product_paths = (["product.md"] if product_paths is None else product_paths)
+        self.product_text = product_text
 
     def _api(self, path, method="GET", payload=None):
         if path == "":
             return {"default_branch": "main"}
         if path.startswith("/git/trees/"):
-            return {"tree": [{"path": "product.md", "type": "blob"},
-                              {"path": "docs/decisions/0001.md", "type": "blob"}]}
+            return {"tree": ([{"path": item, "type": "blob"}
+                              for item in self.product_paths] +
+                             [{"path": "docs/decisions/0001.md", "type": "blob"}])}
         if path.startswith("/contents/"):
-            text = "# Product" if path.endswith("product.md") else "# ADR"
+            text = self.product_text if path.lower().endswith("product.md") else "# ADR"
             return {"content": base64.b64encode(text.encode()).decode()}
         raise AssertionError(path)
 
@@ -42,6 +45,7 @@ class ProjectClient(Client):
         FakeStore.__init__(self, [project_issue()])
         self.issues[0]["labels"] = ["type:project", "project:planning"]
         self.repo, self.token = "o/r", "token"
+        self.product_paths, self.product_text = ["product.md"], "# Product"
 
     def _pages(self, path):
         if path.endswith("/timeline"):
@@ -50,6 +54,32 @@ class ProjectClient(Client):
 
 
 class InvocationTests(unittest.TestCase):
+    def test_product_preflight_missing_duplicate_empty_and_exactly_one(self):
+        cases = (
+            ("missing", Client(product_paths=[]), invoke.InvocationError,
+             "product.md missing or ambiguous"),
+            ("duplicate-case-insensitive",
+             Client(product_paths=["product.md", "Product.md"]),
+             invoke.InvocationError, "product.md missing or ambiguous"),
+            ("empty", Client(product_text=""), contract.ContractError,
+             "product.md must be readable and non-empty"),
+        )
+        for name, client, error, message in cases:
+            runner = mock.Mock()
+            with self.subTest(name=name), \
+                 mock.patch.object(invoke.artifacts, "GitHubStore", return_value=client), \
+                 self.assertRaisesRegex(error, message):
+                invoke.execute("o/r", 1, "token", 30, 2.5, runner=runner)
+            self.assertEqual(1, len(client.issues))
+            self.assertEqual({}, client.comments)
+            runner.assert_not_called()
+
+        valid = Client(product_paths=["PRODUCT.md"], product_text="# Human product")
+        product, adrs, repository = invoke.read_repository(valid)
+        self.assertEqual("# Human product", product)
+        self.assertEqual(["docs/decisions/0001.md"], [item["path"] for item in adrs])
+        self.assertIn("PRODUCT.md", repository["files"])
+
     def test_campaign_executes_headlessly_then_reads_back(self):
         client = Client()
         runner = mock.Mock(return_value=Result(stdout=json.dumps(campaign_output())))
