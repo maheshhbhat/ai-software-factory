@@ -12,7 +12,9 @@ be mistaken for one".
 
 from __future__ import annotations
 
+import json
 import unittest
+from unittest import mock
 
 import continuation as ct
 from continuation import Reason as R
@@ -231,6 +233,19 @@ class TestAcceptance(unittest.TestCase):
 
 
 class TestIdempotencyAndAuthority(unittest.TestCase):
+    def test_touch_failure_allows_fresh_read_but_prevents_github_write(self):
+        p = project(state=ct.AWAITING_ACCEPTANCE)
+        outcome = ct.evaluate_project(p, [acceptance()])
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = json.dumps(p).encode()
+        with mock.patch.object(ct, "ensure_acceptance_touch",
+                               side_effect=ct.TouchEvidenceError("disk full")), \
+             mock.patch("urllib.request.urlopen", return_value=response) as github:
+            with self.assertRaisesRegex(ct.TouchEvidenceError, "disk full"):
+                ct.apply_outcome("owner/repo", p, outcome, "token")
+        self.assertEqual(github.call_count, 1)
+        self.assertEqual(github.call_args.args[0].get_method(), "GET")
+
     def test_advanced_project_is_no_longer_at_a_bell(self):
         """Consumption needs no cursor: the transition itself removes the project
         from the pass's view, so a replay sees nothing to do."""
@@ -241,24 +256,11 @@ class TestIdempotencyAndAuthority(unittest.TestCase):
         p, c = project(), [approval()]
         self.assertEqual(ct.evaluate_project(p, c), ct.evaluate_project(p, c))
 
-    def test_module_persists_no_local_state(self):
-        """No file, cache, or cursor may decide whether a decision was consumed —
-        the lifecycle label alone does (§9.12).
-
-        Checks for local *writes* specifically. `json.dumps` for an API payload
-        is fine; opening a file for writing, or a database, is not.
-        """
-        import re as _re
-
-        with open(ct.__file__, encoding="utf-8") as handle:
-            source = handle.read()
-        body = source.split('"""', 2)[-1]
-        # Word-bounded so `urlopen(` and `json.dumps(` — legitimate API calls —
-        # are not mistaken for local persistence.
-        for pattern in (r"\bopen\s*\(", r"\bjson\.dump\s*\(", r"\bsqlite3?\b",
-                        r"\bpickle\b", r"\bshelve\b", r"\bPath\s*\("):
-            self.assertIsNone(_re.search(pattern, body),
-                              f"continuation must not persist local state ({pattern})")
+    def test_acceptance_evidence_is_not_a_decision_cursor(self):
+        """GitHub remains authoritative; the file is only a verified receipt."""
+        outcome = ct.evaluate_project(project(state=ct.AWAITING_ACCEPTANCE), [acceptance()])
+        self.assertEqual(outcome.action, ct.ACCEPTED)
+        self.assertIsNotNone(outcome.decision)
 
     def test_continuation_line_is_worker_neutral(self):
         line = ct.continuation_line(ct.Outcome(72, ct.ACTIVE, R.CONTINUED))

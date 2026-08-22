@@ -44,17 +44,43 @@ This log is **measurement evidence only**. The decision itself is recorded as a 
 python factory/touchlog/append.py \
   --project "#12" --bell-type plan-approval --classification decision \
   --seconds-spent 180 [--story "#15"] [--note "approved criteria"] [--actor "@you"] \
-  [--file factory/touchlog/touchlog.jsonl] [--timestamp 2026-08-19T14:03:00Z]
+  [--file factory/touchlog/touchlog.jsonl] [--timestamp 2026-08-19T14:03:00Z] \
+  [--unique-note-marker "stable-idempotency-key"]
 ```
 
 * Validates enums, rejects `seconds_spent < 0`, rejects any `--timestamp` that is not ISO-8601 UTC, and ensures the existing file is valid JSONL before appending.
 * No dependency on shell `flock(1)`. Uses Python stdlib advisory lock (`fcntl` on Unix, `msvcrt` on Windows) where available; otherwise relies on `O_APPEND` atomicity for small writes.
-* Exactly one line per invocation; never rewrites the file.
+* Without `--unique-note-marker`, exactly one line per successful invocation.
+  With it, validation, marker lookup, and append happen under one file lock:
+  zero matches appends, one match is a replay-safe no-op, and multiple matches
+  fail closed. The marker must also appear in `--note` so read-back can verify it.
+  The helper never rewrites the file.
 
 ## Invariants
 
 * Append-only: no edits, no deletions. History is `git log -- factory/touchlog/touchlog.jsonl`.
 * One JSON object per line; `ensure_ascii=False`, separators `(",", ":")` (canonical via helper, but any valid JSON that parses is accepted).
+
+## Temporary Project #294 AT-07 sequencing limitation
+
+Owner approval is recorded on Project #294. This limitation exists only for the
+merge ordering between Stories #295 and #296:
+
+* **Why the live proof is temporarily unreachable:** the controlled GitHub test
+  must exercise the acceptance-touch implementation from merged `main`; #295 is
+  the change that introduces that implementation, so the proof cannot run
+  against merged code before #295 lands.
+* **Substitute evidence for #295:** hermetic acceptance tests exercise the real
+  `append.py` subprocess against isolated files, including exactly-once replay,
+  changed decisions, corrupt and duplicate evidence, append/read-back failures,
+  trusted-author handling, and state-transition ordering. The committed ledger
+  regression also verifies the required historical entries.
+* **Residual risk:** repository permissions, GitHub comment parsing, and live
+  Project label mutation may behave differently from the hermetic fixtures.
+* **Bound and expiry:** dependent Story #296 must run the controlled live GitHub
+  acceptance transition and replay from merged `main`. Project #294 cannot be
+  accepted, and Phase 5 cannot start, until that evidence is committed and #296
+  is merged. This limitation expires when #296 supplies that proof.
 
 ## Phase 2 Closeout (Project #109) — the touches, and one relay
 

@@ -50,6 +50,8 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument("--actor", default="", help='Actor handle, e.g. "@alice"')
     p.add_argument("--timestamp", default=None, help="ISO-8601 UTC timestamp; defaults to now")
     p.add_argument("--file", dest="file", default=str(DEFAULT_FILE), help="Path to touchlog.jsonl")
+    p.add_argument("--unique-note-marker", default=None,
+                   help="Under the append lock, no-op if exactly one note contains this marker; fail on duplicates")
     return p.parse_args(argv)
 
 
@@ -178,25 +180,33 @@ def main(argv: list[str]) -> int:
     path = Path(args.file)
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Ensure existing file is valid JSONL before appending (fail fast on corruption)
-    if path.exists() and path.stat().st_size > 0:
-        try:
-            with path.open("r", encoding="utf-8") as rf:
-                for i, raw in enumerate(rf, start=1):
+    # Validate and deduplicate while holding the same lock as the append. A
+    # separate check-then-append lets two continuation processes both observe
+    # absence and write the same receipt.
+    try:
+        with path.open("a+", encoding="utf-8", newline="\n") as f:
+            _lock_exclusive(f)
+            try:
+                f.seek(0)
+                existing = []
+                for i, raw in enumerate(f, start=1):
                     if raw.strip() == "":
                         print(f"error: existing file has empty line at {i}", file=sys.stderr)
                         return 1
-                    json.loads(raw)
-        except json.JSONDecodeError as e:
-            print(f"error: existing file is not valid JSONL: {e}", file=sys.stderr)
-            return 1
-
-    # Atomic append: open in 'a' (O_APPEND) so each write appends at EOF even under concurrency.
-    # Lock where possible, but O_APPEND guarantees the write itself is not interleaved for small lines.
-    try:
-        with path.open("a", encoding="utf-8", newline="\n") as f:
-            _lock_exclusive(f)
-            try:
+                    try:
+                        existing.append(json.loads(raw))
+                    except json.JSONDecodeError as e:
+                        print(f"error: existing file is not valid JSONL: {e}", file=sys.stderr)
+                        return 1
+                if args.unique_note_marker:
+                    matches = [item for item in existing
+                               if args.unique_note_marker in (item.get("note") or "")]
+                    if len(matches) > 1:
+                        print("error: duplicate unique note marker", file=sys.stderr)
+                        return 1
+                    if matches:
+                        return 0
+                f.seek(0, os.SEEK_END)
                 f.write(line + "\n")
                 f.flush()
                 os.fsync(f.fileno())

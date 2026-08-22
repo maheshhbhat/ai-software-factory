@@ -42,6 +42,10 @@ from __future__ import annotations
 import os
 import re
 import sys
+import hashlib
+import json
+import pathlib
+import subprocess
 from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "gates"))
@@ -62,6 +66,11 @@ ACCEPTANCE_HEADING = re.compile(r"^\s*##\s+Acceptance\s*$", re.M)
 DECISION_RE = re.compile(r"^decision:\s*(?P<value>.+?)\s*$", re.M | re.I)
 RESULT_RE = re.compile(r"^result:\s*(?P<value>pass|fail)\s*$", re.M | re.I)
 CRITERION_RE = re.compile(r"^- \[[ xX]\] .+$", re.M)
+FOLLOW_UP_RE = re.compile(r"^follow-up:\s*(?P<value>.+?)\s*$", re.M | re.I)
+ACTOR_RE = re.compile(r"^actor:\s*@?(?P<value>[A-Za-z0-9-]+)\s*$", re.M | re.I)
+SECONDS_RE = re.compile(r"^seconds-spent:\s*(?P<value>[0-9]+)\s*$", re.M | re.I)
+STATUS_RE = re.compile(r"\s(?:—|-)\s+(pass|fail)\b", re.I)
+KEY_RE = re.compile(r"\b([A-Z][A-Z0-9]*-[0-9]+)\b")
 
 
 class Reason:
@@ -82,11 +91,13 @@ class Reason:
 class Outcome:
     """What a continuation pass decided about one project."""
 
-    def __init__(self, number: int, action: str | None, reason: str, detail: str = ""):
+    def __init__(self, number: int, action: str | None, reason: str, detail: str = "",
+                 decision: dict | None = None):
         self.number = number
         self.action = action          # target lifecycle label, or None
         self.reason = reason
         self.detail = detail
+        self.decision = decision
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         return f"Outcome(#{self.number}, {self.action}, {self.reason})"
@@ -180,6 +191,29 @@ def classify_acceptance(comment: dict) -> tuple[str | None, str | None]:
     return match.group("value").strip().lower(), None
 
 
+def acceptance_identity(comment: dict) -> tuple[str, str]:
+    """Return the normalized acceptance fingerprint and its canonical payload."""
+    body = (comment.get("body") or "").replace("\r\n", "\n")
+    verdict, error = classify_acceptance(comment)
+    if error:
+        raise ValueError(error)
+    checklist = {}
+    for line in body.splitlines():
+        if not line.lstrip().startswith("-"):
+            continue
+        statuses = STATUS_RE.findall(line)
+        if not statuses:
+            continue
+        key_match = KEY_RE.search(line)
+        key = key_match.group(1) if key_match else normalize(line.rsplit("—", 1)[0])
+        checklist[key] = statuses[-1].lower()
+    follow = FOLLOW_UP_RE.search(body)
+    references = sorted(set(re.findall(r"#[1-9][0-9]*", follow.group("value")))) if follow else []
+    payload = json.dumps({"result": verdict, "criteria": sorted(checklist.items()),
+                          "follow_up": references}, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode()).hexdigest(), payload
+
+
 def owner_decisions(comments: list[dict], heading: re.Pattern) -> list[dict]:
     """Owner-authored comments carrying the given §5 heading.
 
@@ -264,9 +298,73 @@ def evaluate_project(project: dict, comments: list[dict]) -> Outcome:
                                                 else " (no criteria quoted — binding unanchored)"))
 
     if verdict == "pass":
-        return Outcome(number, ACCEPTED, Reason.CONTINUED, "owner acceptance, all criteria pass")
+        return Outcome(number, ACCEPTED, Reason.CONTINUED,
+                       "owner acceptance, all criteria pass", comment)
     return Outcome(number, ACTIVE, Reason.CONTINUED,
-                   "owner acceptance recorded a failure; §5.3 returns the project to active")
+                   "owner acceptance recorded a failure; §5.3 returns the project to active",
+                   comment)
+
+
+class TouchEvidenceError(RuntimeError):
+    pass
+
+
+def touchlog_path() -> pathlib.Path:
+    configured = os.environ.get("FACTORY_TOUCHLOG_FILE", "").strip()
+    return (pathlib.Path(configured) if configured else
+            pathlib.Path(__file__).resolve().parents[1] / "touchlog" / "touchlog.jsonl")
+
+
+def ensure_acceptance_touch(project: int, comment: dict, *, runner=subprocess.run) -> str:
+    """Durably append and read back one receipt before decision consumption."""
+    fingerprint, _ = acceptance_identity(comment)
+    marker = f"acceptance-fingerprint:{fingerprint}"
+    path = touchlog_path()
+
+    def records() -> list[dict]:
+        if not path.exists():
+            return []
+        try:
+            return [json.loads(line) for line in path.read_text().splitlines() if line]
+        except (OSError, json.JSONDecodeError) as exc:
+            raise TouchEvidenceError("canonical touch evidence is unreadable") from exc
+
+    found = [entry for entry in records()
+             if entry.get("project") == f"#{project}"
+             and entry.get("bell_type") == "acceptance"
+             and marker in (entry.get("note") or "")]
+    if len(found) > 1:
+        raise TouchEvidenceError("duplicate canonical acceptance evidence")
+    if found:
+        return fingerprint
+
+    body = comment.get("body") or ""
+    actor_match = ACTOR_RE.search(body)
+    actor = (actor_match.group("value") if actor_match else
+             ((comment.get("user") or {}).get("login") or "unknown"))
+    seconds_match = SECONDS_RE.search(body)
+    seconds = int(seconds_match.group("value")) if seconds_match else 0
+    note = f"{marker}; GitHub acceptance decision consumed"
+    if not seconds_match:
+        note += "; time unavailable, recorded as 0"
+    script = pathlib.Path(__file__).resolve().parents[1] / "touchlog" / "append.py"
+    command = [sys.executable, str(script), "--project", f"#{project}",
+               "--bell-type", "acceptance", "--classification", "decision",
+               "--seconds-spent", str(seconds), "--actor", f"@{actor}",
+               "--note", note, "--file", str(path),
+               "--unique-note-marker", marker]
+    created = comment.get("created_at") or comment.get("createdAt")
+    if created:
+        command.extend(["--timestamp", created])
+    result = runner(command, capture_output=True, text=True)
+    if result.returncode:
+        raise TouchEvidenceError(
+            f"canonical acceptance append failed: {(result.stderr or result.stdout)[:300]}")
+    verified = [entry for entry in records()
+                if entry.get("project") == f"#{project}" and marker in (entry.get("note") or "")]
+    if len(verified) != 1:
+        raise TouchEvidenceError("canonical acceptance evidence read-back failed")
+    return fingerprint
 
 
 def evaluate_all(projects: dict, comments_by_project: dict) -> list[Outcome]:
@@ -394,6 +492,13 @@ def apply_outcome(repo: str, project: dict, outcome: Outcome, token: str) -> tup
     current = lifecycle_of(fresh)
     if current not in (AWAITING_READY, AWAITING_ACCEPTANCE):
         return False, f"no longer at a bell (now {current}) — another pass consumed it"
+
+    # Freshness precedes evidence so a losing stale pass cannot append a receipt
+    # for a decision it never consumes. Evidence still precedes the state write.
+    if current == AWAITING_ACCEPTANCE:
+        if outcome.decision is None:
+            raise TouchEvidenceError("acceptance outcome has no authoritative decision")
+        ensure_acceptance_touch(number, outcome.decision)
 
     labels = sorted((labels_of(fresh) - {AWAITING_READY, AWAITING_ACCEPTANCE})
                     | {outcome.action})

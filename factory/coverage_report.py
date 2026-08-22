@@ -72,7 +72,7 @@ FACTORY = ROOT / "factory"
 
 # Suites in fixed order. Never derived from a glob: a new directory should be
 # added here deliberately, so that "what we measure" is a decision on the record.
-SUITES = ("gates", "dispatcher", "runtime", "acceptance", "agents/planning",
+SUITES = ("gates", "dispatcher", "runtime", "touchlog", "acceptance", "agents/planning",
           "agents/worker", "agents/review")
 
 # Layer membership, by test file. Anything not named here is unit.
@@ -91,6 +91,7 @@ ACCEPTANCE = {
     "acceptance/test_phase4_requirement_coverage.py",
     "acceptance/test_phase4_live.py",
     "acceptance/test_coverage_report.py",
+    "acceptance/test_acceptance_touch.py",
 }
 LAYERS = ("unit", "integration", "acceptance")
 
