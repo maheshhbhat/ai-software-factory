@@ -35,6 +35,19 @@ def issue(number, *names, assoc="OWNER", title="t", state="open"):
 
 
 class TestWhatCounts(unittest.TestCase):
+    def test_open_sampling_audit_is_queued_with_consumable_format(self):
+        audit = issue(5, "type:audit")
+        audit["body"] = "<!-- sampling-audit:30:" + "a" * 40 + " -->"
+        item = hq.waiting_for(audit)
+        self.assertEqual(item.state, "sampling-audit")
+        self.assertIn("## Sampling audit", item.action)
+        self.assertIn("decision: pass", item.action)
+
+    def test_closed_sampling_audit_leaves_queue(self):
+        audit = issue(5, "type:audit", state="closed")
+        audit["body"] = "<!-- sampling-audit:30:" + "a" * 40 + " -->"
+        self.assertIsNone(hq.waiting_for(audit))
+
     def test_every_state_section_9_11_names_is_waiting(self):
         cases = {
             "project:awaiting-ready": issue(1, "type:project", "project:awaiting-ready"),
