@@ -236,6 +236,62 @@ class TestAcceptance(unittest.TestCase):
 
 
 class TestIdempotencyAndAuthority(unittest.TestCase):
+    AT07_LIMITATION = {
+        "timestamp": "2026-08-22T19:41:17Z",
+        "project": "#294",
+        "story": "#295",
+        "bell_type": "scope-decision",
+        "classification": "decision",
+        "seconds_spent": 0,
+        "note": ("Owner-approved temporary AT-07 sequencing limitation; "
+                 "decision-comment:5382246368"),
+        "actor": "@maheshhbhat",
+    }
+    STORY_295_RESCUE = {
+        "timestamp": "2026-08-22T19:41:18Z",
+        "project": "#294",
+        "story": "#295",
+        "bell_type": "poison-rescue",
+        "classification": "rescue",
+        "seconds_spent": 0,
+        "note": ("Owner-approved rescue 1 for Story #295 after review findings were "
+                 "addressed and temporary AT-07 sequencing limitation recorded; exact "
+                 "time not supplied."),
+        "actor": "@maheshhbhat",
+    }
+
+    def assert_at07_decisions_are_distinct(self, rows):
+        limitation = [row for row in rows
+                      if row.get("project") == "#294"
+                      and row.get("story") == "#295"
+                      and row.get("bell_type") == "scope-decision"]
+        rescue = [row for row in rows
+                  if row.get("project") == "#294"
+                  and row.get("story") == "#295"
+                  and row.get("bell_type") == "poison-rescue"]
+        self.assertEqual(limitation, [self.AT07_LIMITATION])
+        self.assertEqual(rescue, [self.STORY_295_RESCUE])
+
+    def test_story_295_at07_limitation_and_rescue_have_distinct_canonical_receipts(self):
+        path = pathlib.Path(ct.__file__).resolve().parents[1] / "touchlog" / "touchlog.jsonl"
+        rows = [json.loads(line) for line in path.read_text().splitlines() if line]
+        self.assert_at07_decisions_are_distinct(rows)
+
+    def test_story_295_receipt_check_rejects_every_claimed_corruption(self):
+        good = [dict(self.AT07_LIMITATION), dict(self.STORY_295_RESCUE)]
+        corruptions = {
+            "missing": good[1:],
+            "duplicate": good + [dict(self.AT07_LIMITATION)],
+            "conflated": [{**good[1], "bell_type": "scope-decision",
+                            "classification": "decision"}],
+            "mistyped": [{**good[0], "classification": "rescue"}, good[1]],
+            "wrong timestamp": [{**good[0], "timestamp": "2026-08-22T19:41:18Z"},
+                                good[1]],
+        }
+        for name, rows in corruptions.items():
+            with self.subTest(name=name), self.assertRaises(AssertionError):
+                self.assert_at07_decisions_are_distinct(rows)
+
     def test_story_296_scope_decision_has_one_canonical_receipt(self):
         path = pathlib.Path(ct.__file__).resolve().parents[1] / "touchlog" / "touchlog.jsonl"
         rows = [json.loads(line) for line in path.read_text().splitlines() if line]
