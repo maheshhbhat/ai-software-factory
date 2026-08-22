@@ -40,10 +40,14 @@ class OutputTests(unittest.TestCase):
     def test_environment_excludes_github_and_worker_context(self):
         with mock.patch.dict(os.environ, {"GH_TOKEN": "secret", "GITHUB_TOKEN": "secret",
                                           "FACTORY_WORKER_SESSION": "leak",
-                                          "ANTHROPIC_API_KEY": "model", "PATH": "/bin"},
+                                          "ANTHROPIC_API_KEY": "model", "PATH": "/bin",
+                                          "HOME": "/safe/home", "USER": "reviewer",
+                                          "LOGNAME": "reviewer"},
                              clear=True):
             self.assertEqual(invoke.clean_environment(),
-                             {"ANTHROPIC_API_KEY": "model", "PATH": "/bin"})
+                             {"ANTHROPIC_API_KEY": "model", "PATH": "/bin",
+                              "HOME": "/safe/home", "USER": "reviewer",
+                              "LOGNAME": "reviewer"})
 
     def test_unavailable_reviewer_fails(self):
         with mock.patch.object(subprocess, "run",

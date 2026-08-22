@@ -60,7 +60,7 @@ class GitHub:
 
 
 def clean_environment() -> dict[str, str]:
-    keep = ("PATH", "LANG", "LC_ALL", "TMPDIR", "SHELL",
+    keep = ("PATH", "LANG", "LC_ALL", "TMPDIR", "SHELL", "HOME", "USER", "LOGNAME",
             "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN")
     return {key: value for key, value in os.environ.items() if key in keep}
 
@@ -90,7 +90,9 @@ def run(cmd, *, cwd, timeout=3600):
     except subprocess.TimeoutExpired as exc:
         raise ReviewError(f"reviewer unavailable: timeout after {timeout}s") from exc
     if result.returncode:
-        raise ReviewError(f"reviewer unavailable: exit {result.returncode}: {(result.stderr or '')[:300]}")
+        raise ReviewError(
+            f"reviewer unavailable: exit {result.returncode}: "
+            f"{(result.stderr or result.stdout or '')[:300]}")
 
 
 def criteria(body: str) -> str:
