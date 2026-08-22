@@ -61,6 +61,27 @@ python factory/touchlog/append.py \
 * Append-only: no edits, no deletions. History is `git log -- factory/touchlog/touchlog.jsonl`.
 * One JSON object per line; `ensure_ascii=False`, separators `(",", ":")` (canonical via helper, but any valid JSON that parses is accepted).
 
+## Temporary Project #294 AT-07 sequencing limitation
+
+Owner approval is recorded on Project #294. This limitation exists only for the
+merge ordering between Stories #295 and #296:
+
+* **Why the live proof is temporarily unreachable:** the controlled GitHub test
+  must exercise the acceptance-touch implementation from merged `main`; #295 is
+  the change that introduces that implementation, so the proof cannot run
+  against merged code before #295 lands.
+* **Substitute evidence for #295:** hermetic acceptance tests exercise the real
+  `append.py` subprocess against isolated files, including exactly-once replay,
+  changed decisions, corrupt and duplicate evidence, append/read-back failures,
+  trusted-author handling, and state-transition ordering. The committed ledger
+  regression also verifies the required historical entries.
+* **Residual risk:** repository permissions, GitHub comment parsing, and live
+  Project label mutation may behave differently from the hermetic fixtures.
+* **Bound and expiry:** dependent Story #296 must run the controlled live GitHub
+  acceptance transition and replay from merged `main`. Project #294 cannot be
+  accepted, and Phase 5 cannot start, until that evidence is committed and #296
+  is merged. This limitation expires when #296 supplies that proof.
+
 ## Phase 2 Closeout (Project #109) — the touches, and one relay
 
 Four bells, and the relay count is the number worth reading. `relay` is the only
