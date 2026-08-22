@@ -481,11 +481,6 @@ def apply_outcome(repo: str, project: dict, outcome: Outcome, token: str) -> tup
 
     number = project["number"]
 
-    if lifecycle_of(project) == AWAITING_ACCEPTANCE:
-        if outcome.decision is None:
-            raise TouchEvidenceError("acceptance outcome has no authoritative decision")
-        ensure_acceptance_touch(number, outcome.decision)
-
     request = urllib.request.Request(
         f"https://api.github.com/repos/{repo}/issues/{number}",
         headers={"Authorization": f"Bearer {token}",
@@ -497,6 +492,13 @@ def apply_outcome(repo: str, project: dict, outcome: Outcome, token: str) -> tup
     current = lifecycle_of(fresh)
     if current not in (AWAITING_READY, AWAITING_ACCEPTANCE):
         return False, f"no longer at a bell (now {current}) — another pass consumed it"
+
+    # Freshness precedes evidence so a losing stale pass cannot append a receipt
+    # for a decision it never consumes. Evidence still precedes the state write.
+    if current == AWAITING_ACCEPTANCE:
+        if outcome.decision is None:
+            raise TouchEvidenceError("acceptance outcome has no authoritative decision")
+        ensure_acceptance_touch(number, outcome.decision)
 
     labels = sorted((labels_of(fresh) - {AWAITING_READY, AWAITING_ACCEPTANCE})
                     | {outcome.action})

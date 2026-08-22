@@ -94,11 +94,14 @@ class AcceptanceTouchTests(unittest.TestCase):
         self.assertEqual(record["seconds_spent"], 0)
         self.assertIn("time unavailable", record["note"])
 
-    def test_evidence_call_precedes_github_state_write(self):
+    def test_freshness_check_precedes_evidence_and_evidence_precedes_state_write(self):
         source = pathlib.Path(ct.__file__).read_text()
         apply_body = source.split("def apply_outcome", 1)[1].split("def run", 1)[0]
-        self.assertLess(apply_body.index("ensure_acceptance_touch"),
-                        apply_body.index('method="PATCH"'))
+        fresh = apply_body.index("fresh = json.loads")
+        evidence = apply_body.index("ensure_acceptance_touch")
+        write = apply_body.index('method="PATCH"')
+        self.assertLess(fresh, evidence)
+        self.assertLess(evidence, write)
 
     def test_committed_phase4_and_repair_bell_backfills_are_exact(self):
         path = HERE.parent / "touchlog" / "touchlog.jsonl"
