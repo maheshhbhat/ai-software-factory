@@ -122,3 +122,47 @@
 {"event":"human_queue.summary","repo":"maheshhbhat/ai-software-factory","run":"93693","ts":"2026-08-22T04:30:04.702608Z","waiting":0}
 {"event":"review_link.transition","pr":236,"reason":"PR_MERGED","run":"93785","story":235,"to":"story:merged","ts":"2026-08-22T04:30:35.887874Z"}
 {"event":"human_queue.summary","repo":"maheshhbhat/ai-software-factory","run":"93785","ts":"2026-08-22T04:30:39.236602Z","waiting":0}
+{"event":"review_link.transition","pr":278,"reason":"PR_OPENED","run":"10344","story":220,"to":"story:in-review","ts":"2026-08-22T09:46:50.319373Z"}
+{"event":"human_queue.summary","repo":"maheshhbhat/ai-software-factory","run":"10344","ts":"2026-08-22T09:47:21.646750Z","waiting":0}
+{"agent":"claude-delivery","event":"dispatch.received","project":212,"repo":"maheshhbhat/ai-software-factory","run":"10344","story":220,"ts":"2026-08-22T09:47:26.442551Z"}
+{"detail":"assumed healthy; no probe declared","event":"worker.health","healthy":true,"reason":"NO_PROBE_CONFIGURED","run":"10344","ts":"2026-08-22T09:47:26.443523Z","worker":"claude-delivery"}
+{"configured":["claude-delivery"],"eligible":["claude-delivery"],"event":"worker.selected","required":"delivery","run":"10344","ts":"2026-08-22T09:47:26.444112Z"}
+{"cmd":"/usr/local/opt/python@3.14/bin/python3.14 /private/tmp/factory-story-193.Dkx6bf/factory/acceptance/phase4_live.py launch-worker 220","event":"worker.launch.start","project":212,"run":"10344","story":220,"timeout_s":60,"ts":"2026-08-22T09:47:26.444864Z","worker":"claude-delivery"}
+{"cmd":"/usr/local/opt/python@3.14/bin/python3.14 /private/tmp/factory-story-193.Dkx6bf/factory/acceptance/phase4_live.py launch-worker 220","event":"process.started","pid":10432,"run":"10344","ts":"2026-08-22T09:47:26.449275Z"}
+{"detail":"","elapsed_ms":202,"event":"worker.launch.end","exit":0,"pid":10432,"project":212,"result":"LAUNCHED","run":"10344","stderr":"","stdout":"","story":220,"ts":"2026-08-22T09:47:26.647188Z","worker":"claude-delivery"}
+{"decision":"NOT_NEEDED","event":"worker.failover","project":212,"reason":"the worker accepted the assignment","result":"LAUNCHED","run":"10344","skipped":[],"story":220,"ts":"2026-08-22T09:47:26.647836Z","worker":"claude-delivery"}
+{"detail":"","elapsed_ms":202,"event":"worker.outcome","exit":0,"project":212,"result":"LAUNCHED","run":"10344","story":220,"ts":"2026-08-22T09:47:26.648300Z","worker":"claude-delivery"}
+{"applied":false,"detail":"PR #278 links to this story (\u00a79.5); review and the merge gate own the rest","event":"story.completion","note":"","project":212,"reason":"DELIVERABLE_EXISTS","run":"10344","story":220,"ts":"2026-08-22T09:47:27.839527Z","worker":"claude-delivery"}
+{"agent":"claude-delivery","event":"dispatch.received","project":212,"repo":"maheshhbhat/ai-software-factory","run":"10344","story":279,"ts":"2026-08-22T09:47:27.840762Z"}
+{"detail":"assumed healthy; no probe declared","event":"worker.health","healthy":true,"reason":"NO_PROBE_CONFIGURED","run":"10344","ts":"2026-08-22T09:47:27.841236Z","worker":"claude-delivery"}
+{"configured":["claude-delivery"],"eligible":["claude-delivery"],"event":"worker.selected","required":"delivery","run":"10344","ts":"2026-08-22T09:47:27.841631Z"}
+{"cmd":"/usr/local/opt/python@3.14/bin/python3.14 /private/tmp/factory-story-193.Dkx6bf/factory/acceptance/phase4_live.py launch-worker 279","event":"worker.launch.start","project":212,"run":"10344","story":279,"timeout_s":60,"ts":"2026-08-22T09:47:27.842230Z","worker":"claude-delivery"}
+{"cmd":"/usr/local/opt/python@3.14/bin/python3.14 /private/tmp/factory-story-193.Dkx6bf/factory/acceptance/phase4_live.py launch-worker 279","event":"process.started","pid":10439,"run":"10344","ts":"2026-08-22T09:47:27.847030Z"}
+{"detail":"","elapsed_ms":203,"event":"worker.launch.end","exit":0,"pid":10439,"project":212,"result":"LAUNCHED","run":"10344","stderr":"","stdout":"","story":279,"ts":"2026-08-22T09:47:28.045535Z","worker":"claude-delivery"}
+{"decision":"NOT_NEEDED","event":"worker.failover","project":212,"reason":"the worker accepted the assignment","result":"LAUNCHED","run":"10344","skipped":[],"story":279,"ts":"2026-08-22T09:47:28.046464Z","worker":"claude-delivery"}
+{"detail":"","elapsed_ms":203,"event":"worker.outcome","exit":0,"project":212,"result":"LAUNCHED","run":"10344","story":279,"ts":"2026-08-22T09:47:28.047030Z","worker":"claude-delivery"}
+{"applied":false,"detail":"no worker acknowledgement at or after 2026-08-22T09:47:25+00:00","event":"story.completion","note":"","project":212,"reason":"NO_PROOF","run":"10344","story":279,"ts":"2026-08-22T09:47:29.175469Z","worker":"claude-delivery"}
+{"event":"review_link.transition","pr":278,"reason":"PR_OPENED","run":"10525","story":220,"to":"story:in-review","ts":"2026-08-22T09:47:42.006719Z"}
+{"event":"human_queue.summary","repo":"maheshhbhat/ai-software-factory","run":"10525","ts":"2026-08-22T09:47:52.978450Z","waiting":0}
+{"event":"human_queue.summary","repo":"maheshhbhat/ai-software-factory","run":"10571","ts":"2026-08-22T09:48:17.156889Z","waiting":0}
+{"event":"human_queue.summary","repo":"maheshhbhat/ai-software-factory","run":"10614","ts":"2026-08-22T09:48:40.875591Z","waiting":0}
+{"event":"human_queue.summary","repo":"maheshhbhat/ai-software-factory","run":"10649","ts":"2026-08-22T09:49:04.808427Z","waiting":0}
+{"event":"human_queue.summary","repo":"maheshhbhat/ai-software-factory","run":"10684","ts":"2026-08-22T09:49:28.683259Z","waiting":0}
+{"event":"review_link.transition","pr":280,"reason":"PR_OPENED","run":"10936","story":279,"to":"story:in-review","ts":"2026-08-22T09:49:43.340449Z"}
+{"event":"human_queue.summary","repo":"maheshhbhat/ai-software-factory","run":"10936","ts":"2026-08-22T09:50:06.678130Z","waiting":0}
+{"agent":"claude-delivery","event":"dispatch.received","project":212,"repo":"maheshhbhat/ai-software-factory","run":"10936","story":279,"ts":"2026-08-22T09:50:09.471073Z"}
+{"detail":"assumed healthy; no probe declared","event":"worker.health","healthy":true,"reason":"NO_PROBE_CONFIGURED","run":"10936","ts":"2026-08-22T09:50:09.471984Z","worker":"claude-delivery"}
+{"configured":["claude-delivery"],"eligible":["claude-delivery"],"event":"worker.selected","required":"delivery","run":"10936","ts":"2026-08-22T09:50:09.472438Z"}
+{"cmd":"/usr/local/opt/python@3.14/bin/python3.14 /private/tmp/factory-story-193.Dkx6bf/factory/acceptance/phase4_live.py launch-worker 279","event":"worker.launch.start","project":212,"run":"10936","story":279,"timeout_s":60,"ts":"2026-08-22T09:50:09.473138Z","worker":"claude-delivery"}
+{"cmd":"/usr/local/opt/python@3.14/bin/python3.14 /private/tmp/factory-story-193.Dkx6bf/factory/acceptance/phase4_live.py launch-worker 279","event":"process.started","pid":11011,"run":"10936","ts":"2026-08-22T09:50:09.477425Z"}
+{"detail":"","elapsed_ms":192,"event":"worker.launch.end","exit":0,"pid":11011,"project":212,"result":"LAUNCHED","run":"10936","stderr":"","stdout":"","story":279,"ts":"2026-08-22T09:50:09.666095Z","worker":"claude-delivery"}
+{"decision":"NOT_NEEDED","event":"worker.failover","project":212,"reason":"the worker accepted the assignment","result":"LAUNCHED","run":"10936","skipped":[],"story":279,"ts":"2026-08-22T09:50:09.666719Z","worker":"claude-delivery"}
+{"detail":"","elapsed_ms":192,"event":"worker.outcome","exit":0,"project":212,"result":"LAUNCHED","run":"10936","story":279,"ts":"2026-08-22T09:50:09.667145Z","worker":"claude-delivery"}
+{"applied":false,"detail":"PR #280 links to this story (\u00a79.5); review and the merge gate own the rest","event":"story.completion","note":"","project":212,"reason":"DELIVERABLE_EXISTS","run":"10936","story":279,"ts":"2026-08-22T09:50:10.894257Z","worker":"claude-delivery"}
+{"event":"review_link.transition","pr":280,"reason":"PR_OPENED","run":"11065","story":279,"to":"story:in-review","ts":"2026-08-22T09:50:24.262866Z"}
+{"event":"human_queue.summary","repo":"maheshhbhat/ai-software-factory","run":"11065","ts":"2026-08-22T09:50:35.067426Z","waiting":0}
+{"event":"human_queue.summary","repo":"maheshhbhat/ai-software-factory","run":"11103","ts":"2026-08-22T09:50:59.253361Z","waiting":0}
+{"event":"human_queue.summary","repo":"maheshhbhat/ai-software-factory","run":"11203","ts":"2026-08-22T09:51:23.867598Z","waiting":0}
+{"event":"human_queue.summary","repo":"maheshhbhat/ai-software-factory","run":"11371","ts":"2026-08-22T09:52:09.297607Z","waiting":0}
+{"event":"review_link.transition","pr":280,"reason":"PR_MERGED","run":"11461","story":279,"to":"story:merged","ts":"2026-08-22T09:52:14.070538Z"}
+{"event":"human_queue.summary","repo":"maheshhbhat/ai-software-factory","run":"11461","ts":"2026-08-22T09:52:24.082797Z","waiting":0}

@@ -68,7 +68,7 @@ class GitHub:
             with urllib.request.urlopen(request, timeout=30) as response:
                 return json.load(response)
         except urllib.error.HTTPError as exc:
-            if exc.code in (403, 404):
+            if exc.code in (401, 403, 404):
                 raise DeliveryError(
                     f"repository access constraint failed: GitHub returned {exc.code}") from exc
             raise
