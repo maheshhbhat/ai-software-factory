@@ -32,6 +32,16 @@ def scenario(cls):
     return cls
 
 
+def primary_worker_launch_key() -> str:
+    """Environment key for the first configured worker declaration."""
+    order = [name.strip() for name in
+             os.environ.get("FACTORY_WORKER_ORDER",
+                            "claude-delivery,codex-delivery").split(",")
+             if name.strip()]
+    primary = order[0]
+    return f"FACTORY_WORKER_{primary.upper().replace('-', '_')}_LAUNCH"
+
+
 # --------------------------------------------------------------------------
 # default tier — cheap, and every fixture ends terminal through the factory
 # --------------------------------------------------------------------------
@@ -130,10 +140,13 @@ class Authorization(Scenario):
             found = re.search(rf"(?m)^\s+#{number}\s+skip\s+(\S+)", report)
             return found.group(1) if found else "not listed"
 
+        # The dispatcher validates Scope before Attempt. Repair in that same
+        # order so each deliberately broken link is observed instead of one
+        # masking the other.
         stages = [
-            (dispatcher.Reason.ATTEMPT_INVALID, {"### Attempt\n\nnot-a-number": "### Attempt\n\n0"}),
             (dispatcher.Reason.SCOPE_INVALID, {"### Scope\n\n- bad glob":
                                                "### Scope\n\nno repository file changes"}),
+            (dispatcher.Reason.ATTEMPT_INVALID, {"### Attempt\n\nnot-a-number": "### Attempt\n\n0"}),
         ]
         for expected, repair in stages:
             report = self.dispatch(claim=False)
@@ -323,7 +336,11 @@ class Failover(Scenario):
         try:
             # A binary that does not exist is a *definite* failure, which is the
             # only outcome §84 permits a fallback on. An ambiguous one must not.
-            os.environ["FACTORY_WORKER_CLAUDE_DELIVERY_LAUNCH"] = \
+            # Fail the configured primary rather than assuming one engine is
+            # always first. A separately named adapter may use the same engine
+            # on hosts where nesting the other CLI is not supported; the
+            # contract under test is sequential worker failover.
+            os.environ[primary_worker_launch_key()] = \
                 "/nonexistent/factory-e2e-missing-engine"
             output = self.poll()
         finally:
@@ -553,7 +570,7 @@ class AttemptLimit(Scenario):
         found = sorted(
             number for number, issue in issues.items()
             if dispatcher.lifecycle_of(issue, dispatcher.STORY_LIFECYCLE) == dispatcher.POISON
-            and "[Verification]" in (issue.get("title") or ""))
+            and "[Story] Disposable verification" in (issue.get("title") or ""))
         return found[0] if found else None
 
 

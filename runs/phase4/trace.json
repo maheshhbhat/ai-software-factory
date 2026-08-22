@@ -1,0 +1,221 @@
+{
+  "credential_boundary": "shared GitHub principal",
+  "engine": "claude",
+  "first_review": "findings",
+  "heads": [
+    "dcf44ad0a05c19839bef263cd53d729467404f97",
+    "0f7933b485ba1354a5fef12dc99b97b7b991df93"
+  ],
+  "health": {
+    "build_sha": "9a262ff29203445d3d41136fa8e69caea3ad3141"
+  },
+  "merge_sha": "9a262ff29203445d3d41136fa8e69caea3ad3141",
+  "operations": [
+    {
+      "cycle": 1,
+      "operation": "factory-poll"
+    },
+    {
+      "cycle": 2,
+      "operation": "factory-poll"
+    },
+    {
+      "cycle": 3,
+      "operation": "factory-poll"
+    },
+    {
+      "cycle": 4,
+      "operation": "factory-poll"
+    },
+    {
+      "cycle": 5,
+      "operation": "factory-poll"
+    },
+    {
+      "cycle": 6,
+      "operation": "factory-poll"
+    },
+    {
+      "cycle": 7,
+      "operation": "factory-poll"
+    },
+    {
+      "cycle": 8,
+      "operation": "factory-poll"
+    },
+    {
+      "cycle": 9,
+      "operation": "factory-poll"
+    },
+    {
+      "cycle": 10,
+      "operation": "factory-poll"
+    },
+    {
+      "cycle": 11,
+      "operation": "factory-poll"
+    },
+    {
+      "cycle": 11,
+      "operation": "automatic-pr-ready"
+    },
+    {
+      "cycle": 11,
+      "head": "dcf44ad0a05c19839bef263cd53d729467404f97",
+      "operation": "fresh-review",
+      "verdict": "findings"
+    },
+    {
+      "cycle": 12,
+      "operation": "factory-poll"
+    },
+    {
+      "cycle": 13,
+      "operation": "factory-poll"
+    },
+    {
+      "cycle": 14,
+      "operation": "factory-poll"
+    },
+    {
+      "cycle": 15,
+      "operation": "factory-poll"
+    },
+    {
+      "cycle": 16,
+      "operation": "factory-poll"
+    },
+    {
+      "cycle": 17,
+      "operation": "factory-poll"
+    },
+    {
+      "cycle": 17,
+      "head": "0f7933b485ba1354a5fef12dc99b97b7b991df93",
+      "operation": "fresh-review",
+      "verdict": "approval"
+    },
+    {
+      "cycle": 17,
+      "head": "0f7933b485ba1354a5fef12dc99b97b7b991df93",
+      "operation": "automatic-merge"
+    },
+    {
+      "operation": "sampling",
+      "outcome": "unselected"
+    }
+  ],
+  "project": 212,
+  "provider_cost": "unavailable; not fabricated",
+  "pull_request": 236,
+  "repo": "maheshhbhat/ai-software-factory",
+  "sampling": "unselected",
+  "story": 235,
+  "timeline": [
+    {
+      "created_at": "2026-08-22T04:24:53Z",
+      "event": "labeled",
+      "label": "type:story"
+    },
+    {
+      "created_at": "2026-08-22T04:24:53Z",
+      "event": "labeled",
+      "label": "story:ready"
+    },
+    {
+      "created_at": "2026-08-22T04:24:53Z",
+      "event": "labeled",
+      "label": "phase:build"
+    },
+    {
+      "created_at": "2026-08-22T04:25:00Z",
+      "event": "unlabeled",
+      "label": "story:ready"
+    },
+    {
+      "created_at": "2026-08-22T04:25:00Z",
+      "event": "labeled",
+      "label": "story:claimed"
+    },
+    {
+      "created_at": "2026-08-22T04:27:47Z",
+      "event": "cross-referenced",
+      "label": null
+    },
+    {
+      "created_at": "2026-08-22T04:27:55Z",
+      "event": "unlabeled",
+      "label": "story:claimed"
+    },
+    {
+      "created_at": "2026-08-22T04:27:55Z",
+      "event": "labeled",
+      "label": "story:in-review"
+    },
+    {
+      "created_at": "2026-08-22T04:28:17Z",
+      "event": "commented",
+      "label": null
+    },
+    {
+      "created_at": "2026-08-22T04:28:18Z",
+      "event": "unlabeled",
+      "label": "story:in-review"
+    },
+    {
+      "created_at": "2026-08-22T04:28:18Z",
+      "event": "labeled",
+      "label": "story:ready"
+    },
+    {
+      "created_at": "2026-08-22T04:28:36Z",
+      "event": "unlabeled",
+      "label": "story:ready"
+    },
+    {
+      "created_at": "2026-08-22T04:28:36Z",
+      "event": "labeled",
+      "label": "story:claimed"
+    },
+    {
+      "created_at": "2026-08-22T04:28:50Z",
+      "event": "unlabeled",
+      "label": "story:claimed"
+    },
+    {
+      "created_at": "2026-08-22T04:28:50Z",
+      "event": "labeled",
+      "label": "story:in-review"
+    },
+    {
+      "created_at": "2026-08-22T04:29:57Z",
+      "event": "referenced",
+      "label": null
+    },
+    {
+      "created_at": "2026-08-22T04:30:28Z",
+      "event": "commented",
+      "label": null
+    },
+    {
+      "created_at": "2026-08-22T04:30:33Z",
+      "event": "referenced",
+      "label": null
+    },
+    {
+      "created_at": "2026-08-22T04:30:35Z",
+      "event": "closed",
+      "label": null
+    },
+    {
+      "created_at": "2026-08-22T04:30:35Z",
+      "event": "unlabeled",
+      "label": "story:in-review"
+    },
+    {
+      "created_at": "2026-08-22T04:30:35Z",
+      "event": "labeled",
+      "label": "story:merged"
+    }
+  ]
+}

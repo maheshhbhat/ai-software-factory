@@ -1,0 +1,200 @@
+{
+  "combined": {
+    "modules": {
+      "factory/agents/planning/artifacts.py": 75.4,
+      "factory/agents/planning/contract.py": 87.3,
+      "factory/agents/planning/invoke.py": 76.6,
+      "factory/agents/review/invoke.py": 65.1,
+      "factory/agents/worker/invoke.py": 72.3,
+      "factory/dispatcher/dispatcher.py": 91.0,
+      "factory/dispatcher/replay.py": 81.2,
+      "factory/fixtures/phase4_health/app.py": 79.5,
+      "factory/gates/merge_gate.py": 65.6,
+      "factory/runtime/bridge.py": 89.4,
+      "factory/runtime/completion.py": 92.3,
+      "factory/runtime/continuation.py": 64.0,
+      "factory/runtime/humanqueue.py": 100.0,
+      "factory/runtime/planning_route.py": 83.7,
+      "factory/runtime/poller.py": 74.5,
+      "factory/runtime/review_link.py": 92.5,
+      "factory/runtime/review_route.py": 94.1,
+      "factory/runtime/runlog.py": 94.7,
+      "factory/runtime/sampling.py": 85.0,
+      "factory/runtime/sequencer.py": 84.8,
+      "factory/runtime/workers.py": 96.9
+    },
+    "total": 80.6
+  },
+  "e2e": {
+    "adds": 1.2,
+    "combined_with_e2e": 81.8,
+    "deterministic": false,
+    "failures": [
+      "FAIL  [trust-boundary] the repository carries a real untrusted-authored artifact",
+      "\u00b7 none \u2014 nothing to check against, so nothing is asserted below",
+      "FAIL. Fixtures are left exactly as they are \u2014 they are the report."
+    ],
+    "modules": {
+      "factory/dispatcher/dispatcher.py": 54.3,
+      "factory/gates/merge_gate.py": 24.7,
+      "factory/runtime/bridge.py": 22.8,
+      "factory/runtime/completion.py": 74.1,
+      "factory/runtime/continuation.py": 25.8,
+      "factory/runtime/humanqueue.py": 81.1,
+      "factory/runtime/planning_route.py": 37.2,
+      "factory/runtime/poller.py": 45.3,
+      "factory/runtime/review_link.py": 45.9,
+      "factory/runtime/review_route.py": 23.5,
+      "factory/runtime/runlog.py": 85.1,
+      "factory/runtime/sequencer.py": 63.5,
+      "factory/runtime/workers.py": 75.5
+    },
+    "passed": false,
+    "summary": "43/44 check(s) passed",
+    "total": 47.4
+  },
+  "failing_layers": [],
+  "layers": {
+    "acceptance": {
+      "files": [
+        "acceptance/test_acceptance.py",
+        "acceptance/test_coverage_report.py",
+        "acceptance/test_phase4_delivery_loop.py",
+        "acceptance/test_phase4_fixture.py",
+        "acceptance/test_phase4_live.py",
+        "acceptance/test_phase4_requirement_coverage.py",
+        "acceptance/test_phase4_review.py",
+        "acceptance/test_phase4_sampling.py",
+        "acceptance/test_phase4_worker.py"
+      ],
+      "modules": {
+        "factory/agents/review/invoke.py": 60.4,
+        "factory/agents/worker/invoke.py": 67.4,
+        "factory/dispatcher/dispatcher.py": 81.6,
+        "factory/dispatcher/replay.py": 53.8,
+        "factory/fixtures/phase4_health/app.py": 79.5,
+        "factory/gates/merge_gate.py": 56.0,
+        "factory/runtime/bridge.py": 22.8,
+        "factory/runtime/completion.py": 79.0,
+        "factory/runtime/continuation.py": 25.5,
+        "factory/runtime/humanqueue.py": 91.9,
+        "factory/runtime/planning_route.py": 37.2,
+        "factory/runtime/poller.py": 59.0,
+        "factory/runtime/review_link.py": 82.2,
+        "factory/runtime/review_route.py": 79.4,
+        "factory/runtime/runlog.py": 80.9,
+        "factory/runtime/sampling.py": 81.2,
+        "factory/runtime/sequencer.py": 22.3,
+        "factory/runtime/workers.py": 77.1
+      },
+      "tests": 9,
+      "total": 61.3
+    },
+    "integration": {
+      "files": [
+        "agents/planning/test_e2e.py",
+        "runtime/test_lifecycle_e2e.py",
+        "runtime/test_poller.py"
+      ],
+      "modules": {
+        "factory/agents/planning/artifacts.py": 72.8,
+        "factory/agents/planning/contract.py": 72.2,
+        "factory/agents/planning/invoke.py": 71.1,
+        "factory/dispatcher/dispatcher.py": 61.9,
+        "factory/gates/merge_gate.py": 24.2,
+        "factory/runtime/bridge.py": 22.8,
+        "factory/runtime/completion.py": 79.0,
+        "factory/runtime/continuation.py": 15.1,
+        "factory/runtime/humanqueue.py": 78.4,
+        "factory/runtime/planning_route.py": 37.2,
+        "factory/runtime/poller.py": 65.5,
+        "factory/runtime/review_link.py": 79.5,
+        "factory/runtime/review_route.py": 75.0,
+        "factory/runtime/runlog.py": 80.9,
+        "factory/runtime/sequencer.py": 49.3,
+        "factory/runtime/workers.py": 77.1
+      },
+      "tests": 3,
+      "total": 56.1
+    },
+    "unit": {
+      "files": [
+        "acceptance/test_e2e_configuration.py",
+        "agents/planning/test_artifacts.py",
+        "agents/planning/test_contract.py",
+        "agents/planning/test_invoke.py",
+        "agents/review/test_invoke.py",
+        "agents/worker/test_invoke.py",
+        "dispatcher/test_dispatcher.py",
+        "dispatcher/test_replay.py",
+        "gates/test_merge_gate.py",
+        "runtime/test_approve_plan.py",
+        "runtime/test_bridge.py",
+        "runtime/test_completion.py",
+        "runtime/test_continuation.py",
+        "runtime/test_humanqueue.py",
+        "runtime/test_phase4_shared_credential.py",
+        "runtime/test_planning_route.py",
+        "runtime/test_review_link.py",
+        "runtime/test_review_route.py",
+        "runtime/test_runlog.py",
+        "runtime/test_sampling.py",
+        "runtime/test_sequencer.py",
+        "runtime/test_workers.py"
+      ],
+      "modules": {
+        "factory/agents/planning/artifacts.py": 73.3,
+        "factory/agents/planning/contract.py": 87.3,
+        "factory/agents/planning/invoke.py": 76.6,
+        "factory/agents/review/invoke.py": 29.7,
+        "factory/agents/worker/invoke.py": 41.5,
+        "factory/dispatcher/dispatcher.py": 86.0,
+        "factory/dispatcher/replay.py": 81.2,
+        "factory/gates/merge_gate.py": 65.6,
+        "factory/runtime/bridge.py": 89.4,
+        "factory/runtime/completion.py": 92.3,
+        "factory/runtime/continuation.py": 57.8,
+        "factory/runtime/humanqueue.py": 100.0,
+        "factory/runtime/planning_route.py": 83.7,
+        "factory/runtime/poller.py": 15.8,
+        "factory/runtime/review_link.py": 71.9,
+        "factory/runtime/review_route.py": 94.1,
+        "factory/runtime/runlog.py": 94.7,
+        "factory/runtime/sampling.py": 45.6,
+        "factory/runtime/sequencer.py": 74.9,
+        "factory/runtime/workers.py": 96.9
+      },
+      "tests": 22,
+      "total": 69.4
+    }
+  },
+  "phase4_modules": {
+    "factory/agents/review/invoke.py": 65.1,
+    "factory/agents/worker/invoke.py": 72.3,
+    "factory/runtime/poller.py": 74.5,
+    "factory/runtime/review_link.py": 92.5,
+    "factory/runtime/review_route.py": 94.1,
+    "factory/runtime/sampling.py": 85.0
+  },
+  "scope": "production code only (tests omitted)",
+  "tool": "factory/coverage_report.py",
+  "uncovered_risks": [
+    "Worker and reviewer share one GitHub principal until Project #221.",
+    "Live GitHub, engine, merge, deployment, and sampling wiring is evidenced only by the separate Story #220 run, never by this deterministic percentage.",
+    "Line coverage cannot prove semantic correctness or independent authorization."
+  ],
+  "unique_contribution": {
+    "acceptance": {
+      "contribution": 6.6,
+      "without": 74.0
+    },
+    "integration": {
+      "contribution": 1.3,
+      "without": 79.3
+    },
+    "unit": {
+      "contribution": 15.1,
+      "without": 65.5
+    }
+  }
+}

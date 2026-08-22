@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
 import pathlib
@@ -62,6 +63,11 @@ def clean_environment() -> dict[str, str]:
     keep = ("PATH", "LANG", "LC_ALL", "TMPDIR", "SHELL",
             "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN")
     return {key: value for key, value in os.environ.items() if key in keep}
+
+
+def git_auth_header(token: str) -> str:
+    value = base64.b64encode(f"x-access-token:{token}".encode()).decode()
+    return f"Authorization: Basic {value}"
 
 
 def command(input_path: pathlib.Path, output_path: pathlib.Path) -> list[str]:
@@ -145,7 +151,7 @@ def execute(repo: str, pull_number: int, token: str, *, client=None, timeout=360
         clone_env = clean_environment()
         clone_env.update({"GIT_CONFIG_COUNT": "1",
                           "GIT_CONFIG_KEY_0": "http.extraHeader",
-                          "GIT_CONFIG_VALUE_0": f"Authorization: Bearer {token}"})
+                          "GIT_CONFIG_VALUE_0": git_auth_header(token)})
         subprocess.run(["git", "clone", "--quiet", f"https://github.com/{repo}.git", "repo"],
                        cwd=workspace, env=clone_env, check=True,
                        capture_output=True, text=True, timeout=timeout)

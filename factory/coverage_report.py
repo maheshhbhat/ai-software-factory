@@ -89,6 +89,7 @@ ACCEPTANCE = {
     "acceptance/test_phase4_fixture.py",
     "acceptance/test_phase4_delivery_loop.py",
     "acceptance/test_phase4_requirement_coverage.py",
+    "acceptance/test_phase4_live.py",
     "acceptance/test_coverage_report.py",
 }
 LAYERS = ("unit", "integration", "acceptance")
@@ -111,7 +112,8 @@ PHASE4_MODULES = ("factory/agents/worker/invoke.py", "factory/agents/review/invo
                   "factory/runtime/review_link.py", "factory/runtime/poller.py")
 UNCOVERED_RISKS = (
     "Worker and reviewer share one GitHub principal until Project #221.",
-    "Live GitHub, engine, merge, deployment, and sampling wiring is unproven until Story #220.",
+    "Live GitHub, engine, merge, deployment, and sampling wiring is evidenced only by the "
+    "separate Story #220 run, never by this deterministic percentage.",
     "Line coverage cannot prove semantic correctness or independent authorization.",
 )
 
@@ -131,6 +133,7 @@ UNCOVERED_RISKS = (
 # this tool was written to fix — twice now, the coverage of this repository has
 # been measured by hand and the numbers lived only in a transcript.
 E2E = "acceptance/e2e.py"
+PHASE4_E2E = "acceptance/phase4_live.py"
 
 # Production code is what a coverage number is about. Test files cover
 # themselves trivially and including them flatters the total by ~7 points.

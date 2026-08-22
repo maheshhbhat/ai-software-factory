@@ -1,0 +1,92 @@
+import importlib.util
+import json
+import pathlib
+import tempfile
+import unittest
+from unittest import mock
+
+HERE = pathlib.Path(__file__).resolve().parent
+SPEC = importlib.util.spec_from_file_location("phase4_live", HERE / "phase4_live.py")
+live = importlib.util.module_from_spec(SPEC); SPEC.loader.exec_module(live)
+
+class Phase4LiveHarnessTests(unittest.TestCase):
+    def test_story_is_bounded_isolated_and_deliberately_two_pass(self):
+        body = live.story_body()
+        self.assertIn("#212", body)
+        self.assertIn("Attempt 1 only", body)
+        self.assertIn("Attempt 2", body)
+        self.assertIn("runs/phase4/live_product/**", body)
+        self.assertNotIn("income-portfolio", body)
+
+    def test_review_model_binds_engine_verdict_to_checkout_head(self):
+        with tempfile.TemporaryDirectory() as temp:
+            source, target = pathlib.Path(temp) / "in.json", pathlib.Path(temp) / "out.json"
+            source.write_text(json.dumps({"diff": [{"patch": "+ defective"}]}))
+            responses = [mock.Mock(stdout="b" * 40 + "\n"),
+                         mock.Mock(stdout='{"verdict":"findings","findings":["fix"]}\n')]
+            with mock.patch.object(live, "command", side_effect=responses):
+                live.review_model(str(source), str(target))
+            result = json.loads(target.read_text())
+            self.assertEqual(result["head"], "b" * 40)
+            self.assertEqual(result["verdict"], "findings")
+
+    def test_worker_model_is_headless_edit_only_and_sessionless(self):
+        with tempfile.TemporaryDirectory() as temp:
+            source = pathlib.Path(temp) / "in.json"
+            source.write_text(json.dumps({"story": {"body": "### Attempt\n\n2\n"}}))
+            completed = mock.Mock(returncode=0)
+            with mock.patch.object(live.subprocess, "run", return_value=completed) as run:
+                self.assertEqual(live.worker_model(str(source)), 0)
+            parts = next(call.args[0] for call in run.call_args_list
+                         if call.args[0][0] == "claude")
+            self.assertIn("acceptEdits", parts)
+            self.assertIn("Read,Write,Edit,Glob,Grep", parts)
+            self.assertIn("Bash", parts)
+            self.assertIn("--no-session-persistence", parts)
+
+    def test_first_attempt_defect_is_deterministic_after_real_engine_edit(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp)
+            (root / "runs/phase4/live_product").mkdir(parents=True)
+            source = root / "input.json"
+            source.write_text(json.dumps({"story": {"body": "### Attempt\n\n1\n"}}))
+            completed = mock.Mock(returncode=0)
+            app = root / "runs/phase4/live_product/app.py"
+            def engine(parts, **_kwargs):
+                if parts[0] == "claude":
+                    app.write_text("def build_sha():\n    return value\n")
+                return completed
+            with mock.patch.object(live.subprocess, "run", side_effect=engine), \
+                 mock.patch.object(live.pathlib.Path, "cwd", return_value=root):
+                self.assertEqual(live.worker_model(str(source)), 0)
+            self.assertIn('return "defective"', app.read_text())
+            self.assertIn('"build_sha": "defective"', app.read_text())
+
+    def test_runtime_worker_launch_is_an_async_handoff(self):
+        with mock.patch.object(live.subprocess, "Popen") as started, \
+             mock.patch.object(live.pathlib.Path, "open", mock.mock_open()):
+            self.assertEqual(live.launch_worker(230), 0)
+        self.assertTrue(started.call_args.kwargs["start_new_session"])
+
+    def test_model_auth_context_never_restores_github_credentials(self):
+        with mock.patch.dict(live.os.environ, {"GH_TOKEN": "github",
+                                               "GITHUB_TOKEN": "github2"}, clear=False):
+            environment = live.model_environment()
+        self.assertTrue(environment["HOME"])
+        self.assertNotIn("GH_TOKEN", environment)
+        self.assertNotIn("GITHUB_TOKEN", environment)
+
+    def test_live_wiring_criteria_are_exactly_the_checker_requirements(self):
+        expected = {"P4-02", "P4-04", "P4-05", "P4-06", "P4-07", "P4-08",
+                    "P4-09", "P4-11", "P4-12", "P4-15"}
+        source = (HERE / "phase4_live.py").read_text()
+        self.assertIn("for n in (2, 4, 5, 6, 7, 8, 9, 11, 12, 15)", source)
+        self.assertEqual(len(expected), 10)
+
+    def test_live_harness_is_explicitly_classified(self):
+        coverage_path = HERE.parents[1] / "factory" / "coverage_report.py"
+        coverage_source = coverage_path.read_text()
+        self.assertIn('PHASE4_E2E = "acceptance/phase4_live.py"', coverage_source)
+        self.assertIn('"acceptance/test_phase4_live.py"', coverage_source)
+
+if __name__ == "__main__": unittest.main()

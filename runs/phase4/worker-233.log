@@ -1,0 +1,6 @@
+delivery failed: DeliveryError: command failed (1): Traceback (most recent call last):
+  File "/private/tmp/factory-story-193.Dkx6bf/factory/acceptance/phase4_live.py", line 318, in <module>
+    if __name__ == "__main__": raise SystemExit(main())
+                                                ~~~~^^
+  File "/private/tmp/factory-story-193.Dkx6bf/fact
+{"branch": "story/233-delivery", "head": "685b71c4ee09ed46a2ba80b814022de9775af862", "project": 212, "pull_request": 234, "replay": false, "story": 233}

@@ -1,4 +1,5 @@
 import json
+import base64
 import os
 import pathlib
 import subprocess
@@ -11,6 +12,13 @@ import invoke
 
 
 class OutputTests(unittest.TestCase):
+    def test_private_git_auth_uses_github_basic_transport_shape(self):
+        header = invoke.git_auth_header("secret")
+        self.assertTrue(header.startswith("Authorization: Basic "))
+        encoded = header.removeprefix("Authorization: Basic ")
+        self.assertEqual(base64.b64decode(encoded).decode(), "x-access-token:secret")
+        self.assertNotIn("Bearer", header)
+
     def test_exact_head_approval(self):
         with mock.patch.object(pathlib.Path, "read_text",
                                return_value=json.dumps({"head": "a" * 40,

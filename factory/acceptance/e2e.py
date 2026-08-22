@@ -207,7 +207,7 @@ class Fixture:
         for old, new in (body_overrides or {}).items():
             body = body.replace(old, new)
         issue = api(repo, "/issues", token, method="POST", payload={
-            "title": f"[Verification] Disposable — {purpose}",
+            "title": f"[Story] Disposable verification — {purpose}",
             "body": body,
             "labels": ["type:story", "story:ready", "phase:test"],
         })
@@ -446,7 +446,7 @@ def preflight(run: Run, repo: str, commitment: int, project: int, token: str) ->
 def create_fixture(repo: str, project: int, token: str) -> int:
     created = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     issue = api(repo, "/issues", token, method="POST", payload={
-        "title": "[Verification] Disposable — automated end-to-end run",
+        "title": "[Story] Disposable verification — automated end-to-end run",
         "body": FIXTURE_BODY.format(project=project, created=created),
         "labels": ["type:story", "story:ready", "phase:test"],
     })
