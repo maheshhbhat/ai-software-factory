@@ -44,12 +44,17 @@ This log is **measurement evidence only**. The decision itself is recorded as a 
 python factory/touchlog/append.py \
   --project "#12" --bell-type plan-approval --classification decision \
   --seconds-spent 180 [--story "#15"] [--note "approved criteria"] [--actor "@you"] \
-  [--file factory/touchlog/touchlog.jsonl] [--timestamp 2026-08-19T14:03:00Z]
+  [--file factory/touchlog/touchlog.jsonl] [--timestamp 2026-08-19T14:03:00Z] \
+  [--unique-note-marker "stable-idempotency-key"]
 ```
 
 * Validates enums, rejects `seconds_spent < 0`, rejects any `--timestamp` that is not ISO-8601 UTC, and ensures the existing file is valid JSONL before appending.
 * No dependency on shell `flock(1)`. Uses Python stdlib advisory lock (`fcntl` on Unix, `msvcrt` on Windows) where available; otherwise relies on `O_APPEND` atomicity for small writes.
-* Exactly one line per invocation; never rewrites the file.
+* Without `--unique-note-marker`, exactly one line per successful invocation.
+  With it, validation, marker lookup, and append happen under one file lock:
+  zero matches appends, one match is a replay-safe no-op, and multiple matches
+  fail closed. The marker must also appear in `--note` so read-back can verify it.
+  The helper never rewrites the file.
 
 ## Invariants
 
