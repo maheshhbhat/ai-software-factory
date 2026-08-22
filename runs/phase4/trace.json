@@ -1,0 +1,193 @@
+{
+  "credential_boundary": "shared GitHub principal",
+  "engine": "claude",
+  "first_review": "findings",
+  "heads": [
+    "b3f97402094ce3f6886cfaa736843b2fcf60c45f",
+    "dd46cf8f2ff236ba62e6b37b7249c12f0c1e89eb"
+  ],
+  "health": {
+    "build_sha": "1093fec0712b58df000dbbd432ab33aa8c84b572"
+  },
+  "merge_sha": "1093fec0712b58df000dbbd432ab33aa8c84b572",
+  "operations": [
+    {
+      "cycle": 1,
+      "operation": "factory-poll"
+    },
+    {
+      "cycle": 2,
+      "operation": "factory-poll"
+    },
+    {
+      "cycle": 3,
+      "operation": "factory-poll"
+    },
+    {
+      "cycle": 4,
+      "operation": "factory-poll"
+    },
+    {
+      "cycle": 5,
+      "operation": "factory-poll"
+    },
+    {
+      "cycle": 6,
+      "operation": "factory-poll"
+    },
+    {
+      "cycle": 7,
+      "operation": "factory-poll"
+    },
+    {
+      "cycle": 7,
+      "head": "b3f97402094ce3f6886cfaa736843b2fcf60c45f",
+      "operation": "fresh-review",
+      "verdict": "findings"
+    },
+    {
+      "cycle": 8,
+      "operation": "factory-poll"
+    },
+    {
+      "cycle": 9,
+      "operation": "factory-poll"
+    },
+    {
+      "cycle": 10,
+      "operation": "factory-poll"
+    },
+    {
+      "cycle": 11,
+      "operation": "factory-poll"
+    },
+    {
+      "cycle": 11,
+      "head": "dd46cf8f2ff236ba62e6b37b7249c12f0c1e89eb",
+      "operation": "fresh-review",
+      "verdict": "approval"
+    },
+    {
+      "cycle": 11,
+      "head": "dd46cf8f2ff236ba62e6b37b7249c12f0c1e89eb",
+      "operation": "runtime-merge"
+    },
+    {
+      "operation": "sampling",
+      "outcome": "unselected"
+    }
+  ],
+  "project": 212,
+  "provider_cost": "unavailable; not fabricated",
+  "pull_request": 280,
+  "repo": "maheshhbhat/ai-software-factory",
+  "sampling": "unselected",
+  "story": 279,
+  "timeline": [
+    {
+      "created_at": "2026-08-22T09:46:49Z",
+      "event": "labeled",
+      "label": "type:story"
+    },
+    {
+      "created_at": "2026-08-22T09:46:49Z",
+      "event": "labeled",
+      "label": "story:ready"
+    },
+    {
+      "created_at": "2026-08-22T09:46:49Z",
+      "event": "labeled",
+      "label": "phase:build"
+    },
+    {
+      "created_at": "2026-08-22T09:47:25Z",
+      "event": "unlabeled",
+      "label": "story:ready"
+    },
+    {
+      "created_at": "2026-08-22T09:47:25Z",
+      "event": "labeled",
+      "label": "story:claimed"
+    },
+    {
+      "created_at": "2026-08-22T09:49:37Z",
+      "event": "cross-referenced",
+      "label": null
+    },
+    {
+      "created_at": "2026-08-22T09:49:42Z",
+      "event": "unlabeled",
+      "label": "story:claimed"
+    },
+    {
+      "created_at": "2026-08-22T09:49:42Z",
+      "event": "labeled",
+      "label": "story:in-review"
+    },
+    {
+      "created_at": "2026-08-22T09:50:00Z",
+      "event": "commented",
+      "label": null
+    },
+    {
+      "created_at": "2026-08-22T09:50:01Z",
+      "event": "unlabeled",
+      "label": "story:in-review"
+    },
+    {
+      "created_at": "2026-08-22T09:50:01Z",
+      "event": "labeled",
+      "label": "story:ready"
+    },
+    {
+      "created_at": "2026-08-22T09:50:09Z",
+      "event": "unlabeled",
+      "label": "story:ready"
+    },
+    {
+      "created_at": "2026-08-22T09:50:09Z",
+      "event": "labeled",
+      "label": "story:claimed"
+    },
+    {
+      "created_at": "2026-08-22T09:50:23Z",
+      "event": "unlabeled",
+      "label": "story:claimed"
+    },
+    {
+      "created_at": "2026-08-22T09:50:23Z",
+      "event": "labeled",
+      "label": "story:in-review"
+    },
+    {
+      "created_at": "2026-08-22T09:51:18Z",
+      "event": "referenced",
+      "label": null
+    },
+    {
+      "created_at": "2026-08-22T09:52:01Z",
+      "event": "commented",
+      "label": null
+    },
+    {
+      "created_at": "2026-08-22T09:52:05Z",
+      "event": "referenced",
+      "label": null
+    },
+    {
+      "created_at": "2026-08-22T09:52:13Z",
+      "event": "closed",
+      "label": null
+    },
+    {
+      "created_at": "2026-08-22T09:52:13Z",
+      "event": "unlabeled",
+      "label": "story:in-review"
+    },
+    {
+      "created_at": "2026-08-22T09:52:13Z",
+      "event": "labeled",
+      "label": "story:merged"
+    }
+  ]
+}

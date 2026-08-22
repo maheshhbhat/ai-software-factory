@@ -34,6 +34,19 @@ class ParsingTests(unittest.TestCase):
 
 
 class BoundaryTests(unittest.TestCase):
+    def test_private_repository_401_is_a_loud_access_constraint(self):
+        denied = invoke.urllib.error.HTTPError("https://api.github.test", 401,
+                                               "Unauthorized", {}, None)
+        with mock.patch.object(invoke.urllib.request, "urlopen", side_effect=denied):
+            with self.assertRaisesRegex(invoke.DeliveryError, "access constraint"):
+                invoke.GitHub("o/private", "bad-token").api("")
+
+    def test_delivery_pull_request_is_immediately_reviewable(self):
+        client = invoke.GitHub("o/r", "token")
+        with mock.patch.object(client, "api", return_value={"number": 9}) as api:
+            client.create_pr("title", "branch", "main", "Story: #7")
+        self.assertFalse(api.call_args.kwargs["value"]["draft"])
+
     def test_model_environment_has_no_credentials(self):
         with mock.patch.dict(invoke.os.environ,
                              {"GH_TOKEN": "secret", "GITHUB_TOKEN": "secret2",

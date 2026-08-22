@@ -1,0 +1,2 @@
+delivery failed: DeliveryError: worker changed paths outside Story scope: runs/
+delivery failed: DeliveryError: worker changed paths outside Story scope: factory/agents/worker/invoke.py, factory/agents/worker/test_invoke.py

@@ -68,7 +68,7 @@ class GitHub:
             with urllib.request.urlopen(request, timeout=30) as response:
                 return json.load(response)
         except urllib.error.HTTPError as exc:
-            if exc.code in (403, 404):
+            if exc.code in (401, 403, 404):
                 raise DeliveryError(
                     f"repository access constraint failed: GitHub returned {exc.code}") from exc
             raise
@@ -94,7 +94,7 @@ class GitHub:
     def create_pr(self, title: str, head: str, base: str, body: str):
         return self.api("/pulls", method="POST",
                         value={"title": title, "head": head, "base": base,
-                               "body": body, "draft": True})
+                               "body": body, "draft": False})
 
     def update_pr(self, number: int, body: str):
         return self.api(f"/pulls/{number}", method="PATCH", value={"body": body})

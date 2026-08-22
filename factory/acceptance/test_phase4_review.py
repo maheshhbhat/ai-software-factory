@@ -73,35 +73,37 @@ class ReviewAcceptanceTests(unittest.TestCase):
     def fake_subprocess(self, cmd, **kwargs):
         cwd = pathlib.Path(kwargs["cwd"])
         if cmd[:2] == ["git", "clone"]:
-            (cwd / "repo").mkdir()
+            (cwd / "repo" / ".git").mkdir(parents=True)
             self.assertIn("GIT_CONFIG_VALUE_0", kwargs["env"])
         else:
             self.assertNotIn("GH_TOKEN", kwargs["env"])
         return subprocess.CompletedProcess(cmd, 0, "", "")
 
-    def fake_review(self, cmd, *, cwd, timeout):
+    def fake_review(self, cmd, *, cwd, timeout, env=None):
         root = pathlib.Path(cwd).parent
         self.assertEqual(cmd[:2], ["review", "--input"])
         self.assertNotIn("worker", " ".join(cmd).lower())
         self.assertNotIn("shared-token", cmd)
         self.serialized = json.loads((root / "input.json").read_text())
         self.workspace_entries = sorted(x.name for x in root.iterdir())
-        (root / "out.json").write_text(json.dumps(
+        pathlib.Path(cmd[cmd.index("--output") + 1]).write_text(json.dumps(
             {"head": self.client.head, "verdict": "approval", "summary": "safe"}))
 
     def deliver(self):
         with mock.patch.object(invoke.subprocess, "run", side_effect=self.fake_subprocess), \
              mock.patch.object(invoke, "run", side_effect=self.fake_review), \
              mock.patch.dict(os.environ, {"FACTORY_REVIEW_MODEL_CMD":
-                                          "review --input {input_file} --output {output_file}"}):
+                                          "review --input {input_file} --output {output_file}",
+                                          "CLAUDE_CODE_OAUTH_TOKEN": "model-token"}):
             return invoke.execute("owner/private", 9, "shared-token", client=self.client)
 
     def test_allowlisted_fresh_input_exact_head_and_replay(self):
         first = self.deliver()
         self.assertEqual(first["status"], "approval")
         self.assertEqual(set(self.serialized),
-                         {"diff", "story_spec", "project_criteria", "adrs"})
-        self.assertEqual(self.workspace_entries, ["input.json", "repo"])
+                         {"head", "diff", "story_spec", "project_criteria", "adrs"})
+        self.assertEqual(SHA, self.serialized["head"])
+        self.assertEqual(self.workspace_entries, ["input.json", "repo", "reviewer-home"])
         self.assertNotIn("worker", json.dumps(self.serialized).lower())
         self.assertEqual(self.deliver()["status"], "replay")
         self.assertEqual(len(self.client.writes), 1)
@@ -114,26 +116,26 @@ class ReviewAcceptanceTests(unittest.TestCase):
         self.assertEqual(len(self.client.writes), 2)
 
     def test_head_change_during_review_refuses_stale_result_without_a_write(self):
-        def stale(_cmd, *, cwd, timeout):
-            root = pathlib.Path(cwd).parent
-            (root / "out.json").write_text(json.dumps(
+        def stale(_cmd, *, cwd, timeout, env=None):
+            invoke.staging_outcome_path(pathlib.Path(cwd).parent).write_text(json.dumps(
                 {"head": SHA, "verdict": "approval", "summary": "old head"}))
             self.client.head = "b" * 40
         with mock.patch.object(invoke.subprocess, "run", side_effect=self.fake_subprocess), \
              mock.patch.object(invoke, "run", side_effect=stale), \
-             mock.patch.dict(os.environ, {"FACTORY_REVIEW_MODEL_CMD": "review"}):
+             mock.patch.dict(os.environ, {"FACTORY_REVIEW_MODEL_CMD": "review",
+                                          "CLAUDE_CODE_OAUTH_TOKEN": "model-token"}):
             with self.assertRaisesRegex(invoke.ReviewError, "stale-head"):
                 invoke.execute("owner/private", 9, "token", client=self.client)
         self.assertEqual(self.client.writes, [])
 
     def test_findings_are_bound_to_head_and_return_story_ready(self):
-        def findings(_cmd, *, cwd, timeout):
-            root = pathlib.Path(cwd).parent
-            (root / "out.json").write_text(json.dumps(
+        def findings(_cmd, *, cwd, timeout, env=None):
+            invoke.staging_outcome_path(pathlib.Path(cwd).parent).write_text(json.dumps(
                 {"head": SHA, "verdict": "findings", "findings": ["fix defect"]}))
         with mock.patch.object(invoke.subprocess, "run", side_effect=self.fake_subprocess), \
              mock.patch.object(invoke, "run", side_effect=findings), \
-             mock.patch.dict(os.environ, {"FACTORY_REVIEW_MODEL_CMD": "review"}):
+             mock.patch.dict(os.environ, {"FACTORY_REVIEW_MODEL_CMD": "review",
+                                          "CLAUDE_CODE_OAUTH_TOKEN": "model-token"}):
             result = invoke.execute("owner/private", 9, "token", client=self.client)
         self.assertEqual(result["status"], "findings")
         self.assertIn("story:ready", self.client.story_labels)

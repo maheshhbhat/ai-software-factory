@@ -55,8 +55,10 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
+sys.path.insert(0, os.path.join(HERE, "..", "dispatcher"))
 import completion   # noqa: E402  — post-worker-success transition (#104)
 import continuation  # noqa: E402  — decision-comment consumption (#71)
+import dispatcher   # noqa: E402  — live issue/PR substrate for Phase 4 review routing
 import humanqueue   # noqa: E402  — what is waiting on a person (#111)
 import planning_route  # noqa: E402  — project planning invocation route (#190)
 import review_link  # noqa: E402  — delivery-PR lifecycle reconciliation (#111)
@@ -256,8 +258,17 @@ def review_targets(pulls: list[dict], issues: dict[int, dict],
                    comments: dict[int, list[dict]]) -> list[review_route.ReviewTarget]:
     targets = []
     for pull in sorted(pulls, key=lambda x: x.get("number", 0)):
+        # This repository can carry pull requests unrelated to the factory.
+        # Zero canonical links means "not routable" and cannot advance. One is
+        # factory work. More than one remains an ambiguity that fails closed in
+        # story_number below.
+        if not review_route.LINK.findall(
+                (pull.get("body") or "").replace("\r\n", "\n")):
+            continue
         try:
             number = review_route.story_number(pull)
+            if number not in issues:
+                continue
             value = review_route.target(pull, issues.get(number, {}), comments.get(number, []))
         except review_route.RouteError as exc:
             raise WorkerLaunchFailed(

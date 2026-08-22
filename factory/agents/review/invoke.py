@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
 import pathlib
@@ -64,6 +65,31 @@ def clean_environment() -> dict[str, str]:
     return {key: value for key, value in os.environ.items() if key in keep}
 
 
+def review_environment(review_home: pathlib.Path) -> dict[str, str]:
+    """Fresh reviewer identity context with credential material only."""
+    env = clean_environment()
+    if not env.get("CLAUDE_CODE_OAUTH_TOKEN"):
+        operator_home = os.environ.get("HOME", "")
+        credentials = pathlib.Path(operator_home) / ".claude" / ".credentials.json"
+        try:
+            value = json.loads(credentials.read_text())
+            token = value["claudeAiOauth"]["accessToken"]
+        except (OSError, KeyError, TypeError, json.JSONDecodeError) as exc:
+            raise ReviewError("reviewer credential unavailable") from exc
+        if not isinstance(token, str) or not token:
+            raise ReviewError("reviewer credential unavailable")
+        env["CLAUDE_CODE_OAUTH_TOKEN"] = token
+    review_home.mkdir(mode=0o700)
+    env.update({"HOME": str(review_home), "USER": "factory-reviewer",
+                "LOGNAME": "factory-reviewer"})
+    return env
+
+
+def git_auth_header(token: str) -> str:
+    value = base64.b64encode(f"x-access-token:{token}".encode()).decode()
+    return f"Authorization: Basic {value}"
+
+
 def command(input_path: pathlib.Path, output_path: pathlib.Path) -> list[str]:
     template = os.environ.get("FACTORY_REVIEW_MODEL_CMD", "").strip()
     if template:
@@ -73,18 +99,46 @@ def command(input_path: pathlib.Path, output_path: pathlib.Path) -> list[str]:
     payload = (HERE.joinpath("prompt.md").read_text()
                + f"\n\nWrite the JSON outcome to: {output_path}\n\nInput: "
                + input_path.read_text())
-    return ["claude", "-p", payload, "--permission-mode", "dontAsk",
-            "--no-session-persistence"]
+    return ["claude", "-p", payload, "--permission-mode", "acceptEdits",
+            "--allowedTools", "Write", "--disallowedTools", "Bash",
+            "--safe-mode", "--no-session-persistence"]
 
 
-def run(cmd, *, cwd, timeout=3600):
+def outcome_path(workspace: pathlib.Path) -> pathlib.Path:
+    # Inside the tool sandbox, but outside the PR-controlled worktree. A pull
+    # request can never pre-seed a path under the clone's .git metadata.
+    return workspace / "repo" / ".git" / "factory-review-out.json"
+
+
+def staging_outcome_path(workspace: pathlib.Path) -> pathlib.Path:
+    return workspace / "repo" / ".factory-review-out.json"
+
+
+def store_outcome(staging: pathlib.Path, output: pathlib.Path) -> None:
+    # The checkout may contain an attacker-controlled file at the staging path.
+    # Remove it before the reviewer runs, then let trusted wrapper code move the
+    # newly written result under .git before anything parses it.
+    staging.unlink(missing_ok=True)
+    output.unlink(missing_ok=True)
+
+
+def finalize_outcome(staging: pathlib.Path, output: pathlib.Path) -> None:
     try:
-        result = subprocess.run(cmd, cwd=cwd, env=clean_environment(), timeout=timeout,
+        staging.replace(output)
+    except OSError as exc:
+        raise ReviewError("malformed reviewer output") from exc
+
+
+def run(cmd, *, cwd, timeout=3600, env=None):
+    try:
+        result = subprocess.run(cmd, cwd=cwd, env=env or clean_environment(), timeout=timeout,
                                 capture_output=True, text=True)
     except subprocess.TimeoutExpired as exc:
         raise ReviewError(f"reviewer unavailable: timeout after {timeout}s") from exc
     if result.returncode:
-        raise ReviewError(f"reviewer unavailable: exit {result.returncode}: {(result.stderr or '')[:300]}")
+        raise ReviewError(
+            f"reviewer unavailable: exit {result.returncode}: "
+            f"{(result.stderr or result.stdout or '')[:300]}")
 
 
 def criteria(body: str) -> str:
@@ -133,7 +187,8 @@ def execute(repo: str, pull_number: int, token: str, *, client=None, timeout=360
         raise ReviewError("approved active Project unavailable")
     adrs = [x for x in client.pages("/issues?state=all")
             if "type:adr" in {label.get("name") for label in x.get("labels", [])}]
-    fields = {"diff": [{"filename": x.get("filename"), "status": x.get("status"),
+    fields = {"head": target.head,
+              "diff": [{"filename": x.get("filename"), "status": x.get("status"),
                          "patch": x.get("patch", "")} for x in
                         client.pages(f"/pulls/{pull_number}/files")],
               "story_spec": story.get("body", ""),
@@ -145,16 +200,21 @@ def execute(repo: str, pull_number: int, token: str, *, client=None, timeout=360
         clone_env = clean_environment()
         clone_env.update({"GIT_CONFIG_COUNT": "1",
                           "GIT_CONFIG_KEY_0": "http.extraHeader",
-                          "GIT_CONFIG_VALUE_0": f"Authorization: Bearer {token}"})
+                          "GIT_CONFIG_VALUE_0": git_auth_header(token)})
         subprocess.run(["git", "clone", "--quiet", f"https://github.com/{repo}.git", "repo"],
                        cwd=workspace, env=clone_env, check=True,
                        capture_output=True, text=True, timeout=timeout)
         subprocess.run(["git", "checkout", "--quiet", target.head], cwd=workspace / "repo",
                        env=clean_environment(), check=True, capture_output=True,
                        text=True, timeout=timeout)
-        input_path, output_path = workspace / "input.json", workspace / "out.json"
+        input_path = workspace / "input.json"
+        staging_path = staging_outcome_path(workspace)
+        output_path = outcome_path(workspace)
+        store_outcome(staging_path, output_path)
         input_path.write_text(json.dumps(fields, sort_keys=True))
-        run(command(input_path, output_path), cwd=workspace / "repo", timeout=timeout)
+        run(command(input_path, staging_path), cwd=workspace / "repo", timeout=timeout,
+            env=review_environment(workspace / "reviewer-home"))
+        finalize_outcome(staging_path, output_path)
         result = parse_result(output_path, target.head)
 
     fresh = client.api(f"/pulls/{pull_number}")

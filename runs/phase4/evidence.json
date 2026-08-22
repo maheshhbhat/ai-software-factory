@@ -1,0 +1,16 @@
+{
+  "criteria": {
+    "P4-02": "pass",
+    "P4-04": "pass",
+    "P4-05": "pass",
+    "P4-06": "pass",
+    "P4-07": "pass",
+    "P4-08": "pass",
+    "P4-09": "pass",
+    "P4-11": "pass",
+    "P4-12": "pass",
+    "P4-15": "pass"
+  },
+  "limitations": {},
+  "trace": "runs/phase4/trace.json"
+}

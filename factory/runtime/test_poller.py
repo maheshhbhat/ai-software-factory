@@ -41,6 +41,24 @@ Selected (claimed, in order): #64
 
 
 class TestParsing(unittest.TestCase):
+    def test_review_routing_ignores_an_unrelated_pull_request(self):
+        unrelated = {"number": 25,
+                     "body": "ordinary repository work mentioning Story: in prose",
+                     "state": "open", "draft": False}
+        self.assertEqual([], poller.review_targets([unrelated], {}, {}))
+
+    def test_review_routing_ignores_a_pull_for_an_absent_story(self):
+        stale = {"number": 29, "body": "Story: #999", "state": "open", "draft": False}
+        self.assertEqual([], poller.review_targets([stale], {}, {}))
+
+    def test_phase4_review_pass_reads_the_live_substrate(self):
+        """The production pass imports its dispatcher dependency itself."""
+        with mock.patch.object(poller.dispatcher, "fetch_issues", return_value={}), \
+             mock.patch.object(poller.dispatcher, "fetch_pull_requests", return_value=[]), \
+             mock.patch.object(poller, "review_targets", return_value=[]) as targets:
+            self.assertEqual([], poller.run_phase4_reviews("o/r"))
+        targets.assert_called_once_with([], {}, {})
+
     def test_review_target_is_once_per_exact_head(self):
         head = "a" * 40
         pull = {"number": 9, "state": "open", "draft": False,

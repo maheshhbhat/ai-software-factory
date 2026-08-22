@@ -11,6 +11,7 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import e2e
+import e2e_scenarios
 
 
 class LiveWorkerConfiguration(unittest.TestCase):
@@ -49,6 +50,12 @@ class LiveWorkerConfiguration(unittest.TestCase):
                 "python3 factory/runtime/bridge.py --engine codex "
                 "--story {story} --project {project}"))
         self.assertEqual("", error)
+
+    def test_failover_scenario_breaks_the_configured_primary(self):
+        with mock.patch.dict(os.environ, {
+                "FACTORY_WORKER_ORDER": "claude-delivery,fallback-delivery"}, clear=True):
+            self.assertEqual("FACTORY_WORKER_CLAUDE_DELIVERY_LAUNCH",
+                             e2e_scenarios.primary_worker_launch_key())
 
 
 if __name__ == "__main__":
