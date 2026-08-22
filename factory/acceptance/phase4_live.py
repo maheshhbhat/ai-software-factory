@@ -21,9 +21,11 @@ sys.path.insert(0, str(ROOT / "factory" / "runtime"))
 import review_route
 import sampling
 
-MARKER = "<!-- phase4-live-health:v4 -->"
+MARKER = "<!-- phase4-live-health:v5 -->"
 REPO = "maheshhbhat/ai-software-factory"
 PROJECT = 212
+LIVE_CRITERIA = frozenset({"P4-02", "P4-04", "P4-05", "P4-06", "P4-07",
+                           "P4-08", "P4-09", "P4-11", "P4-12", "P4-15"})
 COMMITMENT = 54
 
 def command(parts, *, env=None, timeout=900, check=True, cwd=ROOT):
@@ -129,6 +131,10 @@ def poll_environment(secret, runtime_log):
         "FACTORY_DELIVERY_MODEL_CMD":
             f"{sys.executable} {pathlib.Path(__file__).resolve()} worker-model "
             "{input_file}",
+        "FACTORY_PHASE4_REVIEWS": "1",
+        "FACTORY_REVIEW_MODEL_CMD":
+            f"{sys.executable} {pathlib.Path(__file__).resolve()} review-model "
+            "{input_file} {output_file}",
     })
     return env
 
@@ -246,6 +252,13 @@ def exercise(sha):
 
 def run_live(output):
     secret = token()
+    denied_loudly = False
+    try:
+        delivery.GitHub(REPO, "invalid-private-repo-token").api("")
+    except delivery.DeliveryError as exc:
+        denied_loudly = "access constraint failed" in str(exc)
+    if not denied_loudly:
+        raise RuntimeError("private-repository denial did not fail loudly")
     client = delivery.GitHub(REPO, secret)
     client.api("")
     ensure_audit_label(client)
@@ -264,32 +277,25 @@ def run_live(output):
         if pull is None and worker_log.exists() and "delivery failed:" in worker_log.read_text():
             raise RuntimeError("live worker failed definitively: " +
                                worker_log.read_text().strip()[-600:])
-        if pull and pull.get("draft"):
-            command(["gh", "pr", "ready", str(pull["number"]), "--repo", REPO])
-            operations.append({"cycle": cycle + 1, "operation": "automatic-pr-ready"})
-            pull = client.api(f"/pulls/{pull['number']}")
         if pull:
+            if pull.get("draft"):
+                raise RuntimeError("worker created a draft PR that runtime review cannot route")
             head = pull["head"]["sha"]
             if head not in heads: heads.append(head)
             comments = client.pages(f"/issues/{story_number}/comments")
-            target = review_route.target(pull, story, comments)
-            if target is not None:
-                result = json.loads(run_review(secret, pull["number"]).stdout)
+            outcomes = review_route.outcomes(comments, pull["number"], head)
+            if outcomes and not any(x.get("head") == head and x.get("operation") == "fresh-review"
+                                    for x in operations):
+                result = outcomes[0]
                 operations.append({"cycle": cycle + 1, "operation": "fresh-review",
-                                   "head": head, "verdict": result["status"]})
-                first_verdict = first_verdict or result["status"]
-                if len(heads) == 1 and result["status"] != "findings":
+                                   "head": head, "verdict": result})
+                first_verdict = first_verdict or result
+                if len(heads) == 1 and result != "findings":
                     raise RuntimeError("first defective head was not rejected")
-                if len(heads) > 1 and result["status"] != "approval":
+                if len(heads) > 1 and result != "approval":
                     raise RuntimeError("corrected head was not approved")
-                story = client.issue(story_number)
-                comments = client.pages(f"/issues/{story_number}/comments")
-            if len(heads) == 2 and review_route.outcomes(
-                    comments, pull["number"], head) == ["approval"]:
-                checks = checks_pass(pull["number"])
-                command(["gh", "pr", "merge", str(pull["number"]), "--repo", REPO,
-                         "--squash"])
-                operations.append({"cycle": cycle + 1, "operation": "automatic-merge",
+            if pull.get("state") == "closed" and pull.get("merged_at"):
+                operations.append({"cycle": cycle + 1, "operation": "runtime-merge",
                                    "head": head})
                 break
         time.sleep(10)
@@ -314,7 +320,28 @@ def run_live(output):
              "engine": "claude", "credential_boundary": "shared GitHub principal",
              "provider_cost": "unavailable; not fabricated"}
     (output / "trace.json").write_text(json.dumps(trace, indent=2, sort_keys=True) + "\n")
-    criteria = {f"P4-{n:02d}": "pass" for n in (2, 4, 5, 6, 7, 8, 9, 11, 12, 15)}
+    lifecycle = [x["label"] for x in trace["timeline"] if x["event"] == "labeled"]
+    expected_walk = ["story:ready", "story:claimed", "story:in-review",
+                     "story:ready", "story:claimed", "story:in-review", "story:merged"]
+    observations = {
+        "P4-02": denied_loudly and bool(secret and story_number and runtime_log.exists()),
+        "P4-04": bool(checks_pass(pull["number"])),
+        "P4-05": len(heads) == 2 and first_verdict == "findings",
+        "P4-06": review_route.outcomes(comments, pull["number"], heads[-1]) == ["approval"],
+        "P4-07": len(heads) == 2 and pull["number"] == trace["pull_request"],
+        "P4-08": merged.get("merged_at") is not None,
+        "P4-09": sample in ("selected", "unselected"),
+        "P4-11": all(item in lifecycle for item in expected_walk),
+        "P4-12": all(trace.get(key) is not None for key in
+                     ("engine", "heads", "merge_sha", "sampling", "provider_cost")),
+        "P4-15": merged.get("merged_at") is not None and bool(checks_pass(pull["number"])),
+    }
+    if set(observations) != LIVE_CRITERIA:
+        raise RuntimeError("live evidence observations drifted from the requirement contract")
+    failed = sorted(key for key, passed in observations.items() if not passed)
+    if failed:
+        raise RuntimeError(f"live criteria not observed: {failed}")
+    criteria = {key: "pass" for key, passed in observations.items() if passed}
     (output / "evidence.json").write_text(json.dumps(
         {"criteria": criteria, "limitations": {}, "trace": "runs/phase4/trace.json"},
         indent=2, sort_keys=True) + "\n")

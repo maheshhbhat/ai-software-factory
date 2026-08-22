@@ -68,6 +68,14 @@ class Phase4LiveHarnessTests(unittest.TestCase):
             self.assertEqual(live.launch_worker(230), 0)
         self.assertTrue(started.call_args.kwargs["start_new_session"])
 
+    def test_live_loop_delegates_review_and_merge_to_runtime(self):
+        environment = live.poll_environment("token", pathlib.Path("runtime.jsonl"))
+        self.assertEqual("1", environment["FACTORY_PHASE4_REVIEWS"])
+        self.assertIn("review-model", environment["FACTORY_REVIEW_MODEL_CMD"])
+        source = pathlib.Path(live.__file__).read_text()
+        self.assertNotIn('command(["gh", "pr", "ready"', source)
+        self.assertNotIn('command(["gh", "pr", "merge"', source)
+
     def test_model_auth_context_never_restores_github_credentials(self):
         with mock.patch.dict(live.os.environ, {"GH_TOKEN": "github",
                                                "GITHUB_TOKEN": "github2"}, clear=False):
@@ -77,16 +85,17 @@ class Phase4LiveHarnessTests(unittest.TestCase):
         self.assertNotIn("GITHUB_TOKEN", environment)
 
     def test_live_wiring_criteria_are_exactly_the_checker_requirements(self):
-        expected = {"P4-02", "P4-04", "P4-05", "P4-06", "P4-07", "P4-08",
-                    "P4-09", "P4-11", "P4-12", "P4-15"}
-        source = (HERE / "phase4_live.py").read_text()
-        self.assertIn("for n in (2, 4, 5, 6, 7, 8, 9, 11, 12, 15)", source)
-        self.assertEqual(len(expected), 10)
+        requirement_path = HERE / "requirement_coverage.py"
+        spec = importlib.util.spec_from_file_location("phase4_requirements", requirement_path)
+        requirements = importlib.util.module_from_spec(spec); spec.loader.exec_module(requirements)
+        expected = {key for key, (_evidence, requires_live) in requirements.PHASE4.items()
+                    if requires_live}
+        self.assertEqual(expected, live.LIVE_CRITERIA)
 
     def test_live_harness_is_explicitly_classified(self):
         coverage_path = HERE.parents[1] / "factory" / "coverage_report.py"
-        coverage_source = coverage_path.read_text()
-        self.assertIn('PHASE4_E2E = "acceptance/phase4_live.py"', coverage_source)
-        self.assertIn('"acceptance/test_phase4_live.py"', coverage_source)
+        spec = importlib.util.spec_from_file_location("coverage_report", coverage_path)
+        coverage = importlib.util.module_from_spec(spec); spec.loader.exec_module(coverage)
+        self.assertIn("acceptance/test_phase4_live.py", coverage.ACCEPTANCE)
 
 if __name__ == "__main__": unittest.main()

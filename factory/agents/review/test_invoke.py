@@ -4,6 +4,7 @@ import os
 import pathlib
 import subprocess
 import sys
+import tempfile
 import unittest
 from unittest import mock
 
@@ -19,6 +20,16 @@ class OutputTests(unittest.TestCase):
         self.assertEqual("Write", cmd[cmd.index("--allowedTools") + 1])
         self.assertEqual("Bash", cmd[cmd.index("--disallowedTools") + 1])
         self.assertIn("--no-session-persistence", cmd)
+
+    def test_outcome_is_written_and_parsed_inside_checkout(self):
+        with tempfile.TemporaryDirectory() as temp:
+            workspace = pathlib.Path(temp)
+            (workspace / "repo").mkdir()
+            output = invoke.outcome_path(workspace)
+            output.write_text(json.dumps({"head": "a" * 40, "verdict": "approval",
+                                          "summary": "checked"}))
+            self.assertTrue(output.is_relative_to(workspace / "repo"))
+            self.assertEqual("approval", invoke.parse_result(output, "a" * 40)["verdict"])
 
     def test_private_git_auth_uses_github_basic_transport_shape(self):
         header = invoke.git_auth_header("secret")
@@ -49,13 +60,28 @@ class OutputTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"GH_TOKEN": "secret", "GITHUB_TOKEN": "secret",
                                           "FACTORY_WORKER_SESSION": "leak",
                                           "ANTHROPIC_API_KEY": "model", "PATH": "/bin",
-                                          "HOME": "/safe/home", "USER": "reviewer",
-                                          "LOGNAME": "reviewer"},
+                                          "HOME": "/operator/home", "USER": "worker",
+                                          "LOGNAME": "worker"},
                              clear=True):
             self.assertEqual(invoke.clean_environment(),
-                             {"ANTHROPIC_API_KEY": "model", "PATH": "/bin",
-                              "HOME": "/safe/home", "USER": "reviewer",
-                              "LOGNAME": "reviewer"})
+                             {"ANTHROPIC_API_KEY": "model", "PATH": "/bin"})
+
+    def test_review_environment_exposes_only_access_token_and_fresh_home(self):
+        with tempfile.TemporaryDirectory() as temp:
+            operator = pathlib.Path(temp) / "operator"
+            credentials = operator / ".claude" / ".credentials.json"
+            credentials.parent.mkdir(parents=True)
+            credentials.write_text(json.dumps({"claudeAiOauth": {
+                "accessToken": "access", "refreshToken": "refresh"}}))
+            review_home = pathlib.Path(temp) / "review-home"
+            with mock.patch.dict(os.environ, {"HOME": str(operator), "PATH": "/bin",
+                                              "FACTORY_WORKER_SESSION": "leak"}, clear=True):
+                env = invoke.review_environment(review_home)
+            self.assertEqual("access", env["CLAUDE_CODE_OAUTH_TOKEN"])
+            self.assertEqual(str(review_home), env["HOME"])
+            self.assertNotIn("refresh", json.dumps(env))
+            self.assertNotIn(str(operator), json.dumps(env))
+            self.assertNotIn("FACTORY_WORKER_SESSION", env)
 
     def test_unavailable_reviewer_fails(self):
         with mock.patch.object(subprocess, "run",

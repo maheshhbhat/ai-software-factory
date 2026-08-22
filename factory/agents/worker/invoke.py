@@ -94,7 +94,7 @@ class GitHub:
     def create_pr(self, title: str, head: str, base: str, body: str):
         return self.api("/pulls", method="POST",
                         value={"title": title, "head": head, "base": base,
-                               "body": body, "draft": True})
+                               "body": body, "draft": False})
 
     def update_pr(self, number: int, body: str):
         return self.api(f"/pulls/{number}", method="PATCH", value={"body": body})

@@ -267,6 +267,8 @@ def review_targets(pulls: list[dict], issues: dict[int, dict],
             continue
         try:
             number = review_route.story_number(pull)
+            if number not in issues:
+                continue
             value = review_route.target(pull, issues.get(number, {}), comments.get(number, []))
         except review_route.RouteError as exc:
             raise WorkerLaunchFailed(

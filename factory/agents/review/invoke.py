@@ -60,9 +60,29 @@ class GitHub:
 
 
 def clean_environment() -> dict[str, str]:
-    keep = ("PATH", "LANG", "LC_ALL", "TMPDIR", "SHELL", "HOME", "USER", "LOGNAME",
+    keep = ("PATH", "LANG", "LC_ALL", "TMPDIR", "SHELL",
             "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN")
     return {key: value for key, value in os.environ.items() if key in keep}
+
+
+def review_environment(review_home: pathlib.Path) -> dict[str, str]:
+    """Fresh reviewer identity context with credential material only."""
+    env = clean_environment()
+    if not env.get("CLAUDE_CODE_OAUTH_TOKEN"):
+        operator_home = os.environ.get("HOME", "")
+        credentials = pathlib.Path(operator_home) / ".claude" / ".credentials.json"
+        try:
+            value = json.loads(credentials.read_text())
+            token = value["claudeAiOauth"]["accessToken"]
+        except (OSError, KeyError, TypeError, json.JSONDecodeError) as exc:
+            raise ReviewError("reviewer credential unavailable") from exc
+        if not isinstance(token, str) or not token:
+            raise ReviewError("reviewer credential unavailable")
+        env["CLAUDE_CODE_OAUTH_TOKEN"] = token
+    review_home.mkdir(mode=0o700)
+    env.update({"HOME": str(review_home), "USER": "factory-reviewer",
+                "LOGNAME": "factory-reviewer"})
+    return env
 
 
 def git_auth_header(token: str) -> str:
@@ -84,9 +104,13 @@ def command(input_path: pathlib.Path, output_path: pathlib.Path) -> list[str]:
             "--no-session-persistence"]
 
 
-def run(cmd, *, cwd, timeout=3600):
+def outcome_path(workspace: pathlib.Path) -> pathlib.Path:
+    return workspace / "repo" / ".factory-review-out.json"
+
+
+def run(cmd, *, cwd, timeout=3600, env=None):
     try:
-        result = subprocess.run(cmd, cwd=cwd, env=clean_environment(), timeout=timeout,
+        result = subprocess.run(cmd, cwd=cwd, env=env or clean_environment(), timeout=timeout,
                                 capture_output=True, text=True)
     except subprocess.TimeoutExpired as exc:
         raise ReviewError(f"reviewer unavailable: timeout after {timeout}s") from exc
@@ -161,9 +185,11 @@ def execute(repo: str, pull_number: int, token: str, *, client=None, timeout=360
         subprocess.run(["git", "checkout", "--quiet", target.head], cwd=workspace / "repo",
                        env=clean_environment(), check=True, capture_output=True,
                        text=True, timeout=timeout)
-        input_path, output_path = workspace / "input.json", workspace / "out.json"
+        input_path = workspace / "input.json"
+        output_path = outcome_path(workspace)
         input_path.write_text(json.dumps(fields, sort_keys=True))
-        run(command(input_path, output_path), cwd=workspace / "repo", timeout=timeout)
+        run(command(input_path, output_path), cwd=workspace / "repo", timeout=timeout,
+            env=review_environment(workspace / "reviewer-home"))
         result = parse_result(output_path, target.head)
 
     fresh = client.api(f"/pulls/{pull_number}")

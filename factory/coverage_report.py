@@ -133,7 +133,6 @@ UNCOVERED_RISKS = (
 # this tool was written to fix — twice now, the coverage of this repository has
 # been measured by hand and the numbers lived only in a transcript.
 E2E = "acceptance/e2e.py"
-PHASE4_E2E = "acceptance/phase4_live.py"
 
 # Production code is what a coverage number is about. Test files cover
 # themselves trivially and including them flatters the total by ~7 points.

@@ -34,6 +34,12 @@ class ParsingTests(unittest.TestCase):
 
 
 class BoundaryTests(unittest.TestCase):
+    def test_delivery_pull_request_is_immediately_reviewable(self):
+        client = invoke.GitHub("o/r", "token")
+        with mock.patch.object(client, "api", return_value={"number": 9}) as api:
+            client.create_pr("title", "branch", "main", "Story: #7")
+        self.assertFalse(api.call_args.kwargs["value"]["draft"])
+
     def test_model_environment_has_no_credentials(self):
         with mock.patch.dict(invoke.os.environ,
                              {"GH_TOKEN": "secret", "GITHUB_TOKEN": "secret2",
