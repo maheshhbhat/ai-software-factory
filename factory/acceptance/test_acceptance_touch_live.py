@@ -36,20 +36,49 @@ class AcceptanceTouchLiveTests(unittest.TestCase):
              mock.patch.object(live.runlog, "event") as event:
             touch = pathlib.Path(temp) / "live-touchlog.jsonl"
             fingerprint = live.continuation.acceptance_identity(decision)[0]
+            touch.write_text(json.dumps({"project": "#304", "bell_type": "acceptance",
+                                         "note": "unrelated receipt"}) + "\n")
 
             def first_run(*_args, **_kwargs):
                 if state["accepted"]:
                     return []
                 state["accepted"] = True
-                touch.write_text(json.dumps({"project": "#310", "bell_type": "acceptance",
-                    "note": f"acceptance-fingerprint:{fingerprint}"}) + "\n")
+                with touch.open("a") as handle:
+                    handle.write(json.dumps({"project": "#310", "bell_type": "acceptance",
+                        "note": f"acceptance-fingerprint:{fingerprint}"}) + "\n")
                 return [mock.Mock(number=298), mock.Mock(number=310)]
 
             with mock.patch.object(live.continuation, "run", side_effect=first_run):
                 evidence = live.consume(Client(), "token", 310)
         self.assertEqual(evidence["fixture"]["after"], "project:accepted")
         self.assertEqual(evidence["replay"], {"new_entries": 0, "transitions": 0})
+        self.assertEqual(evidence["transition"], {"target_transitions": 1,
+                                                   "unrelated_transitions_in_pass": 1})
         event.assert_called_once()
+
+    def test_delivery_recorder_fails_until_story_pr_and_both_checks_are_terminal(self):
+        issue = {"state": "CLOSED", "labels": [{"name": "story:merged"}]}
+        good = {"state": "MERGED", "mergedAt": "2026-08-22T20:00:00Z",
+                "statusCheckRollup": [
+                    {"name": "merge-gate", "conclusion": "SUCCESS"},
+                    {"name": "merge-gate-surface", "conclusion": "SUCCESS"}]}
+        def completed(value):
+            return mock.Mock(stdout=json.dumps(value), returncode=0)
+        with tempfile.TemporaryDirectory() as temp, \
+             mock.patch.object(live, "OUT", pathlib.Path(temp)), \
+             mock.patch.object(live.subprocess, "run",
+                               side_effect=[completed(issue), completed(good)]):
+            record = live.record_delivery(295, 297)
+        self.assertEqual(record["checks"], {"merge-gate": "SUCCESS",
+                                            "merge-gate-surface": "SUCCESS"})
+
+        bad = {**good, "statusCheckRollup": good["statusCheckRollup"][:1]}
+        with tempfile.TemporaryDirectory() as temp, \
+             mock.patch.object(live, "OUT", pathlib.Path(temp)), \
+             mock.patch.object(live.subprocess, "run",
+                               side_effect=[completed(issue), completed(bad)]), \
+             self.assertRaisesRegex(RuntimeError, "both required checks"):
+            live.record_delivery(295, 297)
 
     def test_records_rejects_malformed_jsonl(self):
         with tempfile.TemporaryDirectory() as temp:

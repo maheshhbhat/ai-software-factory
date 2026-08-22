@@ -3,7 +3,8 @@
     "AT-03": "pass",
     "AT-05": "pass",
     "AT-06": "pass",
-    "AT-07": "pass"
+    "AT-07": "pass",
+    "AT-08": "pass"
   },
   "decision": {
     "canonical_payload": {
@@ -16,14 +17,27 @@
       "follow_up": [],
       "result": "pass"
     },
-    "comment_url": "https://github.com/maheshhbhat/ai-software-factory/issues/304#issuecomment-5382418747",
+    "comment_url": "https://github.com/maheshhbhat/ai-software-factory/issues/310#issuecomment-5382538124",
     "fingerprint": "16887be501ab9216edbeb674c6ee4926d1f3f4a7bc791a64fc75a355f15f2dd7"
   },
+  "delivery": [
+    {
+      "checks": {
+        "merge-gate": "SUCCESS",
+        "merge-gate-surface": "SUCCESS"
+      },
+      "merged_at": "2026-08-22T19:59:34Z",
+      "pr": 297,
+      "pr_state": "MERGED",
+      "story": 295,
+      "story_state": "story:merged"
+    }
+  ],
   "fixture": {
     "after": "project:accepted",
     "before": "project:awaiting-acceptance",
     "cleanup": "accepted and closed",
-    "project": 304
+    "project": 310
   },
   "replay": {
     "new_entries": 0,
@@ -32,57 +46,57 @@
   "runlog": "runs/acceptance-touch/runtime.jsonl",
   "timeline": [
     {
-      "created_at": "2026-08-22T20:13:22Z",
-      "event": "cross-referenced",
-      "label": null
-    },
-    {
-      "created_at": "2026-08-22T20:13:23Z",
+      "created_at": "2026-08-22T20:44:30Z",
       "event": "labeled",
       "label": "type:project"
     },
     {
-      "created_at": "2026-08-22T20:13:23Z",
+      "created_at": "2026-08-22T20:44:31Z",
       "event": "labeled",
       "label": "project:active"
     },
     {
-      "created_at": "2026-08-22T20:14:34Z",
+      "created_at": "2026-08-22T20:44:31Z",
+      "event": "cross-referenced",
+      "label": null
+    },
+    {
+      "created_at": "2026-08-22T20:44:39Z",
       "event": "unlabeled",
       "label": "project:active"
     },
     {
-      "created_at": "2026-08-22T20:14:34Z",
+      "created_at": "2026-08-22T20:44:39Z",
       "event": "labeled",
       "label": "project:awaiting-acceptance"
     },
     {
-      "created_at": "2026-08-22T20:23:12Z",
+      "created_at": "2026-08-22T20:51:40Z",
       "event": "commented",
       "label": null
     },
     {
-      "created_at": "2026-08-22T20:23:13Z",
+      "created_at": "2026-08-22T20:51:42Z",
       "event": "mentioned",
       "label": null
     },
     {
-      "created_at": "2026-08-22T20:23:13Z",
+      "created_at": "2026-08-22T20:51:42Z",
       "event": "subscribed",
       "label": null
     },
     {
-      "created_at": "2026-08-22T20:23:20Z",
+      "created_at": "2026-08-22T20:51:47Z",
       "event": "closed",
       "label": null
     },
     {
-      "created_at": "2026-08-22T20:23:20Z",
+      "created_at": "2026-08-22T20:51:47Z",
       "event": "unlabeled",
       "label": "project:awaiting-acceptance"
     },
     {
-      "created_at": "2026-08-22T20:23:20Z",
+      "created_at": "2026-08-22T20:51:47Z",
       "event": "labeled",
       "label": "project:accepted"
     }
@@ -91,14 +105,14 @@
     "actor": "@maheshhbhat",
     "bell_type": "acceptance",
     "classification": "decision",
-    "note": "acceptance-fingerprint:16887be501ab9216edbeb674c6ee4926d1f3f4a7bc791a64fc75a355f15f2dd7; GitHub acceptance decision consumed; time unavailable, recorded as 0",
-    "project": "#304",
+    "note": "acceptance-receipt:#310:16887be501ab9216edbeb674c6ee4926d1f3f4a7bc791a64fc75a355f15f2dd7; acceptance-fingerprint:16887be501ab9216edbeb674c6ee4926d1f3f4a7bc791a64fc75a355f15f2dd7; GitHub acceptance decision consumed; time unavailable, recorded as 0",
+    "project": "#310",
     "seconds_spent": 0,
     "story": null,
-    "timestamp": "2026-08-22T20:23:12Z"
+    "timestamp": "2026-08-22T20:51:40Z"
   },
   "transition": {
-    "recovered_after_harness_assertion": true,
-    "target_transitions": 1
+    "target_transitions": 1,
+    "unrelated_transitions_in_pass": 0
   }
 }

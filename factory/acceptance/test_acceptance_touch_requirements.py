@@ -18,10 +18,10 @@ class AcceptanceTouchRequirementTests(unittest.TestCase):
                  "fixture": {"before": "project:awaiting-acceptance",
                              "after": "project:accepted"},
                  "replay": {"new_entries": 0, "transitions": 0}, "touch": {"x": 1},
-                 "delivery": {"story": 296, "story_state": "story:merged",
+                 "delivery": [{"story": 295, "story_state": "story:merged",
                               "pr_state": "MERGED", "checks": {
                                   "merge-gate": "SUCCESS",
-                                  "merge-gate-surface": "SUCCESS"}}}
+                                  "merge-gate-surface": "SUCCESS"}}]}
         path = self.evidence(value)
         self.assertEqual(requirements.build(path)["stale"], [])
 
@@ -31,15 +31,15 @@ class AcceptanceTouchRequirementTests(unittest.TestCase):
         self.assertEqual(set(report["missing_live"]), expected)
 
     def test_delivery_evidence_requires_merged_story_and_both_checks(self):
-        base = {"criteria": {"AT-08": "pass"}, "delivery": {
-            "story": 296, "story_state": "story:merged", "pr_state": "MERGED",
-            "checks": {"merge-gate": "SUCCESS", "merge-gate-surface": "SUCCESS"}}}
+        base = {"criteria": {"AT-08": "pass"}, "delivery": [{
+            "story": 295, "story_state": "story:merged", "pr_state": "MERGED",
+            "checks": {"merge-gate": "SUCCESS", "merge-gate-surface": "SUCCESS"}}]}
         self.assertTrue(requirements.live_passes("AT-08", base))
         for mutation in (
                 {"story_state": "story:in-review"}, {"pr_state": "OPEN"},
                 {"checks": {"merge-gate": "SUCCESS"}}):
             changed = json.loads(json.dumps(base))
-            changed["delivery"].update(mutation)
+            changed["delivery"][0].update(mutation)
             self.assertFalse(requirements.live_passes("AT-08", changed))
 
     def test_live_fixture_evidence_fails_without_transition_touch_or_clean_replay(self):

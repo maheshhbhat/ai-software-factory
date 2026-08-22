@@ -318,7 +318,11 @@ def touchlog_path() -> pathlib.Path:
 def ensure_acceptance_touch(project: int, comment: dict, *, runner=subprocess.run) -> str:
     """Durably append and read back one receipt before decision consumption."""
     fingerprint, _ = acceptance_identity(comment)
-    marker = f"acceptance-fingerprint:{fingerprint}"
+    fingerprint_marker = f"acceptance-fingerprint:{fingerprint}"
+    # append.py's unique marker is global to the file.  Decision identity is
+    # intentionally independent of Project identity, but receipt identity is
+    # not: two Projects may make the same normalized decision legitimately.
+    receipt_marker = f"acceptance-receipt:#{project}:{fingerprint}"
     path = touchlog_path()
 
     def records() -> list[dict]:
@@ -332,7 +336,7 @@ def ensure_acceptance_touch(project: int, comment: dict, *, runner=subprocess.ru
     found = [entry for entry in records()
              if entry.get("project") == f"#{project}"
              and entry.get("bell_type") == "acceptance"
-             and marker in (entry.get("note") or "")]
+             and fingerprint_marker in (entry.get("note") or "")]
     if len(found) > 1:
         raise TouchEvidenceError("duplicate canonical acceptance evidence")
     if found:
@@ -344,7 +348,7 @@ def ensure_acceptance_touch(project: int, comment: dict, *, runner=subprocess.ru
              ((comment.get("user") or {}).get("login") or "unknown"))
     seconds_match = SECONDS_RE.search(body)
     seconds = int(seconds_match.group("value")) if seconds_match else 0
-    note = f"{marker}; GitHub acceptance decision consumed"
+    note = f"{receipt_marker}; {fingerprint_marker}; GitHub acceptance decision consumed"
     if not seconds_match:
         note += "; time unavailable, recorded as 0"
     script = pathlib.Path(__file__).resolve().parents[1] / "touchlog" / "append.py"
@@ -352,7 +356,7 @@ def ensure_acceptance_touch(project: int, comment: dict, *, runner=subprocess.ru
                "--bell-type", "acceptance", "--classification", "decision",
                "--seconds-spent", str(seconds), "--actor", f"@{actor}",
                "--note", note, "--file", str(path),
-               "--unique-note-marker", marker]
+               "--unique-note-marker", receipt_marker]
     created = comment.get("created_at") or comment.get("createdAt")
     if created:
         command.extend(["--timestamp", created])
@@ -361,7 +365,8 @@ def ensure_acceptance_touch(project: int, comment: dict, *, runner=subprocess.ru
         raise TouchEvidenceError(
             f"canonical acceptance append failed: {(result.stderr or result.stdout)[:300]}")
     verified = [entry for entry in records()
-                if entry.get("project") == f"#{project}" and marker in (entry.get("note") or "")]
+                if entry.get("project") == f"#{project}"
+                and fingerprint_marker in (entry.get("note") or "")]
     if len(verified) != 1:
         raise TouchEvidenceError("canonical acceptance evidence read-back failed")
     return fingerprint

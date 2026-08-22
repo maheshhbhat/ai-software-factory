@@ -1,7 +1,7 @@
 {
-  "marker": "<!-- acceptance-touch-live:v1 -->",
+  "marker": "<!-- acceptance-touch-live:v3 -->",
   "prepared_state": "project:awaiting-acceptance",
-  "project": 304,
+  "project": 310,
   "repo": "maheshhbhat/ai-software-factory",
-  "story": 305
+  "story": 311
 }

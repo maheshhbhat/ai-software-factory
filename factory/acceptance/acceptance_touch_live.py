@@ -19,7 +19,7 @@ import time
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 OUT = ROOT / "runs" / "acceptance-touch"
 REPO = "maheshhbhat/ai-software-factory"
-MARKER = "<!-- acceptance-touch-live:v1 -->"
+MARKER = "<!-- acceptance-touch-live:v3 -->"
 
 sys.path.insert(0, str(ROOT / "factory" / "agents" / "worker"))
 import invoke as delivery
@@ -176,49 +176,57 @@ def consume(client, secret: str, project: int) -> dict:
     runtime = OUT / "runtime.jsonl"
     OUT.mkdir(parents=True, exist_ok=True)
     before = client.issue(project)
-    before_labels = labels(before)
-    recovering = "project:accepted" in before_labels
-    if not recovering and "project:awaiting-acceptance" not in before_labels:
-        raise RuntimeError("fixture is neither awaiting acceptance nor recovering accepted evidence")
+    if "project:awaiting-acceptance" not in labels(before):
+        raise RuntimeError("fixture is not awaiting the owner's acceptance")
     comments = client.pages(f"/issues/{project}/comments")
     decisions = continuation.owner_decisions(comments, continuation.ACCEPTANCE_HEADING)
     if not decisions:
         raise RuntimeError("owner acceptance decision is not posted")
     fingerprint, payload = continuation.acceptance_identity(decisions[-1])
+    before_records = records(touch)
+    target_before = [row for row in before_records
+                     if row.get("project") == f"#{project}"
+                     and f"acceptance-fingerprint:{fingerprint}" in row.get("note", "")]
     old_env = dict(os.environ)
     try:
         os.environ.update({"FACTORY_TOUCHLOG_FILE": str(touch),
                            "FACTORY_RUNTIME_LOG": str(runtime),
                            "FACTORY_RUNTIME_LOG_STDERR": "0"})
-        first = [] if recovering else continuation.run(REPO, secret, apply=True)
+        first = continuation.run(REPO, secret, apply=True)
         after_first = records(touch)
         second = continuation.run(REPO, secret, apply=True)
         after_replay = records(touch)
-        target_first = ([item for item in first if item.number == project]
-                        if not recovering else ["reconstructed-from-timeline"])
+        target_first = [item for item in first if item.number == project]
         target_replay = [item for item in second if item.number == project]
         runlog.event("acceptance_touch.live", project=project,
                      fingerprint=fingerprint, first_transitions=len(first),
                      target_first_transitions=len(target_first),
                      replay_transitions=len(second),
                      target_replay_transitions=len(target_replay),
-                     touch_entries=len(after_replay), recovering=recovering)
+                     touch_entries=len(after_replay))
     finally:
         os.environ.clear(); os.environ.update(old_env)
     after = client.issue(project)
-    matching = [row for row in after_replay
-                if row.get("project") == f"#{project}"
+    def target(rows):
+        return [row for row in rows if row.get("project") == f"#{project}"
                 and f"acceptance-fingerprint:{fingerprint}" in row.get("note", "")]
+    matching_first = target(after_first)
+    matching = target(after_replay)
     timeline = client.pages(f"/issues/{project}/timeline")
     accepted_events = [item for item in timeline
                        if item.get("event") == "labeled"
                        and (item.get("label") or {}).get("name") == "project:accepted"]
     passed = ("project:accepted" in labels(after) and len(target_first) == 1
-              and len(target_replay) == 0 and len(after_first) == 1
+              and len(target_replay) == 0 and len(target_before) == 0
+              and len(matching_first) == 1
               and after_first == after_replay and len(matching) == 1
-              and (not recovering or bool(accepted_events)))
+              and len(accepted_events) == 1)
     if not passed:
         raise RuntimeError("live acceptance/touch/replay invariant failed")
+    prior = {}
+    evidence_path = OUT / "evidence.json"
+    if evidence_path.exists():
+        prior = json.loads(evidence_path.read_text())
     evidence = {
         "criteria": {key: "pass" for key in ("AT-03", "AT-05", "AT-06", "AT-07")},
         "fixture": {"project": project, "before": "project:awaiting-acceptance",
@@ -227,16 +235,49 @@ def consume(client, secret: str, project: int) -> dict:
                      "fingerprint": fingerprint, "canonical_payload": json.loads(payload)},
         "touch": matching[0],
         "transition": {"target_transitions": 1,
-                       "recovered_after_harness_assertion": recovering},
+                       "unrelated_transitions_in_pass": len(first) - 1},
         "replay": {"new_entries": 0, "transitions": 0},
         "runlog": "runs/acceptance-touch/runtime.jsonl",
         "timeline": [{"event": item.get("event"),
                       "label": (item.get("label") or {}).get("name"),
                       "created_at": item.get("created_at")} for item in timeline],
     }
-    (OUT / "evidence.json").write_text(json.dumps(evidence, indent=2,
-                                                   sort_keys=True) + "\n")
+    if prior.get("delivery"):
+        evidence["delivery"] = prior["delivery"]
+        evidence["criteria"]["AT-08"] = "pass"
+    evidence_path.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n")
     return evidence
+
+
+def record_delivery(story: int, pull: int) -> dict:
+    issue = json.loads(subprocess.run(
+        ["gh", "issue", "view", str(story), "--repo", REPO,
+         "--json", "state,labels"], capture_output=True, text=True, check=True).stdout)
+    pr = json.loads(subprocess.run(
+        ["gh", "pr", "view", str(pull), "--repo", REPO,
+         "--json", "state,mergedAt,statusCheckRollup"],
+        capture_output=True, text=True, check=True).stdout)
+    story_labels = {item["name"] for item in issue.get("labels", [])}
+    checks = {item.get("name"): item.get("conclusion")
+              for item in pr.get("statusCheckRollup", [])}
+    record = {"story": story,
+              "story_state": "story:merged" if "story:merged" in story_labels else None,
+              "pr": pull, "pr_state": pr.get("state"), "merged_at": pr.get("mergedAt"),
+              "checks": {name: checks.get(name) for name in
+                         ("merge-gate", "merge-gate-surface")}}
+    if not (record["story_state"] == "story:merged" and record["pr_state"] == "MERGED"
+            and all(value == "SUCCESS" for value in record["checks"].values())):
+        raise RuntimeError("delivery is not merged with both required checks")
+    path = OUT / "evidence.json"
+    value = json.loads(path.read_text()) if path.exists() else {"criteria": {}}
+    deliveries = [item for item in value.get("delivery", [])
+                  if item.get("story") != story]
+    deliveries.append(record)
+    value["delivery"] = sorted(deliveries, key=lambda item: item["story"])
+    value.setdefault("criteria", {})["AT-08"] = "pass"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
+    return record
 
 
 def main(argv=None) -> int:
@@ -245,11 +286,16 @@ def main(argv=None) -> int:
     sub.add_parser("prepare")
     consume_parser = sub.add_parser("consume")
     consume_parser.add_argument("--project", type=int)
+    delivery_parser = sub.add_parser("record-delivery")
+    delivery_parser.add_argument("--story", type=int, required=True)
+    delivery_parser.add_argument("--pr", type=int, required=True)
     args = parser.parse_args(argv)
     secret = token()
     client = delivery.GitHub(REPO, secret)
     if args.command == "prepare":
         print(json.dumps(prepare(client, secret), sort_keys=True)); return 0
+    if args.command == "record-delivery":
+        print(json.dumps(record_delivery(args.story, args.pr), sort_keys=True)); return 0
     fixture = json.loads((OUT / "fixture.json").read_text())
     print(json.dumps(consume(client, secret, args.project or fixture["project"]),
                      sort_keys=True))

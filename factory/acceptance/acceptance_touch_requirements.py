@@ -53,12 +53,13 @@ def live_passes(key: str, evidence: dict) -> bool:
                 and replay.get("transitions") == 0
                 and bool(evidence.get("touch")))
     if key == "AT-08":
-        delivery = evidence.get("delivery") or {}
-        checks = delivery.get("checks") or {}
-        return (delivery.get("story") == 296 and delivery.get("story_state") == "story:merged"
-                and delivery.get("pr_state") == "MERGED"
-                and checks.get("merge-gate") == "SUCCESS"
-                and checks.get("merge-gate-surface") == "SUCCESS")
+        deliveries = evidence.get("delivery") or []
+        return bool(deliveries) and all(
+            item.get("story_state") == "story:merged"
+            and item.get("pr_state") == "MERGED"
+            and (item.get("checks") or {}).get("merge-gate") == "SUCCESS"
+            and (item.get("checks") or {}).get("merge-gate-surface") == "SUCCESS"
+            for item in deliveries)
     return True
 
 
