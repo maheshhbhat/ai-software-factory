@@ -45,12 +45,82 @@ import argparse
 import json
 import os
 import sys
+from pathlib import Path
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 for relative in ("..", "../dispatcher", "../runtime", "../gates", "."):
     sys.path.insert(0, os.path.join(HERE, relative))
 
 import phase2_requirements as reqs  # noqa: E402
+
+ROOT = Path(HERE).parents[1]
+PHASE4_EVIDENCE = ROOT / "runs" / "phase4" / "evidence.json"
+
+# Every approved Project #212 criterion has named hermetic evidence. A live
+# claim is separate: #220 writes the durable ledger after the real run.
+PHASE4 = {
+    "P4-01": (("test_phase4_worker.py", "test_first_delivery_replay_and_retry_use_one_durable_pr"), False),
+    "P4-02": (("test_phase4_worker.py", "test_repository_access_failure_happens_before_any_write"), True),
+    "P4-03": (("test_phase4_requirement_coverage.py", "test_shared_credential_boundary_is_explicit"), False),
+    "P4-04": (("test_phase4_worker.py", "test_out_of_scope_model_change_creates_no_artifact"), True),
+    "P4-05": (("test_phase4_review.py", "test_allowlisted_fresh_input_exact_head_and_replay"), True),
+    "P4-06": (("test_phase4_review.py", "test_head_change_during_review_refuses_stale_result_without_a_write"), True),
+    "P4-07": (("test_phase4_delivery_loop.py", "test_reject_retry_same_pr_new_head_then_advisory_approval"), True),
+    "P4-08": (("test_phase4_delivery_loop.py", "test_reject_retry_same_pr_new_head_then_advisory_approval"), True),
+    "P4-09": (("test_phase4_sampling.py", "test_selected_pass_closes_once_and_logs_one_touch"), True),
+    "P4-10": (("test_phase4_fixture.py", "test_live_health_interface_returns_authoritative_sha"), False),
+    "P4-11": (("test_phase4_delivery_loop.py", "test_reject_retry_same_pr_new_head_then_advisory_approval"), True),
+    "P4-12": (("test_phase4_delivery_loop.py", "test_reject_retry_same_pr_new_head_then_advisory_approval"), True),
+    "P4-13": (("test_phase4_requirement_coverage.py", "test_every_criterion_has_named_hermetic_evidence"), False),
+    "P4-14": (("test_coverage_report.py", "test_phase4_suites_are_explicit_and_risks_are_reported"), False),
+    "P4-15": (("test_acceptance.py", "test_every_named_phase_2_behaviour_has_a_scenario"), True),
+    "P4-16": (("test_phase4_requirement_coverage.py", "test_phase_boundary_excludes_product_stories"), False),
+}
+
+
+def phase4_evidence(path: Path = PHASE4_EVIDENCE) -> dict:
+    if not path.exists():
+        return {"criteria": {}, "limitations": {}}
+    try:
+        value = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return {"criteria": {}, "limitations": {}}
+    return value if isinstance(value, dict) else {"criteria": {}, "limitations": {}}
+
+
+def build_phase4(evidence_path: Path = PHASE4_EVIDENCE) -> dict:
+    live = phase4_evidence(evidence_path)
+    rows, missing_acceptance, missing_live, stale = [], [], [], []
+    for key, ((filename, test_name), requires_live) in PHASE4.items():
+        path = Path(HERE) / filename
+        present = path.exists() and f"def {test_name}(" in path.read_text()
+        if not present:
+            stale.append(f"{key}:{filename}::{test_name}")
+        recorded = (live.get("criteria") or {}).get(key) == "pass"
+        limitation = (live.get("limitations") or {}).get(key, {})
+        limited = all(limitation.get(field) for field in
+                      ("owner_approved", "why", "substitute_evidence", "residual_risk"))
+        if not present: missing_acceptance.append(key)
+        if requires_live and not (recorded or limited): missing_live.append(key)
+        rows.append({"key": key, "acceptance": f"{filename}::{test_name}",
+                     "acceptance_present": present, "live_required": requires_live,
+                     "live": "pass" if recorded else ("limitation" if limited else None)})
+    return {"scope": "Phase 4 Project #212 criteria", "total": 16,
+            "requirements": rows, "missing_acceptance": missing_acceptance,
+            "missing_live": missing_live, "stale_declarations": stale}
+
+
+def render_phase4(report: dict) -> str:
+    lines = ["Phase 4 requirement ladder — hermetic and live evidence", ""]
+    for row in report["requirements"]:
+        lines.append(f"  {row['key']}  acceptance={'yes' if row['acceptance_present'] else 'MISSING'}  "
+                     f"live={row['live'] or ('MISSING' if row['live_required'] else 'n/a')}  "
+                     f"{row['acceptance']}")
+    if report["missing_acceptance"]:
+        lines.append("\n  MISSING HERMETIC: " + ", ".join(report["missing_acceptance"]))
+    if report["missing_live"]:
+        lines.append("\n  MISSING LIVE E2E: " + ", ".join(report["missing_live"]))
+    return "\n".join(lines)
 
 # Which acceptance scenario proves which requirement. Declared here rather than
 # inferred from names: a mapping guessed from a string is a mapping that goes
@@ -164,16 +234,21 @@ def render(report: dict) -> str:
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description="Requirement coverage (deterministic)")
     parser.add_argument("--json", help="also write the report here")
+    parser.add_argument("--phase4", action="store_true",
+                        help="check Project #212; requires #220 live evidence for wiring claims")
     args = parser.parse_args(argv)
 
-    report = build()
-    print(render(report))
+    report = build_phase4() if args.phase4 else build()
+    print(render_phase4(report) if args.phase4 else render(report))
     if args.json:
         with open(args.json, "w", encoding="utf-8") as handle:
             json.dump(report, handle, indent=2, sort_keys=True)
             handle.write("\n")
         print(f"\n  report written to {args.json}")
-    return 1 if (report["untested"] or report["stale_declarations"]) else 0
+    failures = ((report["missing_acceptance"] or report["missing_live"] or
+                 report["stale_declarations"]) if args.phase4 else
+                (report["untested"] or report["stale_declarations"]))
+    return 1 if failures else 0
 
 
 if __name__ == "__main__":

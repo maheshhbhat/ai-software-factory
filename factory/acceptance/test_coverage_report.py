@@ -14,6 +14,18 @@ SPEC.loader.exec_module(coverage_report)
 
 
 class PlanningCoverageClassificationTests(unittest.TestCase):
+    def test_phase4_suites_are_explicit_and_risks_are_reported(self):
+        grouped = coverage_report.classify()
+        for path in coverage_report.PHASE4_UNIT:
+            self.assertIn(path, grouped["unit"])
+        for path in coverage_report.ACCEPTANCE:
+            if "phase4" in path:
+                self.assertIn(path, grouped["acceptance"])
+        self.assertIn("agents/worker", coverage_report.SUITES)
+        self.assertIn("agents/review", coverage_report.SUITES)
+        self.assertTrue(coverage_report.PHASE4_MODULES)
+        self.assertTrue(coverage_report.UNCOVERED_RISKS)
+
     def test_planning_suite_and_every_test_are_explicitly_classified(self):
         self.assertIn("agents/planning", coverage_report.SUITES)
         found = {path for path in coverage_report.test_files()
