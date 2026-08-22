@@ -21,15 +21,15 @@ class Phase4LiveHarnessTests(unittest.TestCase):
     def test_review_model_binds_engine_verdict_to_checkout_head(self):
         with tempfile.TemporaryDirectory() as temp:
             source, target = pathlib.Path(temp) / "in.json", pathlib.Path(temp) / "out.json"
-            source.write_text(json.dumps({"diff": [{"patch": "+ defective"}]}))
-            responses = [mock.Mock(stdout="b" * 40 + "\n"),
-                         mock.Mock(stdout='{"verdict":"findings","findings":["fix"]}\n')]
+            source.write_text(json.dumps({"head": "b" * 40,
+                                          "diff": [{"patch": "+ defective"}]}))
+            responses = [mock.Mock(stdout='{"verdict":"findings","findings":["fix"]}\n')]
             with mock.patch.object(live, "command", side_effect=responses) as command:
                 live.review_model(str(source), str(target))
             result = json.loads(target.read_text())
             self.assertEqual(result["head"], "b" * 40)
             self.assertEqual(result["verdict"], "findings")
-            review_call = command.call_args_list[1]
+            review_call = command.call_args_list[0]
             self.assertIn("--safe-mode", review_call.args[0])
             self.assertEqual(dict(live.os.environ), review_call.kwargs["env"])
 

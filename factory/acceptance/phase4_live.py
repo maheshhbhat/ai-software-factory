@@ -190,8 +190,7 @@ def launch_worker(story):
 
 def review_model(input_file, output_file):
     value = json.loads(pathlib.Path(input_file).read_text())
-    head = command(["git", "rev-parse", "HEAD"], timeout=30,
-                   cwd=pathlib.Path.cwd()).stdout.strip()
+    head = value["head"]
     diff = json.dumps(value["diff"])
     prompt = ("Act as a strict code reviewer. Return exactly one compact JSON object and no "
               "markdown. If the diff returns or embeds the literal defective as build_sha, "

@@ -187,7 +187,8 @@ def execute(repo: str, pull_number: int, token: str, *, client=None, timeout=360
         raise ReviewError("approved active Project unavailable")
     adrs = [x for x in client.pages("/issues?state=all")
             if "type:adr" in {label.get("name") for label in x.get("labels", [])}]
-    fields = {"diff": [{"filename": x.get("filename"), "status": x.get("status"),
+    fields = {"head": target.head,
+              "diff": [{"filename": x.get("filename"), "status": x.get("status"),
                          "patch": x.get("patch", "")} for x in
                         client.pages(f"/pulls/{pull_number}/files")],
               "story_spec": story.get("body", ""),

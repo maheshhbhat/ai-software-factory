@@ -101,7 +101,8 @@ class ReviewAcceptanceTests(unittest.TestCase):
         first = self.deliver()
         self.assertEqual(first["status"], "approval")
         self.assertEqual(set(self.serialized),
-                         {"diff", "story_spec", "project_criteria", "adrs"})
+                         {"head", "diff", "story_spec", "project_criteria", "adrs"})
+        self.assertEqual(SHA, self.serialized["head"])
         self.assertEqual(self.workspace_entries, ["input.json", "repo", "reviewer-home"])
         self.assertNotIn("worker", json.dumps(self.serialized).lower())
         self.assertEqual(self.deliver()["status"], "replay")
