@@ -4,6 +4,7 @@ import pathlib
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 HERE = pathlib.Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
@@ -14,7 +15,33 @@ SPEC.loader.exec_module(coverage)
 sys.path.insert(0, str(ROOT / "factory" / "runtime"))
 import review_link
 
+LIVE_SPEC = importlib.util.spec_from_file_location("phase4_live_for_requirements",
+                                                   HERE / "phase4_live.py")
+phase4_live = importlib.util.module_from_spec(LIVE_SPEC)
+LIVE_SPEC.loader.exec_module(phase4_live)
+
 class Phase4RequirementCoverageTests(unittest.TestCase):
+    def test_phase4_delivery_evidence_requires_project_story_and_both_checks(self):
+        # The hermetic half of P4-15 proves that its live evidence collector is
+        # tied to this Project and cannot report delivery with only one green
+        # check.  The checked-in live ledger supplies the repository observation.
+        self.assertIn("#212", phase4_live.story_body())
+        both = mock.Mock(returncode=0, stdout=json.dumps([
+            {"name": "merge-gate", "bucket": "pass"},
+            {"name": "merge-gate-surface", "bucket": "pass"},
+        ]))
+        with mock.patch.object(phase4_live, "command", return_value=both):
+            self.assertEqual(len(phase4_live.checks_pass(280, timeout=1)), 2)
+
+        only_required = mock.Mock(returncode=0, stdout=json.dumps([
+            {"name": "merge-gate", "bucket": "pass"},
+        ]))
+        with mock.patch.object(phase4_live, "command", return_value=only_required), \
+             mock.patch.object(phase4_live.time, "time", side_effect=[0, 0, 2]), \
+             mock.patch.object(phase4_live.time, "sleep"):
+            with self.assertRaisesRegex(RuntimeError, "timed out"):
+                phase4_live.checks_pass(280, timeout=1)
+
     def test_claimed_story_routes_through_linked_pr_before_merge(self):
         merged = {"number": 50, "state": "closed", "merged_at": "now",
                   "body": "Story: #218\n", "head": {"sha": "a" * 40}}
