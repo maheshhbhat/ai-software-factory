@@ -42,6 +42,7 @@ from __future__ import annotations
 import os
 import re
 import sys
+from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "gates"))
 import merge_gate  # noqa: E402
@@ -75,6 +76,7 @@ class Reason:
     MALFORMED_DECISION = "MALFORMED_DECISION"
     CONFLICTING_DECISIONS = "CONFLICTING_DECISIONS"
     UNSUPPORTED_BELL = "UNSUPPORTED_BELL"
+    BELL_TIME_UNAVAILABLE = "BELL_TIME_UNAVAILABLE"
 
 
 class Outcome:
@@ -106,6 +108,18 @@ def lifecycle_of(issue: dict) -> str | None:
 def is_owner(comment: dict) -> bool:
     return (comment.get("authorAssociation")
             or comment.get("author_association") or "").upper() in DECIDING_ASSOCIATIONS
+
+
+def timestamp(value) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(timezone.utc)
 
 
 def criteria_of(body: str) -> str | None:
@@ -199,6 +213,24 @@ def evaluate_project(project: dict, comments: list[dict]) -> Outcome:
                            f"{len(approval_shaped)} decision-shaped comment(s), none owner-authored")
         return Outcome(number, None, Reason.NO_DECISION)
 
+    if state == AWAITING_ACCEPTANCE:
+        bell_at = timestamp(project.get("_bell_at"))
+        if bell_at is None:
+            return Outcome(number, None, Reason.BELL_TIME_UNAVAILABLE,
+                           "latest awaiting-acceptance transition time is unavailable")
+        current = []
+        for decision in decisions:
+            created_at = timestamp(decision.get("created_at") or decision.get("createdAt"))
+            if created_at is None:
+                return Outcome(number, None, Reason.BELL_TIME_UNAVAILABLE,
+                               "an acceptance decision has a missing or malformed timestamp")
+            if created_at >= bell_at:
+                current.append((created_at, decision))
+        decisions = [decision for _, decision in sorted(current, key=lambda item: item[0])]
+        if not decisions:
+            return Outcome(number, None, Reason.NO_DECISION,
+                           "no owner acceptance decision belongs to the current bell")
+
     verdicts = []
     for comment in decisions:
         verdict, err = classify(comment)
@@ -206,14 +238,11 @@ def evaluate_project(project: dict, comments: list[dict]) -> Outcome:
             return Outcome(number, None, err, "unreadable decision comment")
         verdicts.append((verdict, comment))
 
-    # Plan approval occurs once, so conflicting approval decisions remain a
-    # human ambiguity. Outcome acceptance may occur repeatedly by design:
-    # §5.3 sends a failed acceptance back to active for corrective work, after
-    # which the project reaches a new awaiting-acceptance bell. At that new bell
-    # the latest owner result is the decision being consumed; the earlier fail
-    # remains immutable audit evidence rather than becoming a permanent veto.
+    # Decisions have already been scoped to the current bell. Any disagreement
+    # within that bell is ambiguous and fails closed. An earlier failed bell is
+    # absent from this set but remains immutable GitHub audit evidence.
     distinct = {v for v, _ in verdicts}
-    if state == AWAITING_READY and len(distinct) > 1:
+    if len(distinct) > 1:
         return Outcome(number, None, Reason.CONFLICTING_DECISIONS,
                        f"{sorted(distinct)} across {len(verdicts)} owner comments")
 
@@ -315,6 +344,33 @@ def fetch_comments(repo: str, number: int, token: str) -> list[dict]:
     return comments
 
 
+def fetch_bell_at(repo: str, number: int, token: str, label: str) -> str | None:
+    """Latest GitHub timeline event that put this project at its current bell."""
+    import json
+    import urllib.request
+
+    events, page = [], 1
+    while True:
+        request = urllib.request.Request(
+            f"https://api.github.com/repos/{repo}/issues/{number}/timeline"
+            f"?per_page=100&page={page}",
+            headers={"Authorization": f"Bearer {token}",
+                     "Accept": "application/vnd.github+json",
+                     "User-Agent": "factory-continuation"})
+        with urllib.request.urlopen(request, timeout=30) as response:
+            batch = json.loads(response.read().decode("utf-8"))
+        events.extend(batch)
+        if len(batch) < 100:
+            break
+        page += 1
+    labeled = [event.get("created_at") for event in events
+               if event.get("event") == "labeled"
+               and (event.get("label") or {}).get("name") == label]
+    valid = [(timestamp(value), value) for value in labeled]
+    valid = [(parsed, value) for parsed, value in valid if parsed is not None]
+    return max(valid, key=lambda item: item[0])[1] if valid else None
+
+
 def apply_outcome(repo: str, project: dict, outcome: Outcome, token: str) -> tuple[bool, str]:
     """Advance one project, re-checking its state immediately before writing.
 
@@ -364,6 +420,10 @@ def run(repo: str, token: str, apply: bool = True) -> list[Outcome]:
     projects = fetch_projects(repo, token)
     if not projects:
         return []
+    for number, project in projects.items():
+        if lifecycle_of(project) == AWAITING_ACCEPTANCE:
+            project["_bell_at"] = fetch_bell_at(
+                repo, number, token, AWAITING_ACCEPTANCE)
     comments = {n: fetch_comments(repo, n, token) for n in projects}
     advanced = []
     for outcome in evaluate_all(projects, comments):
