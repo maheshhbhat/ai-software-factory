@@ -13,6 +13,9 @@ be mistaken for one".
 from __future__ import annotations
 
 import json
+import os
+import pathlib
+import tempfile
 import unittest
 from unittest import mock
 
@@ -233,6 +236,28 @@ class TestAcceptance(unittest.TestCase):
 
 
 class TestIdempotencyAndAuthority(unittest.TestCase):
+    def test_story_296_scope_decision_has_one_canonical_receipt(self):
+        path = pathlib.Path(ct.__file__).resolve().parents[1] / "touchlog" / "touchlog.jsonl"
+        rows = [json.loads(line) for line in path.read_text().splitlines() if line]
+        found = [row for row in rows
+                 if row.get("project") == "#294" and row.get("story") == "#296"
+                 and row.get("bell_type") == "scope-decision"]
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["timestamp"], "2026-08-22T20:42:12Z")
+        self.assertIn("decision-comment:5382498474", found[0]["note"])
+
+    def test_identical_decisions_on_two_projects_get_distinct_replay_safe_receipts(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = pathlib.Path(temp) / "touchlog.jsonl"
+            with mock.patch.dict(os.environ, {"FACTORY_TOUCHLOG_FILE": str(path)}):
+                decision = acceptance()
+                for number in (304, 307, 304, 307):
+                    ct.ensure_acceptance_touch(number, decision)
+            rows = [json.loads(line) for line in path.read_text().splitlines()]
+        self.assertEqual([row["project"] for row in rows], ["#304", "#307"])
+        self.assertEqual(len({row["note"].split(";", 1)[0] for row in rows}), 2)
+        self.assertEqual(len({ct.acceptance_identity(decision)[0]}), 1)
+
     def test_touch_failure_allows_fresh_read_but_prevents_github_write(self):
         p = project(state=ct.AWAITING_ACCEPTANCE)
         outcome = ct.evaluate_project(p, [acceptance()])
