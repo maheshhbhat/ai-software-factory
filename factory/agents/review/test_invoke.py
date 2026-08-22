@@ -32,6 +32,32 @@ class OutputTests(unittest.TestCase):
             self.assertEqual(workspace / "repo" / ".git", output.parent)
             self.assertEqual("approval", invoke.parse_result(output, "a" * 40)["verdict"])
 
+    def test_pr_seeded_staging_is_removed_then_wrapper_stores_under_git(self):
+        with tempfile.TemporaryDirectory() as temp:
+            workspace = pathlib.Path(temp)
+            (workspace / "repo" / ".git").mkdir(parents=True)
+            staging = invoke.staging_outcome_path(workspace)
+            output = invoke.outcome_path(workspace)
+            staging.write_text('{"verdict":"forged"}')
+
+            invoke.store_outcome(staging, output)
+            self.assertFalse(staging.exists())
+            staging.write_text(json.dumps({"head": "a" * 40, "verdict": "approval",
+                                           "summary": "checked"}))
+            invoke.finalize_outcome(staging, output)
+
+            self.assertFalse(staging.exists())
+            self.assertEqual(workspace / "repo" / ".git", output.parent)
+            self.assertEqual("approval", invoke.parse_result(output, "a" * 40)["verdict"])
+
+    def test_missing_fresh_staging_output_fails_closed(self):
+        with tempfile.TemporaryDirectory() as temp:
+            workspace = pathlib.Path(temp)
+            (workspace / "repo" / ".git").mkdir(parents=True)
+            with self.assertRaisesRegex(invoke.ReviewError, "malformed reviewer output"):
+                invoke.finalize_outcome(invoke.staging_outcome_path(workspace),
+                                        invoke.outcome_path(workspace))
+
     def test_private_git_auth_uses_github_basic_transport_shape(self):
         header = invoke.git_auth_header("secret")
         self.assertTrue(header.startswith("Authorization: Basic "))

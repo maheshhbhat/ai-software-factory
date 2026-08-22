@@ -110,6 +110,25 @@ def outcome_path(workspace: pathlib.Path) -> pathlib.Path:
     return workspace / "repo" / ".git" / "factory-review-out.json"
 
 
+def staging_outcome_path(workspace: pathlib.Path) -> pathlib.Path:
+    return workspace / "repo" / ".factory-review-out.json"
+
+
+def store_outcome(staging: pathlib.Path, output: pathlib.Path) -> None:
+    # The checkout may contain an attacker-controlled file at the staging path.
+    # Remove it before the reviewer runs, then let trusted wrapper code move the
+    # newly written result under .git before anything parses it.
+    staging.unlink(missing_ok=True)
+    output.unlink(missing_ok=True)
+
+
+def finalize_outcome(staging: pathlib.Path, output: pathlib.Path) -> None:
+    try:
+        staging.replace(output)
+    except OSError as exc:
+        raise ReviewError("malformed reviewer output") from exc
+
+
 def run(cmd, *, cwd, timeout=3600, env=None):
     try:
         result = subprocess.run(cmd, cwd=cwd, env=env or clean_environment(), timeout=timeout,
@@ -188,10 +207,13 @@ def execute(repo: str, pull_number: int, token: str, *, client=None, timeout=360
                        env=clean_environment(), check=True, capture_output=True,
                        text=True, timeout=timeout)
         input_path = workspace / "input.json"
+        staging_path = staging_outcome_path(workspace)
         output_path = outcome_path(workspace)
+        store_outcome(staging_path, output_path)
         input_path.write_text(json.dumps(fields, sort_keys=True))
-        run(command(input_path, output_path), cwd=workspace / "repo", timeout=timeout,
+        run(command(input_path, staging_path), cwd=workspace / "repo", timeout=timeout,
             env=review_environment(workspace / "reviewer-home"))
+        finalize_outcome(staging_path, output_path)
         result = parse_result(output_path, target.head)
 
     fresh = client.api(f"/pulls/{pull_number}")
