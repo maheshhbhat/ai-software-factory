@@ -73,7 +73,7 @@ PHASE4 = {
     "P4-12": (("test_phase4_delivery_loop.py", "test_reject_retry_same_pr_new_head_then_advisory_approval"), True),
     "P4-13": (("test_phase4_requirement_coverage.py", "test_every_criterion_has_named_hermetic_evidence"), False),
     "P4-14": (("test_coverage_report.py", "test_phase4_suites_are_explicit_and_risks_are_reported"), False),
-    "P4-15": (("test_acceptance.py", "test_every_named_phase_2_behaviour_has_a_scenario"), True),
+    "P4-15": (("test_phase4_requirement_coverage.py", "test_phase4_delivery_evidence_requires_project_story_and_both_checks"), True),
     "P4-16": (("test_phase4_requirement_coverage.py", "test_phase_boundary_excludes_product_stories"), False),
 }
 

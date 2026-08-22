@@ -266,7 +266,7 @@ def recovery_decision(story: dict, timeline: list[dict], pull_requests: list[dic
     if prs:
         pr = prs[0]
         if pr.get("merged_at") or pr.get("merged") is True:
-            return RecoveryDecision(number, "merged", "MERGED_DELIVERY_PR",
+            return RecoveryDecision(number, "in-review", "MERGED_DELIVERY_PR",
                                     f"PR #{pr.get('number')}")
         return RecoveryDecision(number, "none", "LINKED_PR_EXISTS",
                                 f"PR #{pr.get('number')} state={pr.get('state')}")
@@ -624,7 +624,7 @@ def fetch_pull_requests(repo: str, token: str) -> list[dict]:
 def apply_recovery(repo: str, story: dict, decision: RecoveryDecision,
                    token: str) -> tuple[bool, str]:
     """Apply a recovery only if the claim is still authoritative."""
-    if decision.action not in {"ready", "merged", "poison"}:
+    if decision.action not in {"ready", "in-review", "poison"}:
         return False, f"{decision.reason}: {decision.detail}".rstrip()
     note_suffix = ""
     fresh = fetch_issue(repo, story["number"], token)
@@ -654,8 +654,9 @@ def apply_recovery(repo: str, story: dict, decision: RecoveryDecision,
             payload.update({"state": "closed", "state_reason": "not_planned"})
         note_suffix = f"; {why}"
     else:
-        labels.add(MERGED)
-        payload.update({"state": "closed", "state_reason": "completed"})
+        # A merged PR first proves that review began. The review-link pass owns
+        # the next legal edge to MERGED; recovery must never compress the two.
+        labels.add(IN_REVIEW)
     payload["labels"] = sorted(labels)
     _api(f"https://api.github.com/repos/{repo}/issues/{story['number']}", token,
          method="PATCH", payload=payload)
@@ -822,7 +823,7 @@ def main(argv: list[str]) -> int:
         recoveries = reconcile_claims(
             stories, timelines, fetch_pull_requests(args.repo, token), datetime.now(timezone.utc))
         for decision in recoveries:
-            if decision.action in {"ready", "merged", "poison"}:
+            if decision.action in {"ready", "in-review", "poison"}:
                 ok, note = apply_recovery(args.repo, stories[decision.number], decision, token)
                 recovery_notes.append(f"RECOVERY #{decision.number}: {'APPLIED' if ok else 'SKIP'} {note}")
             else:

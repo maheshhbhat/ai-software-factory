@@ -25,11 +25,10 @@ credential cannot influence (§9.14). That is the whole reason these two
 transitions may be mechanical while `story:completed` needs §9.16's much
 narrower proof — there, nothing outside the factory had ruled on the work.
 
-**One writer per transition.** A `story:claimed` story whose linked PR has
-*already merged* is deliberately left alone here: the dispatcher's §9.4 recovery
-pass already reconciles exactly that case (`MERGED_DELIVERY_PR`), and two
-components writing one transition is how a lifecycle stops being auditable. This
-module names that owner rather than racing it.
+If a linked PR opens and merges between two reconciliation intervals, this pass
+still records both legal lifecycle edges: first `claimed → in-review`, then
+`in-review → merged` on the next pass. It never compresses those observations
+into the illegal `claimed → merged` edge seen on Stories #214 and #215.
 
 Everything ambiguous fails closed with a named reason and no write — two linked
 PRs, a duplicate `Story:` line, a PR closed without merging. The last of those
@@ -66,7 +65,6 @@ class Reason:
     AMBIGUOUS_LINKED_PRS = "AMBIGUOUS_LINKED_PRS"
     PR_STILL_OPEN = "PR_STILL_OPEN"
     PR_CLOSED_UNMERGED = "PR_CLOSED_UNMERGED"
-    RECOVERY_OWNS_THIS = "RECOVERY_OWNS_THIS"
     STALE_PLAN = "STALE_PLAN"
 
 
@@ -120,13 +118,10 @@ def reconcile(story: dict, pull_requests: list[dict]) -> Outcome:
 
     if is_merged(pull_request):
         if state == dispatcher.CLAIMED:
-            # §9.4 already reconciles a merged delivery on a claimed story. One
-            # writer per transition — this one names the owner and stands down.
-            return Outcome(number, None, Reason.RECOVERY_OWNS_THIS,
-                           f"PR #{pr_number} merged while the story is still "
-                           f"`{dispatcher.CLAIMED}`; the dispatcher's §9.4 recovery "
-                           f"pass reconciles that case (MERGED_DELIVERY_PR)",
-                           pr=pr_number)
+            return Outcome(number, dispatcher.IN_REVIEW, Reason.OPENED,
+                           f"PR #{pr_number} opened and merged between reconciliation "
+                           f"intervals; record `{dispatcher.IN_REVIEW}` before the next "
+                           f"pass records `{dispatcher.MERGED}`", pr=pr_number)
         return Outcome(number, dispatcher.MERGED, Reason.MERGED,
                        f"PR #{pr_number} merged at {pull_request.get('merged_at')}; "
                        f"the required merge gate passed on it, which is a verdict "

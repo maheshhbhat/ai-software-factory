@@ -72,28 +72,24 @@ class TestTheTwoTransitions(unittest.TestCase):
         self.assertEqual(outcome.reason, rl.Reason.PR_STILL_OPEN)
 
 
-class TestOneWriterPerTransition(unittest.TestCase):
-    """Two components writing one transition is how a lifecycle stops being
-    auditable. §9.4's recovery pass already reconciles a merged delivery on a
-    claimed story, so this module stands down and names the owner."""
-
-    def test_a_merged_pr_on_a_claimed_story_is_left_to_recovery(self):
+class TestLegalTransitionFallbacks(unittest.TestCase):
+    def test_pr_opened_and_merged_within_one_interval_still_records_in_review(self):
         outcome = rl.reconcile(story(), [pull(merged_at="2026-08-21T03:24:16Z")])
-        self.assertIsNone(outcome.action)
-        self.assertEqual(outcome.reason, rl.Reason.RECOVERY_OWNS_THIS)
-        self.assertIn("§9.4", outcome.detail)
+        self.assertEqual(outcome.action, dispatcher.IN_REVIEW)
+        self.assertEqual(outcome.reason, rl.Reason.OPENED)
+        self.assertIn("between reconciliation intervals", outcome.detail)
 
-    def test_the_dispatcher_still_reaches_that_state_itself(self):
-        """If recovery ever stopped handling it, this test fails and the gap is
-        visible rather than silently owned by nobody."""
-        from datetime import datetime, timedelta, timezone
-        now = datetime(2026, 8, 21, 12, 0, tzinfo=timezone.utc)
-        claimed = story()
-        timeline = [{"event": "labeled", "label": {"name": "story:claimed"},
-                     "created_at": (now - timedelta(minutes=5)).isoformat()}]
+        second = rl.reconcile(story(lifecycle="story:in-review"),
+                              [pull(merged_at="2026-08-21T03:24:16Z")])
+        self.assertEqual(second.action, dispatcher.MERGED)
+
+    def test_dispatcher_recovery_cannot_skip_in_review_if_this_pass_failed(self):
+        from datetime import datetime, timezone
+        merged = pull(merged_at="2026-08-21T03:24:16Z")
         decision = dispatcher.recovery_decision(
-            claimed, timeline, [pull(merged_at="2026-08-21T03:24:16Z")], now)
-        self.assertEqual(decision.action, "merged")
+            story(), [], [merged], datetime(2026, 8, 21, tzinfo=timezone.utc))
+        self.assertEqual(decision.action, "in-review")
+        self.assertEqual(decision.reason, "MERGED_DELIVERY_PR")
 
 
 class TestAmbiguityFailsClosed(unittest.TestCase):
