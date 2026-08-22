@@ -33,6 +33,10 @@ single merged number would hide exactly the case that defect lived in.
 **A requirement with neither is an error, not a low score.** It means the factory
 promises something nothing checks, and that is the finding this file exists to
 surface.
+
+This registry is deliberately Phase 2-only. Phase 3 planning-agent coverage is
+measured by `factory/coverage_report.py`; its project acceptance criteria are
+not represented here as though they were part of the Phase 2 requirement map.
 """
 
 from __future__ import annotations
@@ -113,6 +117,7 @@ def build() -> dict:
             missing.append(requirement.key)
 
     return {
+        "scope": "Phase 2 requirements only",
         "total": len(rows),
         "with_any_test": sum(1 for r in rows if r["tests"]),
         "with_acceptance": sum(1 for r in rows if r["acceptance"]),

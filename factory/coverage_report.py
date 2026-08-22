@@ -72,17 +72,26 @@ FACTORY = ROOT / "factory"
 
 # Suites in fixed order. Never derived from a glob: a new directory should be
 # added here deliberately, so that "what we measure" is a decision on the record.
-SUITES = ("gates", "dispatcher", "runtime", "acceptance")
+SUITES = ("gates", "dispatcher", "runtime", "acceptance", "agents/planning")
 
 # Layer membership, by test file. Anything not named here is unit.
 INTEGRATION = {
     "runtime/test_lifecycle_e2e.py",   # real dispatcher + poller + workers + completion
     "runtime/test_poller.py",          # the runtime loop against real worker launches
+    "agents/planning/test_e2e.py",     # both planning altitudes + durable revision replay
 }
 ACCEPTANCE = {
     "acceptance/test_acceptance.py",   # the 16 Phase 2 scenarios
 }
 LAYERS = ("unit", "integration", "acceptance")
+
+# Planning is new in Phase 3 and intentionally explicit: adding a planning test
+# requires deciding whether it is a unit test or the hermetic integration layer.
+PLANNING_UNIT = {
+    "agents/planning/test_artifacts.py",
+    "agents/planning/test_contract.py",
+    "agents/planning/test_invoke.py",
+}
 
 # The fourth layer, and the reason it is not in `LAYERS`.
 #
@@ -167,6 +176,17 @@ def classify() -> dict[str, list[str]]:
                 f"{declared} is declared as a layer member but does not exist. "
                 f"A stale declaration silently shrinks a layer; fix the list.")
 
+    planning = {path for path in found if path.startswith("agents/planning/")}
+    declared_planning = PLANNING_UNIT | {
+        path for path in INTEGRATION if path.startswith("agents/planning/")
+    }
+    if planning != declared_planning:
+        missing = sorted(planning - declared_planning)
+        stale = sorted(declared_planning - planning)
+        raise SystemExit(
+            "planning tests must be explicitly classified; "
+            f"unclassified={missing or 'none'}, stale={stale or 'none'}")
+
     grouped: dict[str, list[str]] = {layer: [] for layer in LAYERS}
     for relative in found:
         grouped[layer_of(relative)].append(relative)
@@ -178,10 +198,12 @@ def run_layer(python: str, data_file: Path, files: list[str], env: dict) -> bool
     data_file.unlink(missing_ok=True)
     passed = True
     for relative in files:
-        suite, name = relative.split("/", 1)
+        relative_path = Path(relative)
+        start = FACTORY / relative_path.parent
+        name = relative_path.name
         result = subprocess.run(
             [python, "-m", "coverage", "run", "-a", "--source=factory", "--branch",
-             "-m", "unittest", "discover", "-s", str(FACTORY / suite), "-p", name],
+             "-m", "unittest", "discover", "-s", str(start), "-p", name],
             cwd=ROOT, capture_output=True, text=True,
             env={**env, "COVERAGE_FILE": str(data_file)})
         if result.returncode != 0:
