@@ -261,12 +261,12 @@ class TestClaimRecovery(unittest.TestCase):
                          ("ready", "CLAIM_LEASE_EXPIRED"))
         self.assertIn("Attempt 1 -> 0", decision.detail)
 
-    def test_merged_delivery_reconciles_claim_to_merged(self):
+    def test_merged_delivery_reconciles_claim_to_in_review_first(self):
         pr = {"number": 77, "body": "Story: #10\nAgent-ID: claude-delivery\n",
               "state": "closed", "merged_at": "2026-08-20T17:00:00Z"}
         decision = self.decide(timeline=[self.event(500)], prs=[pr])
         self.assertEqual((decision.action, decision.reason),
-                         ("merged", "MERGED_DELIVERY_PR"))
+                         ("in-review", "MERGED_DELIVERY_PR"))
 
     def test_open_linked_pr_prevents_expiry(self):
         pr = {"number": 77, "body": "Story: #10\n", "state": "open", "merged_at": None}
@@ -334,14 +334,15 @@ class TestClaimRecovery(unittest.TestCase):
 
     @patch.object(dp, "_api")
     @patch.object(dp, "fetch_issue")
-    def test_apply_merged_closes_completed_atomically(self, fetch_issue, api):
+    def test_apply_merged_delivery_records_in_review_without_closing(self, fetch_issue, api):
         fetch_issue.return_value = self.claimed()
-        decision = dp.RecoveryDecision(10, "merged", "MERGED_DELIVERY_PR", "PR #77")
+        decision = dp.RecoveryDecision(10, "in-review", "MERGED_DELIVERY_PR", "PR #77")
         ok, _ = dp.apply_recovery("owner/repo", self.claimed(), decision, "token")
         self.assertTrue(ok)
         payload = api.call_args.kwargs["payload"]
-        self.assertEqual(payload["state_reason"], "completed")
-        self.assertIn("story:merged", payload["labels"])
+        self.assertNotIn("state", payload)
+        self.assertIn("story:in-review", payload["labels"])
+        self.assertNotIn("story:merged", payload["labels"])
 
     @patch.object(dp, "_api")
     @patch.object(dp, "fetch_timeline", return_value=[])
@@ -461,14 +462,14 @@ class TestRecoveryBudget(unittest.TestCase):
         self.assertEqual(decision.action, "none")
         self.assertEqual(decision.reason, "CLAIM_FRESH")
 
-    def test_merged_pr_still_reconciles_regardless_of_budget(self):
+    def test_merged_pr_still_records_in_review_regardless_of_budget(self):
         """The budget must not interfere with provable merged delivery."""
         expired = dt.datetime(2026, 8, 20, 12, 0, tzinfo=dt.timezone.utc)
         prs = [{"number": 99, "body": "Story: #10\n", "merged_at": "2026-08-20T11:00:00Z"}]
         timeline = self.cycle(dp.RECOVERY_MAX) + [self.event("story:claimed")]
         decision = dp.recovery_decision(
             story(10, lifecycle="story:claimed", attempt="1"), timeline, prs, expired)
-        self.assertEqual(decision.action, "merged")
+        self.assertEqual(decision.action, "in-review")
 
 
 class TestCancelledTerminalState(unittest.TestCase):
@@ -954,4 +955,3 @@ class TestPoisonClosureIsBoundedByTheRescueCap(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
-

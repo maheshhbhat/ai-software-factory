@@ -259,14 +259,19 @@ class ClaimRecovery(Scenario):
         assert "CLAIM_LEASE_EXPIRED" in report, report
         self.note("an expired claim with no PR recovered to ready and restored Attempt (§9.4)")
 
-        # An expired claim whose linked PR merged is reconciled mechanically.
+        # A linked PR that merged between intervals still records both legal
+        # lifecycle edges instead of compressing claimed straight to merged.
         hub = claimed_repo()
         hub.pulls.append(pull(200, 10, state="closed", merged_at="2026-08-20T10:00:00Z"))
         hub.age(minutes=90)
         report = dispatch_only(hub)
-        assert hub.lifecycle(10) == dispatcher.MERGED, report
+        assert hub.lifecycle(10) == dispatcher.IN_REVIEW, report
+        assert hub.state(10) == "open"
+        self.note("merged delivery recovery first recorded story:in-review")
+        poll(hub)
+        assert hub.lifecycle(10) == dispatcher.MERGED
         assert hub.state(10) == "closed"
-        self.note("an expired claim with a merged delivery PR reconciled to story:merged")
+        self.note("the next reconciliation recorded story:merged and closed the Story")
 
         # Ambiguity mutates nothing.
         hub = claimed_repo()

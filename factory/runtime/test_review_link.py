@@ -83,6 +83,14 @@ class TestOneWriterPerTransition(unittest.TestCase):
                               [pull(merged_at="2026-08-21T03:24:16Z")])
         self.assertEqual(second.action, dispatcher.MERGED)
 
+    def test_dispatcher_recovery_cannot_skip_in_review_if_this_pass_failed(self):
+        from datetime import datetime, timezone
+        merged = pull(merged_at="2026-08-21T03:24:16Z")
+        decision = dispatcher.recovery_decision(
+            story(), [], [merged], datetime(2026, 8, 21, tzinfo=timezone.utc))
+        self.assertEqual(decision.action, "in-review")
+        self.assertEqual(decision.reason, "MERGED_DELIVERY_PR")
+
 
 class TestAmbiguityFailsClosed(unittest.TestCase):
     def test_two_linked_pull_requests_mutate_nothing(self):
