@@ -90,7 +90,9 @@ Produce exactly one coherent project plan:
      secrets/credential, dependency, CI/workflow, IAM, migration, destructive,
      branch-protection, factory-spec, or factory-gate path;
    - falsifiable acceptance criteria and machine-readable scope paths;
-   - attempt `0` and an explicit per-invocation spend cap.
+   - attempt `0` and a per-invocation spend cap defaulting to exactly
+     `$5 / 60 min`; use another bounded value only when the approved planning
+     input explicitly requires it.
 3. Update the project with story references and an expected-bells count.
 4. Post a human-readable digest that explains the ADR, risk order, story phases,
    dependencies, hazards, acceptance criteria, and unresolved choices without
@@ -129,7 +131,7 @@ GitHub numbers—the writer resolves them after issue creation:
       "hazard": false,
       "acceptance_criteria": ["falsifiable check"],
       "scope": ["one/bare/path/**"],
-      "spend_cap": "$20 / 60 min"
+      "spend_cap": "$5 / 60 min"
     }
   ],
   "expected_bells": 2,

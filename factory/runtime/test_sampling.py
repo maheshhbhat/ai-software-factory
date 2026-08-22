@@ -65,5 +65,5 @@ class SamplingTests(unittest.TestCase):
     def test_corrective_story_is_bounded_and_durable(self):
         audit = sampling.AuditDecision("findings", 2, "owner", ("repair",))
         value = sampling.corrective_story(212, 214, sampling.Selection(7, SHA, True), audit)
-        self.assertIn("$20 / 45 min", value["body"])
+        self.assertIn("$5 / 60 min", value["body"])
         self.assertIn("sampling-correction:7", value["body"])
