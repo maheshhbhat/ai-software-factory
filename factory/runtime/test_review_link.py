@@ -72,7 +72,7 @@ class TestTheTwoTransitions(unittest.TestCase):
         self.assertEqual(outcome.reason, rl.Reason.PR_STILL_OPEN)
 
 
-class TestOneWriterPerTransition(unittest.TestCase):
+class TestLegalTransitionFallbacks(unittest.TestCase):
     def test_pr_opened_and_merged_within_one_interval_still_records_in_review(self):
         outcome = rl.reconcile(story(), [pull(merged_at="2026-08-21T03:24:16Z")])
         self.assertEqual(outcome.action, dispatcher.IN_REVIEW)
