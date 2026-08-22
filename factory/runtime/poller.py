@@ -55,8 +55,10 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
+sys.path.insert(0, os.path.join(HERE, "..", "dispatcher"))
 import completion   # noqa: E402  — post-worker-success transition (#104)
 import continuation  # noqa: E402  — decision-comment consumption (#71)
+import dispatcher   # noqa: E402  — live issue/PR substrate for Phase 4 review routing
 import humanqueue   # noqa: E402  — what is waiting on a person (#111)
 import planning_route  # noqa: E402  — project planning invocation route (#190)
 import review_link  # noqa: E402  — delivery-PR lifecycle reconciliation (#111)
