@@ -72,7 +72,8 @@ FACTORY = ROOT / "factory"
 
 # Suites in fixed order. Never derived from a glob: a new directory should be
 # added here deliberately, so that "what we measure" is a decision on the record.
-SUITES = ("gates", "dispatcher", "runtime", "acceptance", "agents/planning")
+SUITES = ("gates", "dispatcher", "runtime", "acceptance", "agents/planning",
+          "agents/worker", "agents/review")
 
 # Layer membership, by test file. Anything not named here is unit.
 INTEGRATION = {
@@ -82,6 +83,13 @@ INTEGRATION = {
 }
 ACCEPTANCE = {
     "acceptance/test_acceptance.py",   # the 16 Phase 2 scenarios
+    "acceptance/test_phase4_worker.py",
+    "acceptance/test_phase4_review.py",
+    "acceptance/test_phase4_sampling.py",
+    "acceptance/test_phase4_fixture.py",
+    "acceptance/test_phase4_delivery_loop.py",
+    "acceptance/test_phase4_requirement_coverage.py",
+    "acceptance/test_coverage_report.py",
 }
 LAYERS = ("unit", "integration", "acceptance")
 
@@ -92,6 +100,20 @@ PLANNING_UNIT = {
     "agents/planning/test_contract.py",
     "agents/planning/test_invoke.py",
 }
+
+PHASE4_UNIT = {
+    "runtime/test_phase4_shared_credential.py", "runtime/test_sampling.py",
+    "runtime/test_review_route.py", "agents/worker/test_invoke.py",
+    "agents/review/test_invoke.py",
+}
+PHASE4_MODULES = ("factory/agents/worker/invoke.py", "factory/agents/review/invoke.py",
+                  "factory/runtime/sampling.py", "factory/runtime/review_route.py",
+                  "factory/runtime/review_link.py", "factory/runtime/poller.py")
+UNCOVERED_RISKS = (
+    "Worker and reviewer share one GitHub principal until Project #221.",
+    "Live GitHub, engine, merge, deployment, and sampling wiring is unproven until Story #220.",
+    "Line coverage cannot prove semantic correctness or independent authorization.",
+)
 
 # The fourth layer, and the reason it is not in `LAYERS`.
 #
@@ -186,6 +208,18 @@ def classify() -> dict[str, list[str]]:
         raise SystemExit(
             "planning tests must be explicitly classified; "
             f"unclassified={missing or 'none'}, stale={stale or 'none'}")
+
+    phase4 = {path for path in found if ("phase4" in path or path.startswith("agents/worker/")
+                                         or path.startswith("agents/review/")
+                                         or path == "runtime/test_sampling.py"
+                                         or path == "runtime/test_review_route.py")}
+    declared_phase4 = PHASE4_UNIT | {path for path in INTEGRATION | ACCEPTANCE
+                                     if "phase4" in path or path.startswith("agents/worker/")
+                                     or path.startswith("agents/review/")}
+    if phase4 != declared_phase4:
+        raise SystemExit(f"Phase 4 tests must be explicitly classified; "
+                         f"unclassified={sorted(phase4-declared_phase4) or 'none'}, "
+                         f"stale={sorted(declared_phase4-phase4) or 'none'}")
 
     grouped: dict[str, list[str]] = {layer: [] for layer in LAYERS}
     for relative in found:
@@ -333,6 +367,9 @@ def measure(python: str, workdir: Path, e2e: dict | None = None) -> dict:
         "unique_contribution": unique,
         "combined": combined,
         "failing_layers": failures,
+        "phase4_modules": {name: combined["modules"].get(name, 0.0)
+                           for name in PHASE4_MODULES},
+        "uncovered_risks": list(UNCOVERED_RISKS),
     }
 
     if e2e is not None:
@@ -372,6 +409,15 @@ def render(result: dict) -> str:
         lines.append(f"    {layer:<12} {entry['total']:>5.1f}%   "
                      f"{entry['tests']} test file(s)")
     lines.append(f"    {'combined':<12} {result['combined']['total']:>5.1f}%")
+    lines.append("")
+
+    lines.append("  Phase 4 modules")
+    for name, percent in result["phase4_modules"].items():
+        lines.append(f"    {percent:>5.1f}%  {name}")
+    lines.append("")
+
+    lines.append("  Named uncovered risks")
+    lines.extend(f"    - {risk}" for risk in result["uncovered_risks"])
     lines.append("")
 
     lines.append("  Unique contribution — remove the layer, where does it land")
@@ -415,7 +461,9 @@ def comparable(result: dict) -> dict:
     """The parts that must be identical across runs. Excludes nothing today —
     stated explicitly so that adding an exemption is a visible decision."""
     return {"layers": result["layers"], "combined": result["combined"],
-            "unique_contribution": result["unique_contribution"]}
+            "unique_contribution": result["unique_contribution"],
+            "phase4_modules": result["phase4_modules"],
+            "uncovered_risks": result["uncovered_risks"]}
 
 
 def main(argv: list[str]) -> int:

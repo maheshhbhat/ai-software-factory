@@ -1,0 +1,59 @@
+import importlib.util
+import json
+import pathlib
+import tempfile
+import unittest
+
+HERE = pathlib.Path(__file__).resolve().parent
+ROOT = HERE.parents[1]
+SPEC = importlib.util.spec_from_file_location("phase4_requirement_coverage",
+                                              HERE / "requirement_coverage.py")
+coverage = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(coverage)
+
+class Phase4RequirementCoverageTests(unittest.TestCase):
+    def test_every_criterion_has_named_hermetic_evidence(self):
+        report = coverage.build_phase4(pathlib.Path("/definitely/missing"))
+        self.assertEqual(set(coverage.PHASE4), {f"P4-{n:02d}" for n in range(1, 17)})
+        self.assertEqual(report["missing_acceptance"], [])
+        self.assertEqual(report["stale_declarations"], [])
+
+    def test_wiring_claims_fail_until_live_evidence_exists(self):
+        report = coverage.build_phase4(pathlib.Path("/definitely/missing"))
+        expected = {key for key, (_, required) in coverage.PHASE4.items() if required}
+        self.assertEqual(set(report["missing_live"]), expected)
+
+    def test_complete_live_ledger_satisfies_wiring_claims(self):
+        required = {key: "pass" for key, (_, live) in coverage.PHASE4.items() if live}
+        with tempfile.TemporaryDirectory() as temp:
+            path = pathlib.Path(temp) / "evidence.json"
+            path.write_text(json.dumps({"criteria": required, "limitations": {}}))
+            self.assertEqual(coverage.build_phase4(path)["missing_live"], [])
+
+    def test_limitation_requires_owner_approval_reason_substitute_and_risk(self):
+        key = next(key for key, (_, live) in coverage.PHASE4.items() if live)
+        limitation = {"owner_approved": True, "why": "unreachable",
+                      "substitute_evidence": "hermetic test", "residual_risk": "wiring"}
+        required = {item: "pass" for item, (_, live) in coverage.PHASE4.items()
+                    if live and item != key}
+        with tempfile.TemporaryDirectory() as temp:
+            path = pathlib.Path(temp) / "evidence.json"
+            path.write_text(json.dumps({"criteria": required, "limitations": {key: limitation}}))
+            self.assertNotIn(key, coverage.build_phase4(path)["missing_live"])
+            del limitation["residual_risk"]
+            path.write_text(json.dumps({"criteria": required, "limitations": {key: limitation}}))
+            self.assertIn(key, coverage.build_phase4(path)["missing_live"])
+
+    def test_shared_credential_boundary_is_explicit(self):
+        adr = (ROOT / "factory" / "decisions" / "phase4-shared-credential.md").read_text()
+        self.assertIn("behavioral isolation only", adr)
+        self.assertIn("Project #221", adr)
+        self.assertIn("not a `state-schema.md` §9.14 trust input", adr)
+
+    def test_phase_boundary_excludes_product_stories(self):
+        adr = (ROOT / "factory" / "decisions" / "phase4-live-fixture.md").read_text()
+        self.assertIn("must never use", adr)
+        self.assertIn("Stories #5–#12", adr)
+        self.assertFalse((ROOT / "product.md").exists())
+
+if __name__ == "__main__": unittest.main()

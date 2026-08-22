@@ -19,6 +19,11 @@ Fully deterministic: reads declarations, runs nothing, needs no credential. Ask
 this **first**. A requirement with zero tests is invisible to any percentage, and
 this is the only check that surfaces it.
 
+For Phase 4 run `python3 factory/acceptance/requirement_coverage.py --phase4`.
+It requires named hermetic evidence for P4-01 through P4-16 and fails wiring
+claims until `runs/phase4/evidence.json` records a passing live result or a
+complete owner-approved limitation naming why, substitute evidence, and risk.
+
 **"How many lines do the tests execute?"** — `factory/coverage_report.py`, below.
 
 They were conflated once here, and the cost was a measurement answering a
@@ -106,6 +111,11 @@ sets in the script; unit is the remainder. A file declared but missing is a hard
 error. When a new test file appears, decide which layer it belongs to and say so
 in the script — a misfiled test moves a layer's number without changing a line
 of code.
+
+Phase 4 also reports worker, reviewer, sampling, review-routing, review-link,
+and poller modules as a named group followed by uncovered risks. Story #220
+must post the deterministic `--check` result and a later, separate `--with-e2e`
+result; never fold the live percentage into the verified figure.
 
 ## What determinism costs, and why
 
