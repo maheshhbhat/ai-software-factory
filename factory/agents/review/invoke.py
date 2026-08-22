@@ -101,7 +101,7 @@ def command(input_path: pathlib.Path, output_path: pathlib.Path) -> list[str]:
                + input_path.read_text())
     return ["claude", "-p", payload, "--permission-mode", "acceptEdits",
             "--allowedTools", "Write", "--disallowedTools", "Bash",
-            "--no-session-persistence"]
+            "--safe-mode", "--no-session-persistence"]
 
 
 def outcome_path(workspace: pathlib.Path) -> pathlib.Path:

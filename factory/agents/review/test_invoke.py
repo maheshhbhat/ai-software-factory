@@ -19,6 +19,7 @@ class OutputTests(unittest.TestCase):
         self.assertIn("acceptEdits", cmd)
         self.assertEqual("Write", cmd[cmd.index("--allowedTools") + 1])
         self.assertEqual("Bash", cmd[cmd.index("--disallowedTools") + 1])
+        self.assertIn("--safe-mode", cmd)
         self.assertIn("--no-session-persistence", cmd)
 
     def test_outcome_is_written_and_parsed_inside_checkout(self):

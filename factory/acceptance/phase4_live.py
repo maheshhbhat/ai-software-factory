@@ -188,15 +188,6 @@ def launch_worker(story):
     handle.close()
     return 0
 
-def run_review(secret, pull_number):
-    env = dict(os.environ)
-    env.update({"GH_TOKEN": secret,
-                "FACTORY_REVIEW_MODEL_CMD":
-                    f"{sys.executable} {pathlib.Path(__file__).resolve()} review-model "
-                    "{input_file} {output_file}"})
-    return command([str(ROOT / "factory" / "agents" / "review" / "run.sh"),
-                    REPO, str(pull_number)], env=env, timeout=1800)
-
 def review_model(input_file, output_file):
     value = json.loads(pathlib.Path(input_file).read_text())
     head = command(["git", "rev-parse", "HEAD"], timeout=30,
@@ -209,8 +200,8 @@ def review_model(input_file, output_file):
               "if it validates BUILD_SHA as 40 lowercase hex and /health returns it, using "
               "{\"verdict\":\"approval\",\"summary\":\"...\"}. Diff: " + diff)
     result = command(["claude", "-p", prompt, "--permission-mode", "dontAsk",
-                      "--no-session-persistence"], timeout=600,
-                     env=model_environment())
+                      "--safe-mode", "--no-session-persistence"], timeout=600,
+                     env=dict(os.environ))
     raw = result.stdout.strip().removeprefix("```json").removesuffix("```").strip()
     outcome = json.loads(raw)
     outcome["head"] = head

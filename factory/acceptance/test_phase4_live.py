@@ -24,11 +24,14 @@ class Phase4LiveHarnessTests(unittest.TestCase):
             source.write_text(json.dumps({"diff": [{"patch": "+ defective"}]}))
             responses = [mock.Mock(stdout="b" * 40 + "\n"),
                          mock.Mock(stdout='{"verdict":"findings","findings":["fix"]}\n')]
-            with mock.patch.object(live, "command", side_effect=responses):
+            with mock.patch.object(live, "command", side_effect=responses) as command:
                 live.review_model(str(source), str(target))
             result = json.loads(target.read_text())
             self.assertEqual(result["head"], "b" * 40)
             self.assertEqual(result["verdict"], "findings")
+            review_call = command.call_args_list[1]
+            self.assertIn("--safe-mode", review_call.args[0])
+            self.assertEqual(dict(live.os.environ), review_call.kwargs["env"])
 
     def test_worker_model_is_headless_edit_only_and_sessionless(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -75,6 +78,7 @@ class Phase4LiveHarnessTests(unittest.TestCase):
         source = pathlib.Path(live.__file__).read_text()
         self.assertNotIn('command(["gh", "pr", "ready"', source)
         self.assertNotIn('command(["gh", "pr", "merge"', source)
+        self.assertNotIn("def run_review(", source)
 
     def test_model_auth_context_never_restores_github_credentials(self):
         with mock.patch.dict(live.os.environ, {"GH_TOKEN": "github",
