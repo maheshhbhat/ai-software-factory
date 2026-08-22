@@ -50,6 +50,7 @@ sys.path.insert(0, os.path.join(HERE, "..", "gates"))
 
 import dispatcher  # noqa: E402 — §9.5 linkage and the lifecycle vocabulary, defined once
 import runlog  # noqa: E402
+from review_route import outcomes as review_outcomes  # noqa: E402
 
 RECONCILABLE = (dispatcher.CLAIMED, dispatcher.IN_REVIEW)
 
@@ -152,6 +153,15 @@ def reconcile(story: dict, pull_requests: list[dict]) -> Outcome:
 def reconcile_all(stories: dict, pull_requests: list[dict]) -> list[Outcome]:
     """Every reconcilable story, in issue order. Deterministic, like §9.10."""
     return [reconcile(stories[number], pull_requests) for number in sorted(stories)]
+
+
+def exact_head_approved(pull_request: dict, story_comments: list[dict]) -> bool:
+    """Advisory routing prerequisite, never a deterministic gate input."""
+    head = (pull_request.get("head") or {}).get("sha", "")
+    values = review_outcomes(story_comments, pull_request["number"], head)
+    if len(values) > 1:
+        raise RuntimeError("duplicate exact-head review outcomes fail closed")
+    return values == ["approval"]
 
 
 # --------------------------------------------------------------------------

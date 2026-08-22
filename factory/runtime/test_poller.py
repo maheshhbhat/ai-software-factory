@@ -41,6 +41,23 @@ Selected (claimed, in order): #64
 
 
 class TestParsing(unittest.TestCase):
+    def test_review_target_is_once_per_exact_head(self):
+        head = "a" * 40
+        pull = {"number": 9, "state": "open", "draft": False,
+                "body": "Story: #10\n", "head": {"sha": head}}
+        story = {"number": 10, "labels": [{"name": "story:in-review"}]}
+        targets = poller.review_targets([pull], {10: story}, {10: []})
+        self.assertEqual([(x.pull_request, x.head) for x in targets], [(9, head)])
+        marker = {"body": f"<!-- review-outcome:9:{head}:approval -->"}
+        self.assertEqual(poller.review_targets([pull], {10: story}, {10: [marker]}), [])
+
+    def test_merge_route_requires_current_head_approval(self):
+        pull = {"number": 9, "head": {"sha": "b" * 40}}
+        stale = {"body": "<!-- review-outcome:9:" + "a" * 40 + ":approval -->"}
+        exact = {"body": "<!-- review-outcome:9:" + "b" * 40 + ":approval -->"}
+        self.assertFalse(poller.route_merge("o/r", pull, [stale], apply=False))
+        self.assertTrue(poller.route_merge("o/r", pull, [exact], apply=False))
+
     def test_canonical_line_is_parsed(self):
         self.assertEqual(poller.parse_dispatches(REPORT),
                          [{"story": 64, "project": 55, "agent": "claude-delivery"}])

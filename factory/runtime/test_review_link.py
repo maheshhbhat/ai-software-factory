@@ -28,12 +28,19 @@ def story(number=10, lifecycle="story:claimed", extra=()):
             "body": "### Spec\n\nx\n"}
 
 
-def pull(number=77, story_number=10, state="open", merged_at=None, body=None):
+def pull(number=77, story_number=10, state="open", merged_at=None, body=None, head=None):
     return {"number": number, "state": state, "merged_at": merged_at,
+            "head": {"sha": head} if head else {},
             "body": body if body is not None else f"Story: #{story_number}\nAgent-ID: claude-delivery\n"}
 
 
 class TestTheTwoTransitions(unittest.TestCase):
+    def test_only_exact_head_approval_permits_merge_routing(self):
+        current = pull(number=200, head="b" * 40)
+        stale = {"body": "<!-- review-outcome:200:" + "a" * 40 + ":approval -->"}
+        exact = {"body": "<!-- review-outcome:200:" + "b" * 40 + ":approval -->"}
+        self.assertFalse(rl.exact_head_approved(current, [stale]))
+        self.assertTrue(rl.exact_head_approved(current, [exact]))
     def test_an_open_linked_pr_moves_a_claimed_story_to_review(self):
         outcome = rl.reconcile(story(), [pull()])
         self.assertEqual(outcome.action, dispatcher.IN_REVIEW)

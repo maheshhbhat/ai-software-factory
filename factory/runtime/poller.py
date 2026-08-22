@@ -60,6 +60,7 @@ import continuation  # noqa: E402  — decision-comment consumption (#71)
 import humanqueue   # noqa: E402  — what is waiting on a person (#111)
 import planning_route  # noqa: E402  — project planning invocation route (#190)
 import review_link  # noqa: E402  — delivery-PR lifecycle reconciliation (#111)
+import review_route  # noqa: E402  — exact-head advisory review routing (#215)
 import runlog       # noqa: E402  — operational record (#104)
 import sequencer    # noqa: E402  — dependency/project lifecycle sequencing (#193)
 import workers      # noqa: E402  — standard worker contract (#84)
@@ -251,6 +252,67 @@ def run_review_link(repo: str, claim: bool = True) -> list:
     return review_link.run(repo, token, apply=claim)
 
 
+def review_targets(pulls: list[dict], issues: dict[int, dict],
+                   comments: dict[int, list[dict]]) -> list[review_route.ReviewTarget]:
+    targets = []
+    for pull in sorted(pulls, key=lambda x: x.get("number", 0)):
+        try:
+            number = review_route.story_number(pull)
+            value = review_route.target(pull, issues.get(number, {}), comments.get(number, []))
+        except review_route.RouteError as exc:
+            raise WorkerLaunchFailed(
+                f"review route failed closed for PR #{pull.get('number')}: {exc}") from exc
+        if value is not None:
+            targets.append(value)
+    return targets
+
+
+def wake_reviewer(repo: str, target: review_route.ReviewTarget) -> None:
+    wrapper = os.path.join(HERE, "..", "agents", "review", "run.sh")
+    template = os.environ.get("FACTORY_REVIEW_CMD", "").strip()
+    command = ([x.replace("{repo}", repo).replace("{pull_request}", str(target.pull_request))
+                for x in shlex.split(template)] if template
+               else [wrapper, repo, str(target.pull_request)])
+    result = subprocess.run(command, capture_output=True, text=True,
+                            timeout=int(os.environ.get("FACTORY_REVIEW_TIMEOUT", "3600")))
+    if result.returncode:
+        raise WorkerLaunchFailed(
+            f"review PR #{target.pull_request} failed: {(result.stderr or result.stdout)[:400]}")
+
+
+def route_merge(repo: str, pull: dict, comments: list[dict], *, apply=True) -> bool:
+    if not review_link.exact_head_approved(pull, comments):
+        return False
+    if apply:
+        result = subprocess.run(["gh", "pr", "merge", str(pull["number"]), "--repo", repo,
+                                 "--auto", "--squash"], capture_output=True, text=True)
+        if result.returncode:
+            raise WorkerLaunchFailed(
+                f"auto-merge routing failed: {(result.stderr or result.stdout)[:400]}")
+    return True
+
+
+def run_phase4_reviews(repo: str, apply: bool = True) -> list[review_route.ReviewTarget]:
+    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or ""
+    issues = dispatcher.fetch_issues(repo, token)
+    pulls = dispatcher.fetch_pull_requests(repo, token)
+    comments = {number: dispatcher._api(
+        f"https://api.github.com/repos/{repo}/issues/{number}/comments?per_page=100", token)
+                for number in issues}
+    targets = review_targets(pulls, issues, comments)
+    for target in targets:
+        if not apply:
+            continue
+        wake_reviewer(repo, target)
+        fresh_pull = dispatcher._api(
+            f"https://api.github.com/repos/{repo}/pulls/{target.pull_request}", token)
+        fresh_comments = dispatcher._api(
+            f"https://api.github.com/repos/{repo}/issues/{target.story}/comments?per_page=100",
+            token)
+        route_merge(repo, fresh_pull, fresh_comments, apply=True)
+    return targets
+
+
 def run_human_queue(repo: str) -> list:
     """Say what is waiting on a person. Reads durable state, writes nothing."""
     token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or ""
@@ -295,6 +357,13 @@ def poll_once(repo: str, commitment: int, seen: set[int], claim: bool = True) ->
     except Exception as exc:  # noqa: BLE001 — reported, never fatal to dispatch
         print(f"[poller] review-link pass failed, dispatch continues: "
               f"{type(exc).__name__}: {exc}", flush=True)
+
+    if os.environ.get("FACTORY_PHASE4_REVIEWS") == "1":
+        try:
+            run_phase4_reviews(repo, claim)
+        except Exception as exc:  # noqa: BLE001 — review failure cannot halt recovery
+            print(f"[poller] phase4 review pass failed, dispatch continues: "
+                  f"{type(exc).__name__}: {exc}", flush=True)
 
     # A decision consumed now can unblock work the same cycle. Isolated: a
     # continuation failure must not stop already-authorized work from
