@@ -177,6 +177,25 @@ class TestAcceptance(unittest.TestCase):
                                       [acceptance(result="fail")])
         self.assertEqual(outcome.action, ct.ACTIVE)
 
+    def test_corrective_cycle_can_pass_without_deleting_earlier_failure(self):
+        """§5.3: fail -> active -> corrective work -> new bell -> pass.
+
+        Both comments remain present. The later result governs the new bell,
+        and replay after acceptance is inert because the lifecycle left it.
+        """
+        comments = [acceptance(result="fail"), acceptance(result="pass")]
+        outcome = ct.evaluate_project(project(state=ct.AWAITING_ACCEPTANCE), comments)
+        self.assertEqual(outcome.action, ct.ACCEPTED)
+        self.assertEqual(2, len(comments), "the earlier audit record must remain")
+        after = project(state=ct.ACCEPTED)
+        self.assertEqual(ct.evaluate_project(after, comments).reason, R.NOT_AT_A_BELL)
+
+    def test_latest_failure_after_an_earlier_pass_returns_to_active(self):
+        outcome = ct.evaluate_project(
+            project(state=ct.AWAITING_ACCEPTANCE),
+            [acceptance(result="pass"), acceptance(result="fail")])
+        self.assertEqual(outcome.action, ct.ACTIVE)
+
     def test_approval_comment_does_not_satisfy_the_acceptance_bell(self):
         outcome = ct.evaluate_project(project(state=ct.AWAITING_ACCEPTANCE), [approval()])
         self.assertIsNone(outcome.action)

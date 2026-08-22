@@ -206,10 +206,14 @@ def evaluate_project(project: dict, comments: list[dict]) -> Outcome:
             return Outcome(number, None, err, "unreadable decision comment")
         verdicts.append((verdict, comment))
 
-    # The latest decision wins only when earlier ones agree; a genuine
-    # disagreement is for a human to resolve, not for this pass to pick from.
+    # Plan approval occurs once, so conflicting approval decisions remain a
+    # human ambiguity. Outcome acceptance may occur repeatedly by design:
+    # §5.3 sends a failed acceptance back to active for corrective work, after
+    # which the project reaches a new awaiting-acceptance bell. At that new bell
+    # the latest owner result is the decision being consumed; the earlier fail
+    # remains immutable audit evidence rather than becoming a permanent veto.
     distinct = {v for v, _ in verdicts}
-    if len(distinct) > 1:
+    if state == AWAITING_READY and len(distinct) > 1:
         return Outcome(number, None, Reason.CONFLICTING_DECISIONS,
                        f"{sorted(distinct)} across {len(verdicts)} owner comments")
 
