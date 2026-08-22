@@ -1,4 +1,5 @@
 import importlib.util
+import base64
 import json
 import pathlib
 import tempfile
@@ -70,6 +71,20 @@ class Phase4LiveHarnessTests(unittest.TestCase):
              mock.patch.object(live.pathlib.Path, "open", mock.mock_open()):
             self.assertEqual(live.launch_worker(230), 0)
         self.assertTrue(started.call_args.kwargs["start_new_session"])
+
+    def test_private_deploy_clone_uses_token_header_not_ssh(self):
+        environment = live.clone_environment("secret")
+        self.assertEqual("http.extraHeader", environment["GIT_CONFIG_KEY_0"])
+        header = environment["GIT_CONFIG_VALUE_0"].removeprefix("Authorization: Basic ")
+        self.assertEqual("x-access-token:secret", base64.b64decode(header).decode())
+
+    def test_lifecycle_evidence_requires_exact_order_and_repeat_counts(self):
+        expected = ["story:ready", "story:claimed", "story:in-review",
+                    "story:ready", "story:claimed", "story:in-review", "story:merged"]
+        timeline = [{"event": "labeled", "label": label} for label in expected]
+        timeline.insert(2, {"event": "labeled", "label": "phase:build"})
+        self.assertEqual(expected, live.lifecycle_walk(timeline))
+        self.assertNotEqual(expected, live.lifecycle_walk(timeline[:4]))
 
     def test_live_loop_delegates_review_and_merge_to_runtime(self):
         environment = live.poll_environment("token", pathlib.Path("runtime.jsonl"))

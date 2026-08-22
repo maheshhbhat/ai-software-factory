@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
 import pathlib
@@ -222,12 +223,25 @@ def checks_pass(pull_number, timeout=300):
         time.sleep(5)
     raise RuntimeError("timed out waiting for exact-head checks")
 
-def exercise(sha):
+def clone_environment(secret):
+    env = dict(os.environ)
+    basic = base64.b64encode(f"x-access-token:{secret}".encode()).decode()
+    env.update({"GIT_CONFIG_COUNT": "1",
+                "GIT_CONFIG_KEY_0": "http.extraHeader",
+                "GIT_CONFIG_VALUE_0": f"Authorization: Basic {basic}"})
+    return env
+
+def lifecycle_walk(timeline):
+    return [x["label"] for x in timeline
+            if x["event"] == "labeled" and (x.get("label") or "").startswith("story:")]
+
+def exercise(sha, secret):
     import importlib.util
     import threading
     with tempfile.TemporaryDirectory(prefix="phase4-deployed-") as temp:
         command(["git", "clone", "--quiet", "--branch", "main",
-                 f"git@github.com:{REPO}.git", temp], timeout=300)
+                 f"https://github.com/{REPO}.git", temp], timeout=300,
+                env=clone_environment(secret))
         module = pathlib.Path(temp) / "runs" / "phase4" / "live_product" / "app.py"
         spec = importlib.util.spec_from_file_location("live_health", module)
         app = importlib.util.module_from_spec(spec); spec.loader.exec_module(app)
@@ -297,7 +311,7 @@ def run_live(output):
     sample = sampling.process(client, merged)
     operations.append({"operation": "sampling", "outcome": sample})
     merge_sha = merged.get("merge_commit_sha")
-    health = exercise(merge_sha)
+    health = exercise(merge_sha, secret)
     if health != {"build_sha": merge_sha}:
         raise RuntimeError(f"health SHA mismatch: {health} != {merge_sha}")
     timeline = client.pages(f"/issues/{story_number}/timeline")
@@ -310,7 +324,7 @@ def run_live(output):
              "engine": "claude", "credential_boundary": "shared GitHub principal",
              "provider_cost": "unavailable; not fabricated"}
     (output / "trace.json").write_text(json.dumps(trace, indent=2, sort_keys=True) + "\n")
-    lifecycle = [x["label"] for x in trace["timeline"] if x["event"] == "labeled"]
+    lifecycle = lifecycle_walk(trace["timeline"])
     expected_walk = ["story:ready", "story:claimed", "story:in-review",
                      "story:ready", "story:claimed", "story:in-review", "story:merged"]
     observations = {
@@ -321,7 +335,7 @@ def run_live(output):
         "P4-07": len(heads) == 2 and pull["number"] == trace["pull_request"],
         "P4-08": merged.get("merged_at") is not None,
         "P4-09": sample in ("selected", "unselected"),
-        "P4-11": all(item in lifecycle for item in expected_walk),
+        "P4-11": lifecycle == expected_walk,
         "P4-12": all(trace.get(key) is not None for key in
                      ("engine", "heads", "merge_sha", "sampling", "provider_cost")),
         "P4-15": merged.get("merged_at") is not None and bool(checks_pass(pull["number"])),
