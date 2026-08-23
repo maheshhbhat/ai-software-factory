@@ -445,3 +445,37 @@ class EngineExplanationTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ScopeSeesFilesTests(unittest.TestCase):
+    """#358 — `git status --porcelain` collapses a new untracked directory to
+    one `dir/` line, which no `dir/sub/**` scope can match; the worker then
+    refuses its own in-scope work. Found live by verification fixture #357."""
+
+    def repo(self):
+        base = tempfile.mkdtemp(prefix="scope-test-")
+        self.addCleanup(__import__("shutil").rmtree, base, True)
+        root = pathlib.Path(base)
+        for args in (["init", "-q"], ["commit", "-q", "--allow-empty",
+                                      "-m", "root"]):
+            subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                            *args], cwd=root, check=True, capture_output=True)
+        return root
+
+    def test_a_file_in_a_brand_new_nested_directory_is_listed_by_full_path(self):
+        root = self.repo()
+        target = root / "runs" / "verify" / "product"
+        target.mkdir(parents=True)
+        (target / "app.py").write_text("x")
+        paths = invoke.changed_paths(root, "HEAD")
+        self.assertIn("runs/verify/product/app.py", paths)
+        self.assertNotIn("runs/", paths)
+        self.assertNotIn("runs/verify/", paths)
+
+    def test_out_of_scope_work_in_a_new_directory_is_still_refused_by_file(self):
+        """The fix must not blunt the guard: the offending FILE is reported."""
+        root = self.repo()
+        (root / "forbidden").mkdir()
+        (root / "forbidden" / "escape.py").write_text("x")
+        paths = invoke.changed_paths(root, "HEAD")
+        self.assertIn("forbidden/escape.py", paths)
