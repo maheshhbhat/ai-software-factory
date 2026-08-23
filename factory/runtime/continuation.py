@@ -35,6 +35,15 @@ Everything ambiguous fails closed with a named reason and no transition.
 Consumption needs no cursor: advancing a project moves it off the bell, so the
 next pass does not see it. The state write is the duplicate suppressor
 (`architecture-v2.1.md` §4), exactly as in the dispatcher.
+
+**Standing projects (#314 SM-06).** `state-schema.md` §4.1.1 allows one Project
+to be *standing* — continuous work with no acceptance edge — and says at most one
+Project may hold that state at a time. That is enforced here, at the §5.1
+approval that would create it, because approval is the only moment a Project
+becomes standing. A second one is *refused*, not warned about: the Project stays
+at `project:awaiting-ready` and the reason names the Project already holding the
+state. The check is repeated immediately before the write for the same reason the
+lifecycle re-read is: two passes must not both create one.
 """
 
 from __future__ import annotations
@@ -55,6 +64,14 @@ AWAITING_READY = "project:awaiting-ready"
 AWAITING_ACCEPTANCE = "project:awaiting-acceptance"
 ACTIVE = "project:active"
 ACCEPTED = "project:accepted"
+# §4.1.1 — continuous work, approved once and never accepted. The label is the
+# state, so approving a standing Project ends on this value rather than ACTIVE.
+STANDING = "project:standing"
+
+# Approval verdicts. A standing approval is an ordinary §5.1 approval that also
+# says which state it ends on; it is not a second kind of bell.
+APPROVED = "approved"
+APPROVED_STANDING = "approved-standing"
 
 # Only the repository owner rings a bell. COLLABORATOR is deliberately excluded:
 # §5 names the CTO as the decision authority, and a wider set would mean any
@@ -69,6 +86,7 @@ CRITERION_RE = re.compile(r"^- \[[ xX]\] .+$", re.M)
 FOLLOW_UP_RE = re.compile(r"^follow-up:\s*(?P<value>.+?)\s*$", re.M | re.I)
 ACTOR_RE = re.compile(r"^actor:\s*@?(?P<value>[A-Za-z0-9-]+)\s*$", re.M | re.I)
 SECONDS_RE = re.compile(r"^seconds-spent:\s*(?P<value>[0-9]+)\s*$", re.M | re.I)
+STANDING_RE = re.compile(r"\bstanding\b", re.I)
 STATUS_RE = re.compile(r"\s(?:—|-)\s+(pass|fail)\b", re.I)
 KEY_RE = re.compile(r"\b([A-Z][A-Z0-9]*-[0-9]+)\b")
 
@@ -86,6 +104,7 @@ class Reason:
     CONFLICTING_DECISIONS = "CONFLICTING_DECISIONS"
     UNSUPPORTED_BELL = "UNSUPPORTED_BELL"
     BELL_TIME_UNAVAILABLE = "BELL_TIME_UNAVAILABLE"
+    SECOND_STANDING_PROJECT = "SECOND_STANDING_PROJECT"
 
 
 class Outcome:
@@ -169,14 +188,19 @@ def normalize(text: str | None) -> str:
 
 
 def classify_approval(comment: dict) -> tuple[str | None, str | None]:
-    """Read a `## Plan approval` comment. Returns (verdict, error)."""
+    """Read a `## Plan approval` comment. Returns (verdict, error).
+
+    `decision: approved (standing)` approves the Project into §4.1.1's standing
+    state. The word is read from the decision line only, never from surrounding
+    prose — an approval that *discusses* standing work is an ordinary approval.
+    """
     body = (comment.get("body") or "").replace("\r\n", "\n")
     match = DECISION_RE.search(body)
     if not match:
         return None, Reason.MALFORMED_DECISION
     value = match.group("value").strip().strip("*").strip().lower()
     if value.startswith("approved"):
-        return "approved", None
+        return (APPROVED_STANDING if STANDING_RE.search(value) else APPROVED), None
     if "changes-requested" in value or value.startswith("rejected"):
         return "changes-requested", None
     return None, Reason.AMBIGUOUS_DECISION
@@ -226,8 +250,25 @@ def owner_decisions(comments: list[dict], heading: re.Pattern) -> list[dict]:
             if is_owner(c) and heading.search((c.get("body") or "").replace("\r\n", "\n"))]
 
 
-def evaluate_project(project: dict, comments: list[dict]) -> Outcome:
-    """Decide whether one project at a bell may advance."""
+def standing_holders(issues) -> list[int]:
+    """Project numbers that carry `project:standing`, lowest first.
+
+    Membership is the *label*, not the resolved lifecycle. A project carrying
+    two `project:*` labels resolves to no lifecycle (§2.1) and is inert
+    everywhere else — but for a uniqueness rule that would fail open, letting a
+    mislabelled project hide the state it is still claiming. It counts here.
+    """
+    return sorted(number for number, issue in issues.items()
+                  if STANDING in labels_of(issue))
+
+
+def evaluate_project(project: dict, comments: list[dict], standing=()) -> Outcome:
+    """Decide whether one project at a bell may advance.
+
+    `standing` is the set of project numbers currently holding `project:standing`
+    — the §4.1.1 uniqueness rule needs to see beyond the project in hand. An
+    empty default keeps every non-standing evaluation exactly as it was.
+    """
     number = project.get("number", 0)
     state = lifecycle_of(project)
 
@@ -283,19 +324,30 @@ def evaluate_project(project: dict, comments: list[dict]) -> Outcome:
     verdict, comment = verdicts[-1]
 
     if state == AWAITING_READY:
-        if verdict != "approved":
+        if verdict not in (APPROVED, APPROVED_STANDING):
             return Outcome(number, None, Reason.NO_DECISION,
                            f"latest owner decision is {verdict!r}")
-        # §5.1 binding rule.
+        # §5.1 binding rule. It governs a standing approval identically: the
+        # state a Project ends in does not change what an approval binds to.
         quoted = quoted_criteria(comment.get("body") or "")
         live = criteria_of(project.get("body") or "")
         if quoted is not None and normalize(quoted) != normalize(live):
             return Outcome(number, None, Reason.CRITERIA_CHANGED,
                            "the criteria section no longer matches the checklist quoted in "
                            "the approval; §5.1 voids the approval")
-        return Outcome(number, ACTIVE, Reason.CONTINUED,
-                       "owner plan approval" + ("" if quoted is not None
-                                                else " (no criteria quoted — binding unanchored)"))
+        anchor = "" if quoted is not None else " (no criteria quoted — binding unanchored)"
+        if verdict == APPROVED_STANDING:
+            # §4.1.1 — at most one standing Project. Refused at the transition,
+            # so the Project is left whole at its bell rather than half-moved.
+            held = [n for n in sorted(standing) if n != number]
+            if held:
+                return Outcome(number, None, Reason.SECOND_STANDING_PROJECT,
+                               f"{', '.join(f'#{n}' for n in held)} already holds "
+                               f"{STANDING}; §4.1.1 permits one standing project at a "
+                               "time, so this approval is refused, not applied")
+            return Outcome(number, STANDING, Reason.CONTINUED,
+                           "owner plan approval of a standing project" + anchor)
+        return Outcome(number, ACTIVE, Reason.CONTINUED, "owner plan approval" + anchor)
 
     if verdict == "pass":
         return Outcome(number, ACCEPTED, Reason.CONTINUED,
@@ -372,9 +424,9 @@ def ensure_acceptance_touch(project: int, comment: dict, *, runner=subprocess.ru
     return fingerprint
 
 
-def evaluate_all(projects: dict, comments_by_project: dict) -> list[Outcome]:
+def evaluate_all(projects: dict, comments_by_project: dict, standing=()) -> list[Outcome]:
     """Evaluate every known project. Ordered by issue number for reproducibility."""
-    return [evaluate_project(projects[n], comments_by_project.get(n, []))
+    return [evaluate_project(projects[n], comments_by_project.get(n, []), standing)
             for n in sorted(projects)]
 
 
@@ -394,7 +446,12 @@ def continuation_line(outcome: Outcome) -> str:
 
 
 def fetch_projects(repo: str, token: str) -> dict:
-    """Open project issues sitting at a human bell."""
+    """Every open project issue.
+
+    Wider than the bells this module consumes, because the §4.1.1 uniqueness
+    check has to see the standing project — which is by definition not at a bell.
+    Filtering is left to `bell_projects` and `standing_holders`, which are pure.
+    """
     import json
     import urllib.request
 
@@ -418,12 +475,17 @@ def fetch_projects(repo: str, token: str) -> dict:
                 continue
             if "type:project" not in labels_of(issue):
                 continue
-            if lifecycle_of(issue) in (AWAITING_READY, AWAITING_ACCEPTANCE):
-                projects[issue["number"]] = issue
+            projects[issue["number"]] = issue
         if len(batch) < 100:
             break
         page += 1
     return projects
+
+
+def bell_projects(issues: dict) -> dict:
+    """Those of `issues` sitting at a human bell."""
+    return {number: issue for number, issue in issues.items()
+            if lifecycle_of(issue) in (AWAITING_READY, AWAITING_ACCEPTANCE)}
 
 
 def fetch_comments(repo: str, number: int, token: str) -> list[dict]:
@@ -474,6 +536,30 @@ def fetch_bell_at(repo: str, number: int, token: str, label: str) -> str | None:
     return max(valid, key=lambda item: item[0])[1] if valid else None
 
 
+def fetch_standing(repo: str, token: str) -> list[int]:
+    """Open project issues carrying `project:standing`, straight from GitHub."""
+    import json
+    import urllib.request
+
+    numbers, page = [], 1
+    while True:
+        request = urllib.request.Request(
+            f"https://api.github.com/repos/{repo}/issues"
+            f"?state=open&labels=project%3Astanding&per_page=100&page={page}",
+            headers={"Authorization": f"Bearer {token}",
+                     "Accept": "application/vnd.github+json",
+                     "User-Agent": "factory-continuation"})
+        with urllib.request.urlopen(request, timeout=30) as response:
+            batch = json.loads(response.read().decode("utf-8"))
+        numbers.extend(issue["number"] for issue in batch
+                       if "pull_request" not in issue
+                       and "type:project" in labels_of(issue))
+        if len(batch) < 100:
+            break
+        page += 1
+    return sorted(numbers)
+
+
 def apply_outcome(repo: str, project: dict, outcome: Outcome, token: str) -> tuple[bool, str]:
     """Advance one project, re-checking its state immediately before writing.
 
@@ -497,6 +583,15 @@ def apply_outcome(repo: str, project: dict, outcome: Outcome, token: str) -> tup
     current = lifecycle_of(fresh)
     if current not in (AWAITING_READY, AWAITING_ACCEPTANCE):
         return False, f"no longer at a bell (now {current}) — another pass consumed it"
+
+    # §4.1.1 uniqueness, re-checked against live labels for the same reason the
+    # lifecycle is: the read that decided this outcome may be stale. Refusing
+    # here writes nothing at all, so the project keeps its bell.
+    if outcome.action == STANDING:
+        held = [n for n in fetch_standing(repo, token) if n != number]
+        if held:
+            return False, (f"{', '.join(f'#{n}' for n in held)} already holds {STANDING} "
+                           "— §4.1.1 permits one standing project at a time")
 
     # Freshness precedes evidence so a losing stale pass cannot append a receipt
     # for a decision it never consumes. Evidence still precedes the state write.
@@ -527,7 +622,9 @@ def apply_outcome(repo: str, project: dict, outcome: Outcome, token: str) -> tup
 
 def run(repo: str, token: str, apply: bool = True) -> list[Outcome]:
     """One continuation pass. Returns the outcomes that advanced a project."""
-    projects = fetch_projects(repo, token)
+    issues = fetch_projects(repo, token)
+    projects = bell_projects(issues)
+    standing = standing_holders(issues)
     if not projects:
         return []
     for number, project in projects.items():
@@ -536,7 +633,7 @@ def run(repo: str, token: str, apply: bool = True) -> list[Outcome]:
                 repo, number, token, AWAITING_ACCEPTANCE)
     comments = {n: fetch_comments(repo, n, token) for n in projects}
     advanced = []
-    for outcome in evaluate_all(projects, comments):
+    for outcome in evaluate_all(projects, comments, standing):
         if outcome.action is None:
             if outcome.reason not in (Reason.NOT_AT_A_BELL, Reason.NO_DECISION):
                 print(f"[continuation] #{outcome.number} not advanced: "

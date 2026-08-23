@@ -44,6 +44,11 @@ def approval(criteria=CRITERIA, decision="approved"):
                    f"Approved criteria:\n\n{criteria}\n")
 
 
+def standing_project(number=200):
+    """A project holding §4.1.1's standing state — never at a bell by definition."""
+    return project(number=number, state=ct.STANDING)
+
+
 def acceptance(result="pass", created_at="2026-08-22T01:01:00Z"):
     return comment(f"## Acceptance\n\nresult: {result}\nactor: @maheshhbhat\n\n"
                    f"- criterion 1 — {result}\n\nfollow-up: none\n",
@@ -153,6 +158,209 @@ class TestBindingRule(unittest.TestCase):
         outcome = ct.evaluate_project(project(), [bare])
         self.assertEqual(outcome.action, ct.ACTIVE)
         self.assertIn("unanchored", outcome.detail)
+
+
+class TestStandingProjectUniqueness(unittest.TestCase):
+    """#314 SM-06 / §4.1.1 — at most one standing Project, enforced at approval.
+
+    Approval is the only moment a Project becomes standing, so it is the only
+    place the rule can be enforced without inventing a state to police. A second
+    one is refused outright: the Project keeps its `project:awaiting-ready` label
+    and nothing is written, rather than the transition landing beside a warning.
+
+    The target label is `project:standing` because that is the state §4.1.1
+    defines for continuous work — the Story's `### Acceptance notes` say
+    `project:active`, which is the edge the guard sits on, not the state an
+    approved standing Project ends in. Ending it in `project:active` would leave
+    the standing state unreachable and this rule with nothing to enforce.
+    """
+
+    def approval_standing(self, criteria=CRITERIA):
+        return approval(criteria=criteria, decision="approved (standing)")
+
+    def test_the_first_standing_approval_is_applied(self):
+        outcome = ct.evaluate_project(project(), [self.approval_standing()], standing=[])
+        self.assertEqual(ct.STANDING, outcome.action)
+        self.assertEqual(R.CONTINUED, outcome.reason)
+
+    def test_a_second_standing_approval_is_refused_and_names_the_first(self):
+        outcome = ct.evaluate_project(project(), [self.approval_standing()], standing=[200])
+        self.assertIsNone(outcome.action, "no transition at all, not a partial one")
+        self.assertEqual(R.SECOND_STANDING_PROJECT, outcome.reason)
+        self.assertIn("#200", outcome.detail)
+
+    def test_every_holder_is_named_not_just_a_count(self):
+        outcome = ct.evaluate_project(project(), [self.approval_standing()],
+                                      standing=[201, 200])
+        self.assertIn("#200", outcome.detail)
+        self.assertIn("#201", outcome.detail)
+
+    def test_the_refusal_is_the_same_shape_as_the_other_approval_refusals(self):
+        """It blocks the transition; it does not decorate one."""
+        refused = ct.evaluate_project(project(), [self.approval_standing()], standing=[200])
+        criteria = ct.evaluate_project(project(criteria="- [ ] changed"), [approval()])
+        for outcome in (refused, criteria):
+            self.assertIsNone(outcome.action)
+            self.assertIsNone(outcome.decision)
+            self.assertNotEqual(R.CONTINUED, outcome.reason)
+            self.assertTrue(outcome.detail)
+
+    def test_the_project_the_approval_belongs_to_is_not_its_own_rival(self):
+        """Re-evaluating a project already counted as standing must not refuse
+        itself — the guard is about a *second* project, not a replay."""
+        outcome = ct.evaluate_project(project(), [self.approval_standing()], standing=[100])
+        self.assertEqual(ct.STANDING, outcome.action)
+
+    def test_replaying_the_refused_approval_refuses_identically(self):
+        args = (project(), [self.approval_standing()], [200])
+        first, second = ct.evaluate_project(*args), ct.evaluate_project(*args)
+        self.assertEqual(first, second)
+        self.assertEqual(first.detail, second.detail)
+
+    def test_an_ordinary_approval_is_untouched_by_the_rule(self):
+        """A standing project existing does not block bounded projects."""
+        outcome = ct.evaluate_project(project(), [approval()], standing=[200])
+        self.assertEqual(ct.ACTIVE, outcome.action)
+
+    def test_prose_about_standing_work_does_not_designate_a_standing_project(self):
+        """Only the decision line designates. Otherwise every approval that
+        discusses maintenance would silently claim the state."""
+        body = ("## Plan approval\n\ndecision: approved\nactor: @maheshhbhat\n\n"
+                f"This is standing maintenance work.\n\n{CRITERIA}\n")
+        outcome = ct.evaluate_project(project(), [comment(body)], standing=[200])
+        self.assertEqual(ct.ACTIVE, outcome.action)
+
+    def test_a_standing_approval_disagreeing_with_a_bounded_one_fails_closed(self):
+        outcome = ct.evaluate_project(project(), [approval(), self.approval_standing()])
+        self.assertIsNone(outcome.action)
+        self.assertEqual(R.CONFLICTING_DECISIONS, outcome.reason)
+
+    def test_a_mislabelled_project_still_counts_as_holding_the_state(self):
+        """§2.1 leaves a two-label project with no lifecycle. For uniqueness that
+        must fail closed — it is still claiming the state it is labelled with."""
+        broken = standing_project(200)
+        broken["labels"].append({"name": ct.ACTIVE})
+        self.assertIsNone(ct.lifecycle_of(broken))
+        issues = {100: project(), 200: broken}
+        self.assertEqual([200], ct.standing_holders(issues))
+        self.assertEqual(R.SECOND_STANDING_PROJECT,
+                         ct.evaluate_project(issues[100], [self.approval_standing()],
+                                             ct.standing_holders(issues)).reason)
+
+    def test_only_projects_at_a_bell_are_evaluated_and_standing_is_not_one(self):
+        issues = {100: project(), 200: standing_project()}
+        self.assertEqual([100], sorted(ct.bell_projects(issues)))
+        self.assertEqual([200], ct.standing_holders(issues))
+
+
+class TestStandingApprovalIsAnOrdinaryApproval(unittest.TestCase):
+    """§4.1.1(1) / #314 SM-03 — approved once, superseded only by a criteria edit."""
+
+    STANDING_APPROVAL = "approved (standing)"
+
+    def test_adding_or_finishing_stories_does_not_ring_another_bell(self):
+        """A standing project is not at a bell, whatever its stories do, so
+        continuation never re-consumes or re-requires an approval for it."""
+        for stories in ("#1", "#1\n#2\n#3", "", "_No response_"):
+            with self.subTest(stories=stories):
+                held = standing_project()
+                held["body"] = held["body"].replace(
+                    "### Stories\n\n#1", f"### Stories\n\n{stories}")
+                outcome = ct.evaluate_project(
+                    held, [approval(decision=self.STANDING_APPROVAL)], standing=[200])
+                self.assertIsNone(outcome.action)
+                self.assertEqual(R.NOT_AT_A_BELL, outcome.reason)
+                self.assertEqual(ct.STANDING, outcome.detail)
+
+    def test_editing_a_standing_projects_criteria_still_voids_its_approval(self):
+        """§5.2 returns it to `awaiting-ready`; re-approval then meets §5.1's
+        binding rule unchanged — the amended criteria do not match what was
+        approved, so nothing advances."""
+        amended = project(criteria="- [ ] does the thing\n- [ ] and something new")
+        outcome = ct.evaluate_project(
+            amended, [approval(criteria=CRITERIA, decision=self.STANDING_APPROVAL)],
+            standing=[])
+        self.assertIsNone(outcome.action)
+        self.assertEqual(R.CRITERIA_CHANGED, outcome.reason)
+
+    def test_re_approval_after_a_criteria_edit_is_allowed_back_in(self):
+        outcome = ct.evaluate_project(
+            project(), [approval(decision=self.STANDING_APPROVAL)], standing=[])
+        self.assertEqual(ct.STANDING, outcome.action)
+
+
+class TestStandingRefusalWritesNothing(unittest.TestCase):
+    """SM-06 — "applies no partial transition" has to be true of the write path,
+    not only of the decision."""
+
+    def pass_over(self, issues, comments, apply_outcome):
+        with mock.patch.object(ct, "fetch_projects", return_value=issues), \
+             mock.patch.object(ct, "fetch_comments", side_effect=lambda r, n, t: comments.get(n, [])), \
+             mock.patch.object(ct, "apply_outcome", side_effect=apply_outcome) as applied:
+            advanced = ct.run("owner/repo", "token")
+        return advanced, applied
+
+    def test_a_refused_second_standing_project_never_reaches_github(self):
+        issues = {100: project(), 200: standing_project()}
+        comments = {100: [approval(decision="approved (standing)")]}
+        advanced, applied = self.pass_over(issues, comments, lambda *a: (True, "written"))
+        self.assertEqual([], advanced)
+        self.assertEqual(0, applied.call_count, "the refusal must write nothing")
+
+    def test_replaying_the_pass_creates_no_second_anything(self):
+        issues = {100: project(), 200: standing_project()}
+        comments = {100: [approval(decision="approved (standing)")]}
+        for _ in range(2):
+            advanced, applied = self.pass_over(issues, comments, lambda *a: (True, "written"))
+            self.assertEqual([], advanced)
+            self.assertEqual(0, applied.call_count)
+        self.assertEqual({100: ct.AWAITING_READY, 200: ct.STANDING},
+                         {n: ct.lifecycle_of(i) for n, i in issues.items()})
+
+    def test_the_first_standing_project_is_applied_in_the_same_pass_shape(self):
+        issues = {100: project()}
+        comments = {100: [approval(decision="approved (standing)")]}
+        advanced, applied = self.pass_over(issues, comments, lambda *a: (True, "written"))
+        self.assertEqual([ct.STANDING], [o.action for o in advanced])
+        self.assertEqual(1, applied.call_count)
+
+    def test_a_race_lost_between_evaluation_and_write_is_refused_at_the_write(self):
+        """Two passes may both decide; only one may write. The label re-read is
+        what makes that true, exactly as it is for the lifecycle itself."""
+        p = project()
+        outcome = ct.evaluate_project(p, [approval(decision="approved (standing)")], [])
+        self.assertEqual(ct.STANDING, outcome.action)
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = json.dumps(p).encode()
+        with mock.patch.object(ct, "fetch_standing", return_value=[200]), \
+             mock.patch("urllib.request.urlopen", return_value=response) as github:
+            ok, note = ct.apply_outcome("owner/repo", p, outcome, "token")
+        self.assertFalse(ok)
+        self.assertIn("#200", note)
+        self.assertEqual(1, github.call_count, "only the freshness read")
+        self.assertEqual("GET", github.call_args.args[0].get_method())
+
+    def test_the_uncontested_write_still_happens_and_carries_the_standing_label(self):
+        p = project()
+        outcome = ct.evaluate_project(p, [approval(decision="approved (standing)")], [])
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = json.dumps(p).encode()
+        with mock.patch.object(ct, "fetch_standing", return_value=[]), \
+             mock.patch("urllib.request.urlopen", return_value=response) as github:
+            ok, note = ct.apply_outcome("owner/repo", p, outcome, "token")
+        self.assertTrue(ok)
+        self.assertEqual(f"{ct.AWAITING_READY} -> {ct.STANDING}", note)
+        patch = [call for call in github.call_args_list
+                 if call.args[0].get_method() == "PATCH"]
+        self.assertEqual(1, len(patch))
+        payload = json.loads(patch[0].args[0].data.decode())
+        self.assertIn(ct.STANDING, payload["labels"])
+        self.assertNotIn(ct.AWAITING_READY, payload["labels"])
+        self.assertNotIn("state", payload, "a standing project is never closed")
+
+    def test_the_continue_line_names_the_standing_target(self):
+        line = ct.continuation_line(ct.Outcome(314, ct.STANDING, R.CONTINUED))
+        self.assertEqual("CONTINUE project=#314 to=project:standing", line)
 
 
 class TestAmbiguity(unittest.TestCase):
