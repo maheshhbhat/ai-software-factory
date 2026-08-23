@@ -35,11 +35,11 @@ can log in" without naming a variable. `clean_environment()` takes the engine
 as a required argument for the same reason: a call site has to say whether it
 is launching an engine, and only an engine launch can reach a credential.
 
-Write permission is granted deliberately: the engine is invoked with
-`--permission-mode acceptEdits`, because the Story it is given asks it to
-change files. That does not widen what may be delivered — `execute()` compares
-every changed path against the Story's declared `### Scope` after the engine
-exits and refuses the delivery if anything falls outside it.
+Write permission is granted deliberately: Claude receives `acceptEdits` and
+Codex receives automatic approval inside its workspace-write sandbox, because
+the Story asks the engine to change files. That does not widen what may be delivered — `execute()`
+compares every changed path against the Story's declared `### Scope` after the
+engine exits and refuses the delivery if anything falls outside it.
 """
 
 from __future__ import annotations
@@ -301,7 +301,8 @@ def engine_name(command: list[str]) -> str | None:
     return pathlib.PurePath(command[0]).name.lower()
 
 
-def model_command(input_file: str, bounds: Bounds) -> list[str]:
+def model_command(input_file: str, bounds: Bounds,
+                  engine: str = "claude") -> list[str]:
     template = os.environ.get("FACTORY_DELIVERY_MODEL_CMD", "").strip()
     if template:
         return [part.replace("{input_file}", input_file)
@@ -310,6 +311,16 @@ def model_command(input_file: str, bounds: Bounds) -> list[str]:
                 for part in shlex.split(template)]
     prompt = HERE.joinpath("prompt.md").read_text()
     payload = prompt + "\n\n## Invocation input\n\n" + pathlib.Path(input_file).read_text()
+    if engine == "codex":
+        # Codex has no CLI dollar-cap option. The enclosing subprocess timeout
+        # still enforces the Story's time bound, and its JSONL events preserve
+        # the usage it actually reports. Do not invent a spend guarantee.
+        # --approve-for-me supplies the workspace-write sandbox itself. Codex
+        # rejects combining it with an explicit --sandbox option.
+        return ["codex", "exec", "--approve-for-me", "--ephemeral",
+                "--ignore-user-config", "--json", payload]
+    if engine != "claude":
+        raise DeliveryError(f"unsupported delivery engine: {engine}")
     # acceptEdits grants Edit/Write; dontAsk denies them. The Story asks the
     # engine to change files, and `execute()` enforces the Story's Scope on
     # what it changed afterwards. See the module docstring.
@@ -423,7 +434,8 @@ def read_back_pr(client: GitHub, story_number: int, durable: str,
 
 def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
             *, timeout: int | None = None, max_usd: float | None = None,
-            runner=subprocess.run, client: GitHub | None = None) -> Delivery:
+            engine: str = "claude", runner=subprocess.run,
+            client: GitHub | None = None) -> Delivery:
     client = client or GitHub(repo, token)
     metadata = client.api("")  # read preflight before any write
     default = metadata.get("default_branch")
@@ -468,7 +480,7 @@ def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
                 json.dump(value, handle)
                 input_file = handle.name
             try:
-                command = model_command(input_file, bounds)
+                command = model_command(input_file, bounds, engine)
                 launch_engine(command, cwd=worktree, timeout=bounds.timeout,
                               env=clean_environment(engine_name(command)),
                               story=story_number, project=project_number,
@@ -514,6 +526,8 @@ def main(argv=None) -> int:
     parser.add_argument("--repo", required=True)
     parser.add_argument("--story", required=True, type=int)
     parser.add_argument("--checkout", default=str(ROOT))
+    parser.add_argument("--engine", choices=sorted(ENGINE_CREDENTIALS),
+                        default="claude")
     parser.add_argument("--timeout", type=int)
     parser.add_argument("--max-usd", type=float)
     args = parser.parse_args(argv)
@@ -523,7 +537,8 @@ def main(argv=None) -> int:
         return 2
     try:
         result = execute(args.repo, args.story, token, pathlib.Path(args.checkout),
-                         timeout=args.timeout, max_usd=args.max_usd)
+                         timeout=args.timeout, max_usd=args.max_usd,
+                         engine=args.engine)
     except Exception as exc:
         print(f"delivery failed: {type(exc).__name__}: {exc}", file=sys.stderr)
         # The engine's own account, when one exists, travels with the failure:

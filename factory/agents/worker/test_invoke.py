@@ -93,6 +93,27 @@ class BoundaryTests(unittest.TestCase):
         self.assertEqual("acceptEdits",
                          command[command.index("--permission-mode") + 1])
 
+    def test_codex_command_is_headless_writable_and_reports_usage(self):
+        with mock.patch.dict(invoke.os.environ, {}, clear=True), \
+             mock.patch.object(invoke.pathlib.Path, "read_text", return_value="prompt"):
+            command = invoke.model_command(
+                "input.json", invoke.Bounds(3.0, 10), "codex")
+        self.assertEqual(["codex", "exec"], command[:2])
+        for flag in ("--approve-for-me", "--ephemeral", "--ignore-user-config",
+                     "--json"):
+            self.assertIn(flag, command)
+        # --approve-for-me already supplies workspace-write. Combining it with
+        # an explicit --sandbox makes codex-cli 0.149.0 exit 2 before launch.
+        self.assertNotIn("--sandbox", command)
+        self.assertNotIn("--dangerously-bypass-approvals-and-sandbox", command)
+        self.assertNotIn("--max-budget-usd", command)
+
+    def test_unknown_engine_fails_instead_of_running_claude(self):
+        with mock.patch.dict(invoke.os.environ, {}, clear=True), \
+             mock.patch.object(invoke.pathlib.Path, "read_text", return_value="prompt"):
+            with self.assertRaisesRegex(invoke.DeliveryError, "unsupported"):
+                invoke.model_command("input.json", invoke.Bounds(3.0, 10), "other")
+
 
 # A fully populated operator shell, written out rather than derived from the
 # declarations, so a new credential must be justified against a real session.
@@ -260,7 +281,7 @@ class RecordingRunner:
             out = "\n".join(self.changed)
         elif cmd[:2] == ["git", "rev-parse"]:
             out = "deadbeef\n"
-        elif cmd[0] == "claude":
+        elif cmd[0] in ("claude", "codex"):
             out = self.engine_output
         return subprocess.CompletedProcess(cmd, 0, out, "")
 
@@ -287,14 +308,14 @@ class DeliveryHarness(unittest.TestCase):
                             FACTORY_RUNTIME_LOG=self.log,
                             FACTORY_RUNTIME_LOG_STDERR="0")
 
-    def deliver(self, engine_output=""):
+    def deliver(self, engine_output="", engine="claude"):
         runner = RecordingRunner(["factory/agents/worker/invoke.py"],
                                  engine_output=engine_output)
         with mock.patch.dict(invoke.os.environ, self.session, clear=True), \
              mock.patch.object(invoke.pathlib.Path, "read_text",
                                return_value="prompt"):
             invoke.execute("owner/repo", 214, "token", pathlib.Path("."),
-                           runner=runner, client=FakeClient())
+                           engine=engine, runner=runner, client=FakeClient())
         return runner
 
     def records(self):
@@ -328,6 +349,16 @@ class EngineUsageTests(DeliveryHarness):
         self.assertEqual(1, len(usage))
         self.assertFalse(usage[0]["usage_reported"])
         self.assertEqual(runlog.USAGE_UNAVAILABLE, usage[0]["usage"])
+
+    def test_codex_delivery_is_recorded_as_codex(self):
+        self.deliver(engine="codex", engine_output=json.dumps(
+            {"type": "turn.completed", "usage": {"input_tokens": 11,
+                                                    "output_tokens": 7}}))
+        usage = [r for r in self.records() if r["event"] == runlog.USAGE_EVENT]
+        self.assertEqual(1, len(usage))
+        self.assertEqual("codex", usage[0]["engine"])
+        self.assertEqual({"input_tokens": 11, "output_tokens": 7},
+                         usage[0]["usage"])
 
     def test_the_default_command_asks_the_engine_to_report_its_usage(self):
         """Without this the engine prints prose and every record is blank."""
