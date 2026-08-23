@@ -527,3 +527,60 @@ class TestLaunchBoundComesFromTheStory(unittest.TestCase):
             os.environ.clear()
             os.environ.update(env)
         self.assertEqual(3720, recorded["timeout_s"])
+
+
+class TestTheSkipGuardDiesWithItsCycle(unittest.TestCase):
+    """#342 — the `seen` set built once per process skipped every redispatch:
+    a Story returned to `story:ready` by review findings was claimed again and
+    no worker was ever launched (#328, 2026-08-23, head 6147e002 unchanged).
+    The guard is belt-and-braces against a duplicate dispatch inside one
+    cycle, and must not survive the cycle it was set in."""
+
+    def setUp(self):
+        self._env = dict(os.environ)
+        for key in list(os.environ):
+            if key.startswith("FACTORY_WORKER"):
+                del os.environ[key]
+        os.environ["FACTORY_WORKER_CMD"] = "/usr/bin/true"
+        self._passes = [
+            mock.patch.object(poller, "run_review_link", return_value=[]),
+            mock.patch.object(poller, "run_continuation", return_value=[]),
+            mock.patch.object(poller, "run_sequencer", return_value=[]),
+            mock.patch.object(poller, "run_planning_route", return_value=[]),
+            mock.patch.object(poller, "run_human_queue", return_value=[]),
+            mock.patch.object(poller, "complete_story"),
+            mock.patch.object(poller, "story_launch_bound", return_value=None),
+        ]
+        for patcher in self._passes:
+            patcher.start()
+
+    def tearDown(self):
+        for patcher in reversed(self._passes):
+            patcher.stop()
+        os.environ.clear()
+        os.environ.update(self._env)
+
+    def test_a_redispatch_in_a_later_cycle_launches_a_worker_again(self):
+        """The #328 defect: the second cycle must launch, not skip."""
+        launches = []
+        with mock.patch.object(poller, "run_dispatcher", return_value=REPORT), \
+             mock.patch.object(poller, "wake_worker",
+                               side_effect=lambda d, **kw: launches.append(d["story"])
+                               or poller.workers.LaunchReport("claude-delivery",
+                                                              "LAUNCHED")):
+            poller.cycle("o/r", 54)
+            poller.cycle("o/r", 54)
+        self.assertEqual([64, 64], launches,
+                         "a story redispatched after findings must be launched "
+                         "again in the next cycle, not skipped forever")
+
+    def test_a_duplicate_dispatch_inside_one_cycle_still_launches_once(self):
+        doubled = REPORT + CANONICAL + "\n"
+        launches = []
+        with mock.patch.object(poller, "run_dispatcher", return_value=doubled), \
+             mock.patch.object(poller, "wake_worker",
+                               side_effect=lambda d, **kw: launches.append(d["story"])
+                               or poller.workers.LaunchReport("claude-delivery",
+                                                              "LAUNCHED")):
+            poller.cycle("o/r", 54)
+        self.assertEqual([64], launches)

@@ -247,3 +247,59 @@ class TestNoPolicyIsInvented(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestARedispatchedCorrectionIsNotReclaimed(unittest.TestCase):
+    """#342 — reconcile moved a claimed story straight back to in-review on the
+    sole basis of an open linked PR, without asking whether the claim was a
+    redispatched correction. It reclaimed #328 sixty-two seconds after its
+    claim on 2026-08-23, well inside the minutes a correction takes."""
+
+    HEAD = "6147e002" + "0" * 32
+
+    def findings(self, pr=77, head=None):
+        return {"body": f"<!-- review-outcome:{pr}:{head or self.HEAD}:findings -->"}
+
+    def test_a_findings_reviewed_head_holds_the_claimed_story(self):
+        outcome = rl.reconcile(story(), [pull(head=self.HEAD)],
+                               story_comments=[self.findings()])
+        self.assertIsNone(outcome.action)
+        self.assertEqual(rl.Reason.CORRECTION_IN_PROGRESS, outcome.reason)
+
+    def test_a_new_head_releases_the_hold(self):
+        """The correction pushes; the marker no longer matches; review may run."""
+        new_head = "9f4252cd" + "0" * 32
+        outcome = rl.reconcile(story(), [pull(head=new_head)],
+                               story_comments=[self.findings()])
+        self.assertEqual(dispatcher.IN_REVIEW, outcome.action)
+
+    def test_a_fresh_delivery_with_no_outcomes_moves_as_before(self):
+        outcome = rl.reconcile(story(), [pull(head=self.HEAD)],
+                               story_comments=[])
+        self.assertEqual(dispatcher.IN_REVIEW, outcome.action)
+
+    def test_no_comments_supplied_preserves_the_old_behaviour_exactly(self):
+        """Fail-open to the status quo — a comment fetch failure must degrade
+        to today's transition, never to a stuck story."""
+        outcome = rl.reconcile(story(), [pull(head=self.HEAD)])
+        self.assertEqual(dispatcher.IN_REVIEW, outcome.action)
+
+    def test_a_malformed_marker_is_ignored_not_fatal(self):
+        junk = {"body": "<!-- review-outcome:77:not-a-sha:findings -->"}
+        outcome = rl.reconcile(story(), [pull(head=self.HEAD)],
+                               story_comments=[junk])
+        self.assertEqual(dispatcher.IN_REVIEW, outcome.action)
+
+    def test_an_approval_on_the_current_head_does_not_hold(self):
+        """Only findings mean a correction is owed; an approval means review is
+        done and routing owns what happens next."""
+        approval = {"body": f"<!-- review-outcome:77:{self.HEAD}:approval -->"}
+        outcome = rl.reconcile(story(), [pull(head=self.HEAD)],
+                               story_comments=[approval])
+        self.assertEqual(dispatcher.IN_REVIEW, outcome.action)
+
+    def test_an_in_review_story_is_untouched_by_the_discriminator(self):
+        outcome = rl.reconcile(story(lifecycle="story:in-review"),
+                               [pull(head=self.HEAD)],
+                               story_comments=[self.findings()])
+        self.assertEqual(rl.Reason.PR_STILL_OPEN, outcome.reason)

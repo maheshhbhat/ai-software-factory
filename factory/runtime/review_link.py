@@ -64,6 +64,7 @@ class Reason:
     INVALID_PR_LINK = "INVALID_PR_LINK"
     AMBIGUOUS_LINKED_PRS = "AMBIGUOUS_LINKED_PRS"
     PR_STILL_OPEN = "PR_STILL_OPEN"
+    CORRECTION_IN_PROGRESS = "CORRECTION_IN_PROGRESS"
     PR_CLOSED_UNMERGED = "PR_CLOSED_UNMERGED"
     STALE_PLAN = "STALE_PLAN"
 
@@ -86,12 +87,23 @@ def is_closed(pull_request: dict) -> bool:
     return (pull_request.get("state") or "").lower() == "closed"
 
 
-def reconcile(story: dict, pull_requests: list[dict]) -> Outcome:
+def reconcile(story: dict, pull_requests: list[dict],
+              story_comments: list[dict] | None = None) -> Outcome:
     """Decide what one story's delivery pull request implies. Pure — no I/O.
 
     The whole policy is exercisable offline against fixtures, the same split the
     dispatcher and `completion.py` use, and for the same reason: a decision that
     can only be run against live GitHub is a decision nobody reviews.
+
+    `story_comments`, when supplied, lets the claimed→in-review edge tell a
+    fresh delivery from a redispatched correction: a claimed story whose linked
+    PR's *current* head already carries a findings outcome is mid-correction —
+    the worker was just re-dispatched to fix that exact head — and moving it to
+    `story:in-review` again truncates the attempt (it reclaimed #328 sixty-two
+    seconds after its claim on 2026-08-23). The hold releases itself: the
+    correction pushes a new head, the marker no longer matches, and the move
+    proceeds. With `story_comments=None` the behaviour is exactly the old one —
+    fail-open to the status quo, never a stuck story.
     """
     number = story.get("number", 0)
 
@@ -136,6 +148,14 @@ def reconcile(story: dict, pull_requests: list[dict]) -> Outcome:
                        f"to this story is a human's decision", pr=pr_number)
 
     if state == dispatcher.CLAIMED:
+        head = (pull_request.get("head") or {}).get("sha", "")
+        if story_comments is not None and head and \
+                "findings" in review_outcomes(story_comments, pr_number, head):
+            return Outcome(number, None, Reason.CORRECTION_IN_PROGRESS,
+                           f"PR #{pr_number} head {head[:8]} was already reviewed "
+                           f"with findings; this claim is a redispatched "
+                           f"correction — hold until the head changes",
+                           pr=pr_number)
         return Outcome(number, dispatcher.IN_REVIEW, Reason.OPENED,
                        f"PR #{pr_number} is open and carries `Story: #{number}` (§9.5)",
                        pr=pr_number)
@@ -145,9 +165,12 @@ def reconcile(story: dict, pull_requests: list[dict]) -> Outcome:
                    pr=pr_number)
 
 
-def reconcile_all(stories: dict, pull_requests: list[dict]) -> list[Outcome]:
+def reconcile_all(stories: dict, pull_requests: list[dict],
+                  comments_by_story: dict[int, list[dict]] | None = None) -> list[Outcome]:
     """Every reconcilable story, in issue order. Deterministic, like §9.10."""
-    return [reconcile(stories[number], pull_requests) for number in sorted(stories)]
+    supplied = comments_by_story or {}
+    return [reconcile(stories[number], pull_requests, supplied.get(number))
+            for number in sorted(stories)]
 
 
 def exact_head_approved(pull_request: dict, story_comments: list[dict]) -> bool:
@@ -211,15 +234,30 @@ def run(repo: str, token: str, apply: bool = True) -> list[Outcome]:
         return []
     pull_requests = dispatcher.fetch_pull_requests(repo, token)
 
+    # Comments are fetched only for claimed stories — the only state where the
+    # correction-in-progress discriminator applies — and WIP (§9.10) bounds how
+    # many that can be. A fetch failure degrades to the old behaviour.
+    comments_by_story: dict[int, list[dict]] = {}
+    for number, issue in stories.items():
+        if dispatcher.lifecycle_of(issue, dispatcher.STORY_LIFECYCLE) != dispatcher.CLAIMED:
+            continue
+        try:
+            comments_by_story[number] = dispatcher._api(
+                f"https://api.github.com/repos/{repo}/issues/{number}"
+                f"/comments?per_page=100", token) or []
+        except Exception:  # noqa: BLE001 — fail-open to the status quo
+            pass
+
     moved = []
-    for outcome in reconcile_all(stories, pull_requests):
+    for outcome in reconcile_all(stories, pull_requests, comments_by_story):
         if outcome.action is None:
             # Silence only for the states that are somebody else's business by
             # design. Everything else names itself — §9.11's "no silent drops"
             # is about routes, and a reconciliation that quietly declines is the
             # same failure wearing a different hat.
             if outcome.reason not in (Reason.NOT_RECONCILABLE, Reason.NO_LINKED_PR,
-                                      Reason.PR_STILL_OPEN):
+                                      Reason.PR_STILL_OPEN,
+                                      Reason.CORRECTION_IN_PROGRESS):
                 print(f"[review-link] #{outcome.number} not reconciled: "
                       f"{outcome.reason} ({outcome.detail})", flush=True)
                 runlog.event("review_link.declined", story=outcome.number,
