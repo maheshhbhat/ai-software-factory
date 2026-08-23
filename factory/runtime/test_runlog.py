@@ -149,6 +149,93 @@ class TestLoggingNeverCosts(LogToTemp):
         self.assertFalse(runlog.stderr_enabled())
 
 
+class TestEngineUsageIsCapturedNotEstimated(LogToTemp):
+    """Project #322 criterion 5: cost per accepted story must be computed from
+    what the engines reported, and an engine that reported nothing must be
+    visible as such rather than quietly counted as free."""
+
+    def test_a_reported_usage_is_recorded_as_the_engine_gave_it(self):
+        output = json.dumps({"type": "result", "total_cost_usd": 0.42,
+                             "num_turns": 3,
+                             "usage": {"input_tokens": 1200, "output_tokens": 85}})
+        record = runlog.engine_usage(story=337, engine="claude", phase="worker",
+                                     output=output)
+        self.assertTrue(record["usage_reported"])
+        self.assertEqual({"input_tokens": 1200, "output_tokens": 85,
+                          "total_cost_usd": 0.42, "num_turns": 3},
+                         record["usage"])
+        self.assertEqual(record, self.lines()[0])
+
+    def test_reporting_nothing_is_distinguishable_from_reporting_zero(self):
+        """The distinction the whole KPI rests on. A silent engine must never
+        be summed as a zero — that would make an unmeasured run look free."""
+        silent = runlog.engine_usage(story=337, engine="codex", phase="worker",
+                                     output="delivered the story, said nothing else")
+        zero = runlog.engine_usage(story=337, engine="claude", phase="worker",
+                                   output=json.dumps({"usage": {"output_tokens": 0},
+                                                      "total_cost_usd": 0.0}))
+        self.assertFalse(silent["usage_reported"])
+        self.assertEqual(runlog.USAGE_UNAVAILABLE, silent["usage"])
+        self.assertNotIsInstance(silent["usage"], dict)
+        self.assertTrue(zero["usage_reported"])
+        self.assertEqual({"output_tokens": 0, "total_cost_usd": 0.0}, zero["usage"])
+        self.assertIsNone(runlog.parse_usage("said nothing"))
+        self.assertEqual({"output_tokens": 0},
+                         runlog.parse_usage('{"usage":{"output_tokens":0}}'))
+
+    def test_usage_sums_per_story_from_the_runtime_log_alone(self):
+        """No second source: the record names the story and carries the numbers."""
+        runlog.engine_usage(story=337, engine="claude", phase="worker",
+                            output=json.dumps({"usage": {"output_tokens": 10}}))
+        runlog.engine_usage(story=337, engine="claude", phase="review",
+                            output=json.dumps({"usage": {"output_tokens": 4}}))
+        runlog.engine_usage(story=338, engine="claude", phase="worker",
+                            output=json.dumps({"usage": {"output_tokens": 99}}))
+        runlog.engine_usage(story=337, engine="codex", phase="worker", output="quiet")
+        mine = [r for r in self.lines()
+                if r["event"] == runlog.USAGE_EVENT and r["story"] == 337]
+        self.assertEqual(14, sum(r["usage"]["output_tokens"]
+                                 for r in mine if r["usage_reported"]))
+        self.assertEqual(1, len([r for r in mine if not r["usage_reported"]]))
+        self.assertEqual({"worker", "review"}, {r["phase"] for r in mine})
+        self.assertEqual({"claude", "codex"}, {r["engine"] for r in mine})
+
+    def test_a_streaming_engine_is_read_from_its_final_totals(self):
+        stream = "\n".join([json.dumps({"type": "assistant",
+                                        "usage": {"output_tokens": 5}}),
+                            json.dumps({"type": "result",
+                                        "usage": {"output_tokens": 31}})])
+        self.assertEqual({"output_tokens": 31}, runlog.parse_usage(stream))
+
+    def test_a_claim_that_is_not_a_number_is_not_recorded_as_one(self):
+        """Engine output is text the engine controls. Only declared numeric
+        fields become fields a report will add up."""
+        record = runlog.engine_usage(
+            story=337, engine="claude", phase="worker",
+            output=json.dumps({"usage": {"input_tokens": "lots", "spent": "$3"},
+                               "note": "ghp_" + "C" * 36}))
+        self.assertFalse(record["usage_reported"])
+        written = json.dumps(self.lines())
+        self.assertNotIn("lots", written)
+        self.assertNotIn("$3", written)
+        self.assertNotIn("ghp_" + "C" * 36, written)
+
+    def test_unparsable_engine_output_still_produces_a_record(self):
+        record = runlog.engine_usage(story=337, engine="claude", phase="review",
+                                     output="{not json at all")
+        self.assertFalse(record["usage_reported"])
+        self.assertEqual(1, len(self.lines()))
+
+    def test_no_rate_ceiling_or_conversion_is_introduced(self):
+        """`product.md` leaves the monetary cost-per-story ceiling to the owner.
+        Capture records what an engine said; it never prices what it counted."""
+        with open(runlog.__file__, encoding="utf-8") as handle:
+            body = handle.read().split('"""', 2)[-1]
+        for invented in ("price", "pricing", "per_token", "usd_per", "rate_per",
+                         "budget", "ceiling", "estimate"):
+            self.assertNotIn(invented, body.lower())
+
+
 class TestNoReasoningIsRecorded(unittest.TestCase):
     """#104: observable worker output only. Nothing here asks an engine for its
     chain of thought, and a future edit that starts to must be visible."""

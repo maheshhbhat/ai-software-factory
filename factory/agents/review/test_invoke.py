@@ -10,6 +10,7 @@ from unittest import mock
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import invoke
+import runlog
 
 
 class OutputTests(unittest.TestCase):
@@ -116,6 +117,72 @@ class OutputTests(unittest.TestCase):
                                return_value=subprocess.CompletedProcess([], 7, "", "offline")):
             with self.assertRaisesRegex(invoke.ReviewError, "unavailable"):
                 invoke.run(["review"], cwd=".")
+
+
+class EngineUsageTests(unittest.TestCase):
+    """The review half of Project #322 criterion 5: a story's cost is the
+    worker's launch plus the reviewer's, so the reviewer must report too."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.log = pathlib.Path(self.dir.name) / "runtime.jsonl"
+        self.env = mock.patch.dict(os.environ,
+                                   {"FACTORY_RUNTIME_LOG": str(self.log),
+                                    "FACTORY_RUNTIME_LOG_STDERR": "0"})
+        self.env.start()
+        self.addCleanup(self.env.stop)
+
+    def records(self):
+        if not self.log.exists():
+            return []
+        return [json.loads(line) for line in self.log.read_text().splitlines() if line.strip()]
+
+    def launch(self, result):
+        with mock.patch.object(subprocess, "run", return_value=result):
+            invoke.launch_reviewer(["claude", "-p", "x"], cwd=".", timeout=10,
+                                   env={"PATH": "/bin"}, story=337, pull_request=9)
+
+    def test_the_reviewer_usage_is_recorded_against_the_story(self):
+        reported = json.dumps({"total_cost_usd": 0.11,
+                               "usage": {"input_tokens": 400, "output_tokens": 20}})
+        self.launch(subprocess.CompletedProcess([], 0, reported, ""))
+        record = self.records()[0]
+        self.assertEqual(runlog.USAGE_EVENT, record["event"])
+        self.assertEqual((337, 9, "review", "claude", "completed"),
+                         (record["story"], record["pull_request"], record["phase"],
+                          record["engine"], record["launch"]))
+        self.assertEqual({"input_tokens": 400, "output_tokens": 20,
+                          "total_cost_usd": 0.11}, record["usage"])
+
+    def test_a_reviewer_reporting_nothing_is_not_recorded_as_zero(self):
+        self.launch(subprocess.CompletedProcess([], 0, "wrote the outcome", ""))
+        record = self.records()[0]
+        self.assertFalse(record["usage_reported"])
+        self.assertEqual(runlog.USAGE_UNAVAILABLE, record["usage"])
+
+    def test_a_failed_reviewer_launch_still_records_what_it_spent(self):
+        failed = subprocess.CompletedProcess(
+            [], 7, json.dumps({"usage": {"output_tokens": 2}}), "offline")
+        with self.assertRaisesRegex(invoke.ReviewError, "unavailable"):
+            self.launch(failed)
+        self.assertEqual([("failed", {"output_tokens": 2})],
+                         [(r["launch"], r["usage"]) for r in self.records()])
+
+    def test_the_default_command_asks_the_reviewer_to_report_its_usage(self):
+        with mock.patch.object(pathlib.Path, "read_text", return_value="prompt"):
+            cmd = invoke.command(pathlib.Path("input.json"), pathlib.Path("out.json"))
+        self.assertEqual("json", cmd[cmd.index("--output-format") + 1])
+        self.assertEqual("claude", invoke.engine_name(cmd))
+
+    def test_usage_capture_grants_the_reviewer_no_tool_and_no_identity(self):
+        """The fresh-identity construction is what this story must not touch:
+        stdout format is not a permission and not a credential."""
+        with mock.patch.object(pathlib.Path, "read_text", return_value="prompt"):
+            cmd = invoke.command(pathlib.Path("input.json"), pathlib.Path("out.json"))
+        self.assertEqual("Write", cmd[cmd.index("--allowedTools") + 1])
+        self.assertEqual("Bash", cmd[cmd.index("--disallowedTools") + 1])
+        self.assertIn("--safe-mode", cmd)
 
 
 if __name__ == "__main__":
