@@ -68,21 +68,22 @@ if [ -z "$CLAUDE_CODE_OAUTH_TOKEN" ] && [ -r "$HOME/.factory-reviewer-token" ]; 
   export CLAUDE_CODE_OAUTH_TOKEN
 fi
 
-# Preference order, and the engines it names. `codex-delivery` is left in the
-# order but undeclared here: `invoke.py` has no engine selector, and pointing a
-# second worker name at the same command would put "codex ran" in the audit
-# trail when Claude did. Declare `FACTORY_WORKER_CODEX_DELIVERY_LAUNCH` from the
-# caller's environment to fill the slot.
+# Preference order, and the two real engines it names. Each declaration selects
+# its engine explicitly, so the audit trail records the process that actually
+# ran and failover cannot relabel a Claude invocation as Codex.
 if [ -z "$FACTORY_WORKER_ORDER" ]; then
   FACTORY_WORKER_ORDER="claude-delivery,codex-delivery"
 fi
 export FACTORY_WORKER_ORDER
 
-# `invoke.py` takes `--repo` and `--story` and nothing else; it reads the Story
-# from the substrate itself, including the `### Spend cap` that bounds it. It is
-# not given `--project`, which it does not accept and would exit 2 on.
+# `invoke.py` reads the Story from the substrate itself, including the
+# `### Spend cap` that bounds it. It is not given `--project`, which it does not
+# accept and would exit 2 on.
 if [ -z "$FACTORY_WORKER_CLAUDE_DELIVERY_LAUNCH" ]; then
-  FACTORY_WORKER_CLAUDE_DELIVERY_LAUNCH="python3 factory/agents/worker/invoke.py --repo $FACTORY_REPO --story {story}"
+  FACTORY_WORKER_CLAUDE_DELIVERY_LAUNCH="python3 factory/agents/worker/invoke.py --engine claude --repo $FACTORY_REPO --story {story}"
+fi
+if [ -z "$FACTORY_WORKER_CODEX_DELIVERY_LAUNCH" ]; then
+  FACTORY_WORKER_CODEX_DELIVERY_LAUNCH="python3 factory/agents/worker/invoke.py --engine codex --repo $FACTORY_REPO --story {story}"
 fi
 if [ -z "$FACTORY_WORKER_CLAUDE_DELIVERY_CAPABILITIES" ]; then
   FACTORY_WORKER_CLAUDE_DELIVERY_CAPABILITIES="delivery"
@@ -91,7 +92,7 @@ if [ -z "$FACTORY_WORKER_CODEX_DELIVERY_CAPABILITIES" ]; then
   FACTORY_WORKER_CODEX_DELIVERY_CAPABILITIES="delivery"
 fi
 export FACTORY_WORKER_CLAUDE_DELIVERY_LAUNCH FACTORY_WORKER_CLAUDE_DELIVERY_CAPABILITIES
-export FACTORY_WORKER_CODEX_DELIVERY_CAPABILITIES
+export FACTORY_WORKER_CODEX_DELIVERY_LAUNCH FACTORY_WORKER_CODEX_DELIVERY_CAPABILITIES
 
 # Resolve the order the same way `workers.configured_workers()` does, so what
 # this wrapper checks is what the dispatcher will find. A name carrying no
