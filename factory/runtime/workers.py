@@ -40,6 +40,7 @@ from __future__ import annotations
 import os
 import re
 import shlex
+import signal
 import subprocess
 import sys
 import time
@@ -54,9 +55,52 @@ import runlog  # noqa: E402 — operational record; never a control surface (#10
 # probe is a routing signal, not an error: the worker simply is not selected.
 HEALTH_TIMEOUT_SECONDS = 20
 
-# How long a launch may take to *hand off* work. This is not how long the worker
-# runs — it is how long the factory waits to learn whether the handoff happened.
-LAUNCH_TIMEOUT_SECONDS = 60
+# How long the factory waits for a delivery worker that declared no bound of
+# its own. This is a fallback, not the rule: the rule is the Story's declared
+# `### Spend cap`, read by `launch_timeout()` below. Sixty seconds was the
+# right bound for the Phase 2 acknowledgement bridge, whose whole task was one
+# comment; a real delivery takes minutes (#316 spent ~4 reading before it wrote
+# anything and ~7 in total), so a fixed 60s cap killed every delivery worker
+# and recorded AMBIGUOUS. Read from the environment at call time so an operator
+# can widen or narrow the fallback without editing a contract value.
+LAUNCH_TIMEOUT_SECONDS = 1800
+
+# The launcher must outlive the engine's own inner bound: the worker enforces
+# the Story's cap on the engine, and this grace is the launcher's margin for
+# the worker's own setup and teardown around that.
+LAUNCH_GRACE_SECONDS = 120
+
+# The Story section and shape the cap is declared in — a regex mirror of
+# `factory/agents/worker/invoke.py parse_bounds()`, which owns the strict
+# version. Here a failure to parse is not an error: it selects the fallback.
+_SPEND_CAP_SECTION = re.compile(r"^### Spend cap\s*$\n(.*?)(?=^### |\Z)",
+                                re.M | re.S)
+_SPEND_CAP_MINUTES = re.compile(r"([0-9]+)\s*min", re.I)
+
+
+def fallback_timeout() -> int:
+    """The launch bound when no Story cap is available."""
+    return int(os.environ.get("FACTORY_LAUNCH_TIMEOUT_SECONDS",
+                              str(LAUNCH_TIMEOUT_SECONDS)))
+
+
+def launch_timeout(story_body: str | None) -> int:
+    """Seconds the launcher waits for this Story's worker.
+
+    The Story already declares its real bound in `### Spend cap` and the worker
+    enforces it on the engine; the launcher must not kill the worker before the
+    bound the Story set (#329/#345). A body that is missing, or declares no
+    parseable cap, selects the bounded fallback rather than failing — a launch
+    that cannot start is worse than one with a generic bound.
+    """
+    if story_body:
+        section = _SPEND_CAP_SECTION.search(story_body)
+        if section:
+            minutes = _SPEND_CAP_MINUTES.search(section.group(1))
+            if minutes:
+                return int(minutes.group(1)) * 60 + LAUNCH_GRACE_SECONDS
+    return fallback_timeout()
+
 
 WORKER_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{2,31}$")
 
@@ -273,13 +317,33 @@ def run_observed(cmd, capture_output=True, text=True, timeout=None):
         cmd,
         stdout=subprocess.PIPE if capture_output else None,
         stderr=subprocess.PIPE if capture_output else None,
-        text=text)
+        text=text,
+        start_new_session=True)
     runlog.event("process.started", pid=process.pid, cmd=runlog.command(cmd))
     try:
         stdout, stderr = process.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
-        process.kill()
-        stdout, stderr = process.communicate()
+        # Kill the whole process group, not just the child. A worker spawns an
+        # engine; `kill()` alone left that grandchild alive holding the
+        # inherited pipes, and the bare `communicate()` that followed blocked
+        # until the grandchild exited — observed on 2026-08-23 as a poller
+        # frozen for 2h56m behind an 1800s cap that "never fired". The session
+        # started above makes pid == pgid, so the group is addressable.
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            process.kill()
+        try:
+            stdout, stderr = process.communicate(timeout=15)
+        except subprocess.TimeoutExpired:
+            # Something outside the group still holds the pipes. Close our
+            # ends rather than wait on theirs; the evidence is gone but the
+            # poller stays alive, which is the better half of that trade.
+            for stream in (process.stdout, process.stderr):
+                if stream:
+                    stream.close()
+            stdout, stderr = "" if text else b"", "" if text else b""
+            process.wait(timeout=5)
         raise subprocess.TimeoutExpired(cmd, timeout, output=stdout, stderr=stderr)
     completed = subprocess.CompletedProcess(cmd, process.returncode, stdout, stderr)
     completed.pid = process.pid
@@ -287,7 +351,7 @@ def run_observed(cmd, capture_output=True, text=True, timeout=None):
 
 
 def launch(spec: WorkerSpec, story: int, project: int,
-           runner=None) -> LaunchReport:
+           runner=None, timeout_s: int | None = None) -> LaunchReport:
     """Hand one Story to one worker.
 
     The distinction that matters: a timeout is `AMBIGUOUS`, not `FAILED`. The
@@ -302,9 +366,10 @@ def launch(spec: WorkerSpec, story: int, project: int,
     """
     cmd = launch_command(spec, story, project)
     runner = runner or run_observed
+    bound = timeout_s or fallback_timeout()
     started = time.monotonic()
     runlog.event("worker.launch.start", worker=spec.name, story=story, project=project,
-                 cmd=runlog.command(cmd), timeout_s=LAUNCH_TIMEOUT_SECONDS)
+                 cmd=runlog.command(cmd), timeout_s=bound)
 
     def finish(report: LaunchReport) -> LaunchReport:
         runlog.event("worker.launch.end", worker=spec.name, story=story, project=project,
@@ -315,11 +380,11 @@ def launch(spec: WorkerSpec, story: int, project: int,
 
     try:
         completed = runner(cmd, capture_output=True, text=True,
-                           timeout=LAUNCH_TIMEOUT_SECONDS)
+                           timeout=bound)
     except subprocess.TimeoutExpired as exc:
         return finish(LaunchReport(
             spec.name, Result.AMBIGUOUS,
-            f"launch exceeded {LAUNCH_TIMEOUT_SECONDS}s; the worker may be "
+            f"launch exceeded {bound}s; the worker may be "
             f"running. Not falling back — a second worker on one Story is "
             f"worse than a late one. The §9.4 lease will recover the claim "
             f"if nothing was started.",
@@ -367,7 +432,8 @@ def _stream(value) -> str:
 
 def dispatch_to_worker(specs: list[WorkerSpec], story: int, project: int,
                        required: str = "delivery",
-                       runner=None) -> tuple[LaunchReport | None, list]:
+                       runner=None,
+                       timeout_s: int | None = None) -> tuple[LaunchReport | None, list]:
     """Give one Story to exactly one worker, or to none.
 
     Returns (successful report or None, the trail of every attempt). The trail is
@@ -384,7 +450,7 @@ def dispatch_to_worker(specs: list[WorkerSpec], story: int, project: int,
         return None, trail
 
     for index, spec in enumerate(eligible):
-        report = launch(spec, story, project, runner=runner)
+        report = launch(spec, story, project, runner=runner, timeout_s=timeout_s)
         trail.append(report)
         remaining = [s.name for s in eligible[index + 1:]]
         if report.launched:

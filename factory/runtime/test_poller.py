@@ -163,8 +163,14 @@ class TestPollOnce(unittest.TestCase):
             patcher.start()
         self._completion = mock.patch.object(poller, "complete_story")
         self.completion = self._completion.start()
+        # The launch bound is derived from the Story body over the network;
+        # its derivation has its own tests. None selects the fallback.
+        self._bound = mock.patch.object(poller, "story_launch_bound",
+                                        return_value=None)
+        self._bound.start()
 
     def tearDown(self):
+        self._bound.stop()
         self._completion.stop()
         for patcher in reversed(self._passes):
             patcher.stop()
@@ -361,8 +367,14 @@ class TestWorkerContractRouting(unittest.TestCase):
             patcher.start()
         self._completion = mock.patch.object(poller, "complete_story")
         self.completion = self._completion.start()
+        # The launch bound is derived from the Story body over the network;
+        # its derivation has its own tests. None selects the fallback.
+        self._bound = mock.patch.object(poller, "story_launch_bound",
+                                        return_value=None)
+        self._bound.start()
 
     def tearDown(self):
+        self._bound.stop()
         self._completion.stop()
         for patcher in reversed(self._passes):
             patcher.stop()
@@ -474,3 +486,44 @@ class TestCompletionIsDelegated(unittest.TestCase):
                        "state_reason"):
             self.assertNotIn(leaked, body,
                              f"the runtime must not decide lifecycle ({leaked})")
+
+
+class TestLaunchBoundComesFromTheStory(unittest.TestCase):
+    """#345 — the poller reads the claimed Story's `### Spend cap` and hands
+    the derived bound to the launcher; a fetch failure selects the fallback
+    rather than blocking the dispatch."""
+
+    BODY = "### Spec\n\nwork\n\n### Spend cap\n\n$5 / 60 min\n"
+
+    def test_the_declared_cap_reaches_the_launcher(self):
+        with mock.patch.object(poller.dispatcher, "fetch_issue",
+                               return_value={"body": self.BODY}):
+            bound = poller.story_launch_bound("o/r", 64)
+        self.assertEqual(60 * 60 + poller.workers.LAUNCH_GRACE_SECONDS, bound)
+
+    def test_a_fetch_failure_selects_the_fallback_not_a_blocked_dispatch(self):
+        with mock.patch.object(poller.dispatcher, "fetch_issue",
+                               side_effect=RuntimeError("network down")):
+            self.assertIsNone(poller.story_launch_bound("o/r", 64))
+
+    def test_the_bound_is_threaded_into_the_worker_contract(self):
+        recorded = {}
+
+        def recording(specs, story, project, required="delivery",
+                      runner=None, timeout_s=None):
+            recorded["timeout_s"] = timeout_s
+            report = poller.workers.LaunchReport("claude-delivery", "LAUNCHED")
+            return report, [report]
+
+        env = dict(os.environ)
+        try:
+            os.environ["FACTORY_WORKER_ORDER"] = "claude-delivery"
+            os.environ["FACTORY_WORKER_CLAUDE_DELIVERY_LAUNCH"] = "/usr/bin/true"
+            with mock.patch.object(poller.workers, "dispatch_to_worker",
+                                   side_effect=recording):
+                poller.wake_worker({"story": 64, "project": 54,
+                                    "agent": "claude-delivery"}, timeout_s=3720)
+        finally:
+            os.environ.clear()
+            os.environ.update(env)
+        self.assertEqual(3720, recorded["timeout_s"])

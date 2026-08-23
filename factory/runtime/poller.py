@@ -158,7 +158,24 @@ def worker_command(dispatch: dict) -> list[str]:
              .replace("{agent}", dispatch["agent"]) for p in parts]
 
 
-def wake_worker(dispatch: dict) -> workers.LaunchReport:
+def story_launch_bound(repo: str, story: int) -> int | None:
+    """The launch bound for this dispatch, from the Story's own `### Spend cap`.
+
+    The launcher must not kill the worker before the bound the Story set
+    (#345). A fetch failure selects the fallback (None) rather than blocking
+    the dispatch: a Story that cannot be read is the worker's problem to
+    report, not a reason to never start it.
+    """
+    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or ""
+    try:
+        issue = dispatcher.fetch_issue(repo, story, token)
+        return workers.launch_timeout((issue or {}).get("body"))
+    except Exception:  # noqa: BLE001 — fallback, never a blocked dispatch
+        return None
+
+
+def wake_worker(dispatch: dict,
+                timeout_s: int | None = None) -> workers.LaunchReport:
     """Hand one dispatch to a worker. Returns the report of the one that ran.
 
     With workers declared (#84), routing goes through the standard contract:
@@ -176,7 +193,7 @@ def wake_worker(dispatch: dict) -> workers.LaunchReport:
     specs = workers.configured_workers()
     if specs:
         report, trail = workers.dispatch_to_worker(
-            specs, dispatch["story"], dispatch["project"])
+            specs, dispatch["story"], dispatch["project"], timeout_s=timeout_s)
         for entry in trail:
             reason = getattr(entry, "reason", None) or getattr(entry, "result", "")
             print(f"[worker] {entry.worker}: {reason} {entry.detail}".rstrip(), flush=True)
@@ -423,7 +440,8 @@ def poll_once(repo: str, commitment: int, seen: set[int], claim: bool = True) ->
             continue
         runlog.event("dispatch.received", story=dispatch["story"],
                      project=dispatch["project"], agent=dispatch["agent"], repo=repo)
-        report = wake_worker(dispatch)
+        report = wake_worker(
+            dispatch, timeout_s=story_launch_bound(repo, dispatch["story"]))
         seen.add(dispatch["story"])
         # Report the engine that actually ran, not the agent named on the
         # DISPATCH line. Under failover those differ, and an audit trail that
