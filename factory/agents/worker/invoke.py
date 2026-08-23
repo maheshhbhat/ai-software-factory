@@ -1,5 +1,46 @@
 #!/usr/bin/env python3
-"""Headless bounded delivery: claimed Story identity in, one durable PR out."""
+"""Headless bounded delivery: claimed Story identity in, one durable PR out.
+
+The engine runs in a built environment, never an inherited one. Inheriting the
+operator's shell would hand the engine `GITHUB_TOKEN`/`GH_TOKEN` — which can
+write to the repository outside the wrapper's control — and the whole
+`FACTORY_WORKER_*` block, which is how the operator declares *which* engine to
+launch. A prompt-injected engine that could edit either could change what the
+factory does next. So the environment is an allowlist, and this module states
+what is on it and why:
+
+* `PATH` — find the engine binary and the tools it shells out to.
+* `LANG`, `LC_ALL` — decoding of the engine's own output.
+* `TMPDIR` — scratch space; the engine writes nothing durable outside the worktree.
+* `SHELL` — the interpreter the engine's Bash tool uses.
+
+That is the whole of `tool_environment()`, and it is all a subprocess gets
+unless it is an engine that has to log in. The delivered change's own test
+command is such a subprocess: it needs the tools, the locale and scratch
+space, and nothing that could authenticate as the operator — so it is launched
+with `tool_environment()` and never grows a credential when a new engine is
+declared.
+
+An engine additionally gets its own login, and *which* credential that is is
+both engine-specific and platform-specific — so it is declared per engine in
+`ENGINE_CREDENTIALS` rather than accumulated into one shared list. The Claude
+CLI resolves its login from the macOS keychain, which is looked up for the
+calling user and so needs `USER`; on Linux the same credential is a file under
+`HOME` and `USER` is irrelevant. Either way an explicit `ANTHROPIC_API_KEY` or
+`CLAUDE_CODE_OAUTH_TOKEN` also works. Appending today's variable name to one
+list would pass the platform it was found on and silently fail the other, so
+`clean_environment()` forwards exactly the sources that exist on the platform
+it is running on, and `unreachable_credentials()` lets a test say "this engine
+can log in" without naming a variable. `clean_environment()` takes the engine
+as a required argument for the same reason: a call site has to say whether it
+is launching an engine, and only an engine launch can reach a credential.
+
+Write permission is granted deliberately: the engine is invoked with
+`--permission-mode acceptEdits`, because the Story it is given asks it to
+change files. That does not widen what may be delivered — `execute()` compares
+every changed path against the Story's declared `### Scope` after the engine
+exits and refuses the delivery if anything falls outside it.
+"""
 
 from __future__ import annotations
 
@@ -33,6 +74,40 @@ STORY_LINK = re.compile(r"(?m)^Story: #(\d+)$")
 
 class DeliveryError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class Credential:
+    """One way an engine resolves its own login, and what that costs us."""
+
+    source: str
+    variables: tuple[str, ...] = ()
+    platforms: tuple[str, ...] = ()  # empty means every platform
+
+    def on(self, platform: str) -> bool:
+        return not self.platforms or platform.startswith(self.platforms)
+
+
+# Not credentials: the tools, locale and scratch space any engine needs.
+BASE_ENVIRONMENT = ("PATH", "LANG", "LC_ALL", "TMPDIR", "SHELL")
+
+# How each engine logs in. Platform-specific by nature — see the module
+# docstring for why this is a table and not one shared list of names.
+ENGINE_CREDENTIALS: dict[str, tuple[Credential, ...]] = {
+    "claude": (
+        Credential("macOS login keychain, resolved for the calling user",
+                   ("USER",), ("darwin",)),
+        Credential("credential file under the operator's home directory",
+                   ("HOME",), ("linux",)),
+        Credential("explicit API key", ("ANTHROPIC_API_KEY",)),
+        Credential("explicit OAuth token", ("CLAUDE_CODE_OAUTH_TOKEN",)),
+    ),
+    # Verified 2026-08-22: `codex exec` authenticates under an environment
+    # holding nothing but the base set, on either platform.
+    "codex": (
+        Credential("engine-managed session, needing nothing from this environment"),
+    ),
+}
 
 
 @dataclass(frozen=True)
@@ -151,10 +226,68 @@ def linked_prs(story: int, pulls: list[dict]) -> list[dict]:
     return found
 
 
-def clean_environment() -> dict[str, str]:
-    keep = ("PATH", "LANG", "LC_ALL", "TMPDIR", "SHELL",
-            "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN")
-    return {key: value for key, value in os.environ.items() if key in keep}
+def credential_sources(engine: str | None,
+                       platform: str | None = None) -> tuple[Credential, ...]:
+    """The logins reachable on this platform, for the engine being launched.
+
+    `None` means the subprocess is not an engine at all and has nothing to log
+    in to, so it gets no credential. A *named* engine we do not recognise —
+    anything launched through `FACTORY_DELIVERY_MODEL_CMD` — gets every
+    declared engine's sources, since we cannot tell which one it will look for.
+    """
+    if engine is None:
+        return ()
+    platform = sys.platform if platform is None else platform
+    declared = ((ENGINE_CREDENTIALS[engine],) if engine in ENGINE_CREDENTIALS
+                else tuple(ENGINE_CREDENTIALS.values()))
+    return tuple(source for group in declared for source in group
+                 if source.on(platform))
+
+
+def tool_environment(environ=None) -> dict[str, str]:
+    """Tools, locale and scratch space — what a non-engine subprocess gets.
+
+    No credential, on any platform, for any engine declared later. The
+    delivered change's own test command runs under this.
+    """
+    environ = os.environ if environ is None else environ
+    return {key: value for key, value in environ.items()
+            if key in BASE_ENVIRONMENT}
+
+
+def clean_environment(engine: str | None, platform: str | None = None,
+                      environ=None) -> dict[str, str]:
+    """Allowlist an engine's environment: the tool set, plus its own logins."""
+    environ = os.environ if environ is None else environ
+    keep = {name for source in credential_sources(engine, platform)
+            for name in source.variables}
+    return tool_environment(environ) | {key: value for key, value
+                                        in environ.items() if key in keep}
+
+
+def unreachable_credentials(engine: str | None, env: dict[str, str],
+                            platform: str | None = None) -> list[Credential]:
+    """Declared logins this environment has cut the engine off from.
+
+    Empty means every way the engine knows how to authenticate on this platform
+    survived the allowlist. This is the question a test should ask — an engine
+    that cannot log in is the failure, not the absence of a particular name.
+    """
+    return [source for source in credential_sources(engine, platform)
+            if not all(name in env for name in source.variables)]
+
+
+def engine_name(command: list[str]) -> str | None:
+    """The engine a model command launches, recognised or not.
+
+    Every model command launches *some* engine, so the name is returned even
+    when it is not in `ENGINE_CREDENTIALS` — an operator's own
+    `FACTORY_DELIVERY_MODEL_CMD` still has to log in. `None` is reserved for
+    "there is no command", which is not an engine launch.
+    """
+    if not command:
+        return None
+    return pathlib.PurePath(command[0]).name.lower()
 
 
 def model_command(input_file: str, bounds: Bounds) -> list[str]:
@@ -166,8 +299,11 @@ def model_command(input_file: str, bounds: Bounds) -> list[str]:
                 for part in shlex.split(template)]
     prompt = HERE.joinpath("prompt.md").read_text()
     payload = prompt + "\n\n## Invocation input\n\n" + pathlib.Path(input_file).read_text()
+    # acceptEdits grants Edit/Write; dontAsk denies them. The Story asks the
+    # engine to change files, and `execute()` enforces the Story's Scope on
+    # what it changed afterwards. See the module docstring.
     return ["claude", "-p", payload, "--max-budget-usd", str(bounds.max_usd),
-            "--permission-mode", "dontAsk", "--no-session-persistence"]
+            "--permission-mode", "acceptEdits", "--no-session-persistence"]
 
 
 def run(cmd: list[str], *, cwd: pathlib.Path, timeout: int, env=None,
@@ -264,8 +400,9 @@ def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
                 json.dump(value, handle)
                 input_file = handle.name
             try:
-                run(model_command(input_file, bounds), cwd=worktree,
-                    timeout=bounds.timeout, env=clean_environment(), runner=runner)
+                command = model_command(input_file, bounds)
+                run(command, cwd=worktree, timeout=bounds.timeout,
+                    env=clean_environment(engine_name(command)), runner=runner)
             finally:
                 pathlib.Path(input_file).unlink(missing_ok=True)
             paths = changed_paths(worktree, f"origin/{default}", runner=runner)
@@ -278,8 +415,10 @@ def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
             tests = os.environ.get(
                 "FACTORY_DELIVERY_TEST_CMD",
                 str(HERE / "test_repo.sh")).strip()
+            # Not an engine: the delivered change's own tests have nothing to
+            # log in to, so they run without any credential.
             run(shlex.split(tests), cwd=worktree, timeout=bounds.timeout,
-                env=clean_environment(), runner=runner)
+                env=tool_environment(), runner=runner)
             git(["add", "--", *paths], worktree, runner=runner)
             git(["commit", "-m", f"Deliver Story #{story_number}"], worktree,
                 runner=runner)
