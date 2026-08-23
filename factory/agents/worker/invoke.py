@@ -14,8 +14,15 @@ what is on it and why:
 * `TMPDIR` — scratch space; the engine writes nothing durable outside the worktree.
 * `SHELL` — the interpreter the engine's Bash tool uses.
 
-Everything else on the list is a credential, and *which* credential is both
-engine-specific and platform-specific — so it is declared per engine in
+That is the whole of `tool_environment()`, and it is all a subprocess gets
+unless it is an engine that has to log in. The delivered change's own test
+command is such a subprocess: it needs the tools, the locale and scratch
+space, and nothing that could authenticate as the operator — so it is launched
+with `tool_environment()` and never grows a credential when a new engine is
+declared.
+
+An engine additionally gets its own login, and *which* credential that is is
+both engine-specific and platform-specific — so it is declared per engine in
 `ENGINE_CREDENTIALS` rather than accumulated into one shared list. The Claude
 CLI resolves its login from the macOS keychain, which is looked up for the
 calling user and so needs `USER`; on Linux the same credential is a file under
@@ -24,7 +31,9 @@ calling user and so needs `USER`; on Linux the same credential is a file under
 list would pass the platform it was found on and silently fail the other, so
 `clean_environment()` forwards exactly the sources that exist on the platform
 it is running on, and `unreachable_credentials()` lets a test say "this engine
-can log in" without naming a variable.
+can log in" without naming a variable. `clean_environment()` takes the engine
+as a required argument for the same reason: a call site has to say whether it
+is launching an engine, and only an engine launch can reach a credential.
 
 Write permission is granted deliberately: the engine is invoked with
 `--permission-mode acceptEdits`, because the Story it is given asks it to
@@ -217,14 +226,17 @@ def linked_prs(story: int, pulls: list[dict]) -> list[dict]:
     return found
 
 
-def credential_sources(engine: str | None = None,
+def credential_sources(engine: str | None,
                        platform: str | None = None) -> tuple[Credential, ...]:
-    """The logins reachable on this platform, for this engine or for any of them.
+    """The logins reachable on this platform, for the engine being launched.
 
-    An unrecognised engine — anything launched through
-    `FACTORY_DELIVERY_MODEL_CMD` — gets every declared engine's sources, since
-    we cannot tell which credential it will look for.
+    `None` means the subprocess is not an engine at all and has nothing to log
+    in to, so it gets no credential. A *named* engine we do not recognise —
+    anything launched through `FACTORY_DELIVERY_MODEL_CMD` — gets every
+    declared engine's sources, since we cannot tell which one it will look for.
     """
+    if engine is None:
+        return ()
     platform = sys.platform if platform is None else platform
     declared = ((ENGINE_CREDENTIALS[engine],) if engine in ENGINE_CREDENTIALS
                 else tuple(ENGINE_CREDENTIALS.values()))
@@ -232,14 +244,25 @@ def credential_sources(engine: str | None = None,
                  if source.on(platform))
 
 
-def clean_environment(engine: str | None = None, platform: str | None = None,
-                      environ=None) -> dict[str, str]:
-    """Allowlist the engine's environment: tools, locale, and its own logins."""
+def tool_environment(environ=None) -> dict[str, str]:
+    """Tools, locale and scratch space — what a non-engine subprocess gets.
+
+    No credential, on any platform, for any engine declared later. The
+    delivered change's own test command runs under this.
+    """
     environ = os.environ if environ is None else environ
-    keep = set(BASE_ENVIRONMENT)
-    for source in credential_sources(engine, platform):
-        keep.update(source.variables)
-    return {key: value for key, value in environ.items() if key in keep}
+    return {key: value for key, value in environ.items()
+            if key in BASE_ENVIRONMENT}
+
+
+def clean_environment(engine: str | None, platform: str | None = None,
+                      environ=None) -> dict[str, str]:
+    """Allowlist an engine's environment: the tool set, plus its own logins."""
+    environ = os.environ if environ is None else environ
+    keep = {name for source in credential_sources(engine, platform)
+            for name in source.variables}
+    return tool_environment(environ) | {key: value for key, value
+                                        in environ.items() if key in keep}
 
 
 def unreachable_credentials(engine: str | None, env: dict[str, str],
@@ -255,11 +278,16 @@ def unreachable_credentials(engine: str | None, env: dict[str, str],
 
 
 def engine_name(command: list[str]) -> str | None:
-    """The declared engine a command launches, if we recognise it."""
+    """The engine a model command launches, recognised or not.
+
+    Every model command launches *some* engine, so the name is returned even
+    when it is not in `ENGINE_CREDENTIALS` — an operator's own
+    `FACTORY_DELIVERY_MODEL_CMD` still has to log in. `None` is reserved for
+    "there is no command", which is not an engine launch.
+    """
     if not command:
         return None
-    name = pathlib.PurePath(command[0]).name.lower()
-    return name if name in ENGINE_CREDENTIALS else None
+    return pathlib.PurePath(command[0]).name.lower()
 
 
 def model_command(input_file: str, bounds: Bounds) -> list[str]:
@@ -387,8 +415,10 @@ def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
             tests = os.environ.get(
                 "FACTORY_DELIVERY_TEST_CMD",
                 str(HERE / "test_repo.sh")).strip()
+            # Not an engine: the delivered change's own tests have nothing to
+            # log in to, so they run without any credential.
             run(shlex.split(tests), cwd=worktree, timeout=bounds.timeout,
-                env=clean_environment(), runner=runner)
+                env=tool_environment(), runner=runner)
             git(["add", "--", *paths], worktree, runner=runner)
             git(["commit", "-m", f"Deliver Story #{story_number}"], worktree,
                 runner=runner)
