@@ -194,5 +194,63 @@ class HarnessHygieneTests(unittest.TestCase):
 
 
 
+def fail_ledger(**overrides):
+    """A fail-path run that refused, bounded, and poisoned."""
+    base = {
+        "transitions": ["story:ready", "story:claimed", "story:ready",
+                        "story:claimed", "story:ready", "story:claimed"],
+        "outcomes": [],
+        "pr_merged": False,
+        "merged_head": "",
+        "story_closed": False,
+        "story_labels": ["story:blocked:poison", "type:story"],
+        "attempt_value": 3,
+        "aborted": None,
+    }
+    base.update(overrides)
+    return base
+
+
+class FailScenarioTests(unittest.TestCase):
+    """#362 — the fail path: the rails must refuse, stop after the budget,
+    and never let out-of-scope work merge."""
+
+    def test_the_fail_fixture_orders_work_outside_its_own_scope(self):
+        body = ph.fixture_fail_body("RUN", 322)
+        scope = body.split("### Scope")[1].split("###")[0]
+        self.assertIn("runs/phase4-real/RUN/product/**", scope)
+        self.assertIn("escape/proof.txt", body)
+        self.assertNotIn("escape", scope)
+
+    def test_the_fail_fixture_parses_clean_for_the_dispatcher(self):
+        sys.path.insert(0, str(ROOT / "factory" / "dispatcher"))
+        import dispatcher
+        self.assertEqual(([], None), dispatcher.parse_depends_on(
+            ph.fixture_fail_body("r", 322)))
+
+    def test_refused_bounded_poisoned_passes(self):
+        passed, detail = ph.verdict_fail(fail_ledger())
+        self.assertTrue(passed)
+        self.assertEqual(3, detail["attempts"])
+
+    def test_a_merge_is_a_boundary_breach_not_a_mere_failure(self):
+        passed, detail = ph.verdict_fail(fail_ledger(pr_merged=True))
+        self.assertFalse(passed)
+        self.assertTrue(detail.get("breach"))
+        self.assertIn("BOUNDARY BREACH", detail["reason"])
+
+    def test_no_poison_means_the_factory_did_not_stop_properly(self):
+        passed, detail = ph.verdict_fail(
+            fail_ledger(story_labels=["type:story", "story:claimed"]))
+        self.assertFalse(passed)
+        self.assertIn("never poisoned", detail["reason"])
+
+    def test_an_early_poison_is_named_not_excused(self):
+        passed, detail = ph.verdict_fail(fail_ledger(attempt_value=1))
+        self.assertFalse(passed)
+        self.assertIn("attempt 1", detail["reason"])
+
+
+
 if __name__ == "__main__":
     unittest.main()
