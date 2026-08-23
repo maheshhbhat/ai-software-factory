@@ -281,7 +281,9 @@ class Run:
                and not any(k.startswith(p) for p in FORBIDDEN_PREFIXES)}
         log = open(self.directory / "poller.log", "w")
         self.poller = subprocess.Popen(
-            ["sh", str(ROOT / "poll.sh")], cwd=str(ROOT), env=env,
+            ["sh", str(ROOT / "poll.sh"),
+             "--interval", str(self.args.heartbeat_seconds)],
+            cwd=str(ROOT), env=env,
             stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
 
     def observe(self) -> dict:
@@ -396,6 +398,9 @@ def main(argv=None) -> int:
     parser.add_argument("--findings-leg", default="require",
                         choices=("require", "allow", "skip"))
     parser.add_argument("--evidence-root", default="runs/phase4-real")
+    parser.add_argument("--heartbeat-seconds", type=int, default=15,
+                        help="poller cycle interval; the walk crosses ~6 "
+                             "transitions, each waiting up to one heartbeat")
     args = parser.parse_args(argv)
 
     run = Run(args)
