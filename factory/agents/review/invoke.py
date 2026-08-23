@@ -19,10 +19,19 @@ HERE = pathlib.Path(__file__).resolve().parent
 ROOT = HERE.parents[2]
 sys.path.insert(0, str(ROOT / "factory" / "runtime"))
 import review_route  # noqa: E402
+import runlog  # noqa: E402
 
 
 class ReviewError(RuntimeError):
-    pass
+    """A review could not be delivered.
+
+    `output` carries whatever the failed subprocess printed, so a reviewer that
+    crashed or timed out can still have its own usage report read off it.
+    """
+
+    def __init__(self, message: str, output: str = ""):
+        super().__init__(message)
+        self.output = output
 
 
 class GitHub:
@@ -99,9 +108,18 @@ def command(input_path: pathlib.Path, output_path: pathlib.Path) -> list[str]:
     payload = (HERE.joinpath("prompt.md").read_text()
                + f"\n\nWrite the JSON outcome to: {output_path}\n\nInput: "
                + input_path.read_text())
+    # The verdict is read from the outcome file, never from stdout, so asking
+    # for JSON on stdout costs the review nothing and is what makes the
+    # reviewer state its own usage. It grants no tool and changes no identity.
     return ["claude", "-p", payload, "--permission-mode", "acceptEdits",
             "--allowedTools", "Write", "--disallowedTools", "Bash",
+            "--output-format", "json",
             "--safe-mode", "--no-session-persistence"]
+
+
+def engine_name(cmd) -> str | None:
+    """The engine a reviewer command launches, recognised or not."""
+    return pathlib.PurePath(cmd[0]).name.lower() if cmd else None
 
 
 def outcome_path(workspace: pathlib.Path) -> pathlib.Path:
@@ -129,16 +147,49 @@ def finalize_outcome(staging: pathlib.Path, output: pathlib.Path) -> None:
         raise ReviewError("malformed reviewer output") from exc
 
 
+def printed(value) -> str:
+    """Whatever a subprocess wrote, decoded for us or not."""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", "replace")
+    return value or ""
+
+
 def run(cmd, *, cwd, timeout=3600, env=None):
     try:
         result = subprocess.run(cmd, cwd=cwd, env=env or clean_environment(), timeout=timeout,
                                 capture_output=True, text=True)
     except subprocess.TimeoutExpired as exc:
-        raise ReviewError(f"reviewer unavailable: timeout after {timeout}s") from exc
+        raise ReviewError(f"reviewer unavailable: timeout after {timeout}s",
+                          printed(exc.stdout)) from exc
     if result.returncode:
         raise ReviewError(
             f"reviewer unavailable: exit {result.returncode}: "
-            f"{(result.stderr or result.stdout or '')[:300]}")
+            f"{(result.stderr or result.stdout or '')[:300]}",
+            printed(result.stdout))
+    return result
+
+
+def launch_reviewer(cmd, *, cwd, timeout, env, story, pull_request):
+    """Run the reviewer, recording what it reported about its own usage.
+
+    One runtime-log record per invocation, whether the launch completed or
+    failed, naming the story it reviewed. A reviewer that reported no usage is
+    recorded as having reported none; no number is substituted for it.
+    """
+    engine = engine_name(cmd)
+    try:
+        result = run(cmd, cwd=cwd, timeout=timeout, env=env)
+    except ReviewError as error:
+        runlog.engine_usage(story=story, engine=engine, phase="review",
+                            pull_request=pull_request, launch="failed",
+                            output=error.output)
+        raise
+    # A launch that produced no stdout at all reported no usage — that is a
+    # record saying so, never a zero standing in for a measurement.
+    runlog.engine_usage(story=story, engine=engine, phase="review",
+                        pull_request=pull_request, launch="completed",
+                        output=printed(getattr(result, "stdout", None)))
+    return result
 
 
 def criteria(body: str) -> str:
@@ -212,8 +263,13 @@ def execute(repo: str, pull_number: int, token: str, *, client=None, timeout=360
         output_path = outcome_path(workspace)
         store_outcome(staging_path, output_path)
         input_path.write_text(json.dumps(fields, sort_keys=True))
-        run(command(input_path, staging_path), cwd=workspace / "repo", timeout=timeout,
-            env=review_environment(workspace / "reviewer-home"))
+        # The fresh identity is built before the launch is attempted, so a
+        # credential that could not be assembled is not recorded as an engine
+        # invocation that happened.
+        reviewer_env = review_environment(workspace / "reviewer-home")
+        launch_reviewer(command(input_path, staging_path), cwd=workspace / "repo",
+                        timeout=timeout, env=reviewer_env, story=story_number,
+                        pull_request=pull_number)
         finalize_outcome(staging_path, output_path)
         result = parse_result(output_path, target.head)
 

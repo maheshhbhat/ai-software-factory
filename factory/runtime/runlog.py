@@ -30,6 +30,17 @@ worker that echoes its environment cannot spill it into the log.
 what the process wrote to stdout/stderr, capped. Nothing asks an engine for its
 chain of thought and nothing here would store it if offered.
 
+## Per-invocation engine usage
+
+`engine_usage()` appends one record per engine launch naming the story, the
+engine, and whatever that launch reported about itself. It exists because a
+cost-per-story figure has to be *computed* from what the engines said, and
+until now nothing in this log carried a usage field at all.
+
+Nothing here prices anything. There is no rate table, no conversion, and no
+ceiling: the monetary cost-per-story ceiling is the owner's to set, and an
+engine's own reported numbers are recorded exactly as the engine gave them.
+
 Output goes two places, both best-effort: a JSONL file (`FACTORY_RUNTIME_LOG`,
 default `factory/runtime/logs/runtime.jsonl`) for the durable record, and stderr
 for a human watching the poller. **Never stdout** — under this repository's
@@ -161,6 +172,100 @@ def event(name: str, **fields) -> dict:
     except Exception:  # noqa: BLE001 — see the module docstring; logging never raises
         pass
     return record
+
+
+USAGE_EVENT = "engine.usage"
+
+# What an engine may say about one invocation of itself. An allowlist, and
+# numbers only: everything else an engine prints is free text it controls, and
+# free text does not belong in a field a report will later add up.
+USAGE_FIELDS = ("input_tokens", "output_tokens", "total_tokens",
+                "cache_creation_input_tokens", "cache_read_input_tokens",
+                "total_cost_usd", "duration_ms", "num_turns")
+
+# Said nothing. Deliberately a sentence and not a zero — see `parse_usage()`.
+USAGE_UNAVAILABLE = "engine reported no usage"
+
+
+def _objects(output: str):
+    """Every JSON object in an engine's output, whole document last.
+
+    Engines print their totals differently: one JSON document for a single
+    result, one object per line for a stream. Both are read, and neither is
+    required — an engine printing plain prose simply yields nothing.
+    """
+    for line in output.splitlines():
+        line = line.strip()
+        if line.startswith("{"):
+            try:
+                value = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(value, dict):
+                yield value
+    text = output.strip()
+    if text.startswith("{"):
+        try:
+            value = json.loads(text)
+        except ValueError:
+            return
+        if isinstance(value, dict):
+            yield value
+
+
+def _reported(value: dict) -> dict:
+    """The declared usage numbers in one object, nested block preferred.
+
+    An engine's `usage` block holds the token counts; the object around it holds
+    the run totals. A field that is not a number is not a count, so it is
+    dropped rather than stored as whatever the engine typed.
+    """
+    nested = value.get("usage")
+    found: dict = {}
+    for source in (nested if isinstance(nested, dict) else {}, value):
+        for key, number in source.items():
+            if (key in USAGE_FIELDS and isinstance(number, (int, float))
+                    and not isinstance(number, bool)):
+                found.setdefault(key, number)
+    return found
+
+
+def parse_usage(output: str | None) -> dict | None:
+    """What an engine said about its own usage, or `None` if it said nothing.
+
+    `None` and `{"output_tokens": 0}` are different findings and must stay
+    different all the way into the log: one is a measurement of zero, the other
+    is the absence of a measurement. Collapsing them would let a report sum an
+    invocation that never reported anything as if it had cost nothing.
+
+    The last reporting object wins, which is what a streaming engine means by
+    printing running totals.
+    """
+    reported = None
+    for value in _objects(output if isinstance(output, str) else ""):
+        found = _reported(value)
+        if found:
+            reported = found
+    return reported
+
+
+def engine_usage(*, story, engine, phase, output: str | None = None,
+                 usage: dict | None = None, **fields) -> dict:
+    """Record one engine invocation's own account of what it used.
+
+    The record carries the story and the engine, so usage sums per story with
+    nothing but this log open. Pass `output` to read the engine's report out of
+    what it printed, or `usage` when a caller already has the numbers.
+
+    An engine that reported nothing is recorded saying so, in words. No value
+    is defaulted, guessed, or carried over from another invocation.
+    """
+    reported = parse_usage(output) if usage is None else usage
+    if reported is None:
+        return event(USAGE_EVENT, story=story, engine=engine, phase=phase,
+                     usage_reported=False, usage=USAGE_UNAVAILABLE, **fields)
+    return event(USAGE_EVENT, story=story, engine=engine, phase=phase,
+                 usage_reported=True, usage=dict(reported), **fields)
 
 
 def command(parts, elide: str | None = None) -> str:

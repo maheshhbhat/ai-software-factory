@@ -1,11 +1,15 @@
+import json
+import os
 import pathlib
 import subprocess
 import sys
+import tempfile
 import unittest
 from unittest import mock
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import invoke
+import runlog
 
 
 class ParsingTests(unittest.TestCase):
@@ -244,8 +248,9 @@ class FakeClient:
 class RecordingRunner:
     """Records the environment handed to every subprocess `execute()` launches."""
 
-    def __init__(self, changed):
+    def __init__(self, changed, engine_output=""):
         self.changed, self.calls = changed, []
+        self.engine_output = engine_output
 
     def __call__(self, cmd, **kwargs):
         self.calls.append((list(cmd), kwargs.get("env")))
@@ -254,6 +259,8 @@ class RecordingRunner:
             out = "\n".join(self.changed)
         elif cmd[:2] == ["git", "rev-parse"]:
             out = "deadbeef\n"
+        elif cmd[0] == "claude":
+            out = self.engine_output
         return subprocess.CompletedProcess(cmd, 0, out, "")
 
     def environment_for(self, predicate):
@@ -262,17 +269,100 @@ class RecordingRunner:
         return found[0]
 
 
-class LaunchEnvironmentTests(unittest.TestCase):
-    """What a real delivery hands each subprocess, at the call sites themselves."""
+class DeliveryHarness(unittest.TestCase):
+    """One delivery through `execute()`, with a disposable runtime log.
 
-    def deliver(self):
-        runner = RecordingRunner(["factory/agents/worker/invoke.py"])
-        with mock.patch.dict(invoke.os.environ, OPERATOR_SESSION, clear=True), \
+    The log path is part of the session on purpose: the runtime log must never
+    be written to the operator's real one by a test run, and `FACTORY_*` names
+    must not reach the engine either — which the allowlist tests below check
+    against exactly this session.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        self.log = os.path.join(self.dir.name, "runtime.jsonl")
+        self.session = dict(OPERATOR_SESSION,
+                            FACTORY_RUNTIME_LOG=self.log,
+                            FACTORY_RUNTIME_LOG_STDERR="0")
+
+    def deliver(self, engine_output=""):
+        runner = RecordingRunner(["factory/agents/worker/invoke.py"],
+                                 engine_output=engine_output)
+        with mock.patch.dict(invoke.os.environ, self.session, clear=True), \
              mock.patch.object(invoke.pathlib.Path, "read_text",
                                return_value="prompt"):
             invoke.execute("owner/repo", 214, "token", pathlib.Path("."),
                            runner=runner, client=FakeClient())
         return runner
+
+    def records(self):
+        if not os.path.exists(self.log):
+            return []
+        with open(self.log, encoding="utf-8") as handle:
+            return [json.loads(line) for line in handle if line.strip()]
+
+
+class EngineUsageTests(DeliveryHarness):
+    """Project #322 criterion 5: what the engine spent has to be captured while
+    the story runs, because it cannot be recovered afterwards."""
+
+    def test_the_delivery_engine_usage_is_recorded_against_the_story(self):
+        self.deliver(engine_output=json.dumps(
+            {"type": "result", "total_cost_usd": 0.37,
+             "usage": {"input_tokens": 900, "output_tokens": 120}}))
+        usage = [r for r in self.records() if r["event"] == runlog.USAGE_EVENT]
+        self.assertEqual(1, len(usage))
+        self.assertEqual(214, usage[0]["story"])
+        self.assertEqual(325, usage[0]["project"])
+        self.assertEqual("claude", usage[0]["engine"])
+        self.assertEqual("worker", usage[0]["phase"])
+        self.assertTrue(usage[0]["usage_reported"])
+        self.assertEqual({"input_tokens": 900, "output_tokens": 120,
+                          "total_cost_usd": 0.37}, usage[0]["usage"])
+
+    def test_a_silent_engine_is_recorded_as_having_reported_nothing(self):
+        self.deliver(engine_output="delivered.")
+        usage = [r for r in self.records() if r["event"] == runlog.USAGE_EVENT]
+        self.assertEqual(1, len(usage))
+        self.assertFalse(usage[0]["usage_reported"])
+        self.assertEqual(runlog.USAGE_UNAVAILABLE, usage[0]["usage"])
+
+    def test_the_default_command_asks_the_engine_to_report_its_usage(self):
+        """Without this the engine prints prose and every record is blank."""
+        with mock.patch.dict(invoke.os.environ, {}, clear=True), \
+             mock.patch.object(invoke.pathlib.Path, "read_text", return_value="prompt"):
+            command = invoke.model_command("input.json", invoke.Bounds(3.0, 10))
+        self.assertEqual("json", command[command.index("--output-format") + 1])
+
+    def test_a_failed_launch_still_carries_what_it_spent(self):
+        """Tokens spent by an engine that crashed were still spent."""
+        def fail(cmd, **kwargs):
+            return subprocess.CompletedProcess(
+                cmd, 9, json.dumps({"usage": {"output_tokens": 7}}), "denied")
+        with mock.patch.dict(invoke.os.environ, self.session, clear=True):
+            with self.assertRaisesRegex(invoke.DeliveryError, "denied"):
+                invoke.launch_engine(["claude", "-p", "x"], cwd=pathlib.Path("."),
+                                     timeout=1, env={}, story=214, runner=fail)
+        usage = [r for r in self.records() if r["event"] == runlog.USAGE_EVENT]
+        self.assertEqual([("failed", True, {"output_tokens": 7})],
+                         [(r["launch"], r["usage_reported"], r["usage"])
+                          for r in usage])
+
+    def test_a_timed_out_launch_is_recorded_too(self):
+        def timeout(cmd, **kwargs):
+            raise subprocess.TimeoutExpired(
+                cmd, 1, output=json.dumps({"usage": {"output_tokens": 3}}).encode())
+        with mock.patch.dict(invoke.os.environ, self.session, clear=True):
+            with self.assertRaisesRegex(invoke.DeliveryError, "exhausted"):
+                invoke.launch_engine(["claude", "-p", "x"], cwd=pathlib.Path("."),
+                                     timeout=1, env={}, story=214, runner=timeout)
+        usage = [r for r in self.records() if r["event"] == runlog.USAGE_EVENT]
+        self.assertEqual([{"output_tokens": 3}], [r["usage"] for r in usage])
+
+
+class LaunchEnvironmentTests(DeliveryHarness):
+    """What a real delivery hands each subprocess, at the call sites themselves."""
 
     def test_the_engine_is_launched_with_a_login_and_no_repository_token(self):
         env = self.deliver().environment_for(lambda cmd: cmd[0] == "claude")

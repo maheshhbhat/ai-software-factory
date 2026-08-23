@@ -63,7 +63,9 @@ from dataclasses import dataclass
 HERE = pathlib.Path(__file__).resolve().parent
 ROOT = HERE.parents[2]
 sys.path.insert(0, str(ROOT / "factory" / "gates"))
+sys.path.insert(0, str(ROOT / "factory" / "runtime"))
 import merge_gate  # noqa: E402
+import runlog  # noqa: E402
 
 DEFAULT_TIMEOUT = 3600
 DEFAULT_MAX_USD = 40.0
@@ -73,7 +75,16 @@ STORY_LINK = re.compile(r"(?m)^Story: #(\d+)$")
 
 
 class DeliveryError(RuntimeError):
-    pass
+    """A bounded delivery could not be completed.
+
+    `output` carries whatever the failed subprocess printed. An engine that
+    crashed or ran out of time still spent what it spent before it did, and
+    that report is the only place those tokens are ever counted.
+    """
+
+    def __init__(self, message: str, output: str = ""):
+        super().__init__(message)
+        self.output = output
 
 
 @dataclass(frozen=True)
@@ -302,8 +313,24 @@ def model_command(input_file: str, bounds: Bounds) -> list[str]:
     # acceptEdits grants Edit/Write; dontAsk denies them. The Story asks the
     # engine to change files, and `execute()` enforces the Story's Scope on
     # what it changed afterwards. See the module docstring.
+    #
+    # `--output-format json` is what makes the engine state its own usage on
+    # stdout. Without it the engine prints prose, the usage record for every
+    # delivery reads "unavailable", and cost per story stays unmeasurable.
     return ["claude", "-p", payload, "--max-budget-usd", str(bounds.max_usd),
-            "--permission-mode", "acceptEdits", "--no-session-persistence"]
+            "--permission-mode", "acceptEdits", "--output-format", "json",
+            "--no-session-persistence"]
+
+
+def printed(value) -> str:
+    """Whatever a subprocess wrote, decoded for us or not.
+
+    `TimeoutExpired` hands back bytes when the process died mid-stream; a
+    completed process hands back text.
+    """
+    if isinstance(value, bytes):
+        return value.decode("utf-8", "replace")
+    return value or ""
 
 
 def run(cmd: list[str], *, cwd: pathlib.Path, timeout: int, env=None,
@@ -312,10 +339,34 @@ def run(cmd: list[str], *, cwd: pathlib.Path, timeout: int, env=None,
         result = runner(cmd, cwd=str(cwd), capture_output=True, text=True,
                         timeout=timeout, env=env)
     except subprocess.TimeoutExpired as exc:
-        raise DeliveryError(f"bounded execution exhausted after {timeout}s") from exc
+        raise DeliveryError(f"bounded execution exhausted after {timeout}s",
+                            printed(exc.stdout)) from exc
     if result.returncode:
         raise DeliveryError(
-            f"command failed ({result.returncode}): {(result.stderr or '')[:300]}")
+            f"command failed ({result.returncode}): {(result.stderr or '')[:300]}",
+            printed(result.stdout))
+    return result
+
+
+def launch_engine(cmd: list[str], *, cwd: pathlib.Path, timeout: int, env,
+                  story: int, project: int | None = None,
+                  runner=subprocess.run) -> subprocess.CompletedProcess:
+    """Run the delivery engine, recording what it reported about its usage.
+
+    One runtime-log record per invocation, whether the launch completed or
+    failed. Nothing is inferred: if the engine said nothing about its usage the
+    record says exactly that, and no number is invented to stand in for it.
+    """
+    engine = engine_name(cmd)
+    try:
+        result = run(cmd, cwd=cwd, timeout=timeout, env=env, runner=runner)
+    except DeliveryError as error:
+        runlog.engine_usage(story=story, project=project, engine=engine,
+                            phase="worker", launch="failed", output=error.output)
+        raise
+    runlog.engine_usage(story=story, project=project, engine=engine,
+                        phase="worker", launch="completed",
+                        output=printed(getattr(result, "stdout", None)))
     return result
 
 
@@ -401,8 +452,10 @@ def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
                 input_file = handle.name
             try:
                 command = model_command(input_file, bounds)
-                run(command, cwd=worktree, timeout=bounds.timeout,
-                    env=clean_environment(engine_name(command)), runner=runner)
+                launch_engine(command, cwd=worktree, timeout=bounds.timeout,
+                              env=clean_environment(engine_name(command)),
+                              story=story_number, project=project_number,
+                              runner=runner)
             finally:
                 pathlib.Path(input_file).unlink(missing_ok=True)
             paths = changed_paths(worktree, f"origin/{default}", runner=runner)
