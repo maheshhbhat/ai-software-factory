@@ -19,6 +19,30 @@ no engine to service it, or has one that was never going to deliver anything.
 The tests drive the real script with a stubbed `python3` on `PATH`, so what is
 asserted is the environment the poller would actually have been handed — not a
 re-implementation of the wrapper's logic in Python.
+
+## What is deliberately *not* asserted here, and why
+
+Three defects in the same failure story live in `factory/runtime/`, outside the
+declared scope of the Story this file was written for, and outside what any
+wrapper can reach:
+
+* `workers.LAUNCH_TIMEOUT_SECONDS = 60` bounds every launch. Sixty seconds was
+  the right bound for the Phase 2 acknowledgement bridge, whose task was posting
+  one comment; a delivery takes minutes (#316 took seven), so the poller kills
+  the worker and records `AMBIGUOUS`. The verdict is correct and must stay — a
+  timeout does not prove the worker did nothing, so failover stays suppressed —
+  but the cap belongs to the claimed Story's `### Spend cap`.
+* `poller.py` builds its `seen` guard once outside the polling loop, so a Story
+  woken again after review findings is skipped for the life of the process.
+* `review_link.reconcile()` moves a claimed Story to `story:in-review` on the
+  sole basis of an open pull request carrying its `Story: #N` link, without
+  distinguishing "delivered, awaiting review" from "redispatched, correction in
+  progress" — it reclaimed #328 sixty-two seconds after the claim.
+
+None has an environment hook, and exporting one from `poll.sh` would put the
+bound in two places. What this file *can* pin is that the wrapper is not their
+source, so the fix is not attempted at the wrong layer — that is what the
+"bounds the wrapper must not be the source of" tests below do.
 """
 
 from __future__ import annotations
@@ -260,6 +284,47 @@ class OperatorWrapper(unittest.TestCase):
         asks GitHub for is a token."""
         calls = re.findall(r"\bgh\s+[a-z-]+", poll_sh_code())
         self.assertEqual(["gh auth"], sorted(set(calls)))
+
+    # -- bounds the wrapper must not be the source of ------------------------
+    #
+    # The launch cap and the redispatch guard are runtime decisions. These pin
+    # that `poll.sh` does not quietly become a second source for either — which
+    # is the shape the fix would take if it were attempted at this layer.
+
+    def test_the_wrapper_sets_no_timeout_of_its_own(self):
+        """How long a worker may run is bounded by the claimed Story's `### Spend
+        cap`, read by the runtime. A cap exported here would silently outrank it,
+        and an operator debugging a killed delivery would have two places to look."""
+        source = poll_sh_code()
+        self.assertNotIn("TIMEOUT", source,
+                         "poll.sh exports a timeout; the bound belongs to the Story")
+        run = self.poll("--once")
+        leaked = sorted(k for k in run.environment
+                        if "TIMEOUT" in k and k.startswith("FACTORY_"))
+        self.assertEqual([], leaked, f"poll.sh handed the poller a cap: {leaked}")
+
+    def test_the_wrapper_keeps_no_memory_between_cycles(self):
+        """Whether a woken Story is dispatched again is `poller.py`'s `seen`
+        guard. A state file here would be a second, unauditable copy of it."""
+        source = poll_sh_code()
+        for forbidden in (">>", "mktemp", "/tmp", ".state", ".seen"):
+            self.assertNotIn(forbidden, source,
+                             f"poll.sh keeps state across cycles: {forbidden!r}")
+
+    def test_the_wrapper_starts_the_long_lived_service_by_default(self):
+        """With no arguments this is the service, not a one-shot — which is the
+        only configuration in which a per-process guard can outlive a cycle."""
+        run = self.poll()
+        self.assertTrue(run.polled, "poll.sh never reached poller.py")
+        self.assertNotIn("--once", run.argv)
+        self.assertNotIn("--dry-run", run.argv)
+
+    def test_arguments_reach_the_poller_untouched(self):
+        """The wrapper forwards; it does not interpret. `--dry-run` deciding
+        anything here would be policy in a file whose header forbids it."""
+        run = self.poll("--once", "--dry-run")
+        self.assertEqual(["factory/runtime/poller.py", "--repo", "maheshhbhat/ai-software-factory",
+                          "--commitment", "54", "--once", "--dry-run"], run.argv)
 
     def _configured_workers(self, environment: dict) -> list:
         keep = {k: v for k, v in environment.items() if k.startswith("FACTORY_WORKER")}

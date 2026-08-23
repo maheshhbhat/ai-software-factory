@@ -106,6 +106,26 @@ if [ -z "$resolved" ]; then
 fi
 echo "[poll.sh] delivery workers:$resolved" >&2
 
+# Two bounds this wrapper deliberately does not set, because setting them here
+# would create a second source for a decision the runtime owns:
+#
+#   * how long a launched worker may run before the poller gives up on it
+#     (`workers.LAUNCH_TIMEOUT_SECONDS`), and
+#   * whether a Story woken again in a later cycle is redispatched
+#     (the `seen` guard in `poller.py`).
+#
+# Both are wrong for delivery work today. The launch cap is a fixed 60s, which
+# bounded the Phase 2 acknowledgement bridge — a single comment — and kills a
+# real delivery mid-flight; the cap belongs to the claimed Story's `### Spend
+# cap`, which `parse_bounds()` already reads. The skip guard is built once for
+# the life of the process instead of once per cycle, so a Story returned to
+# `story:ready` by review findings is skipped forever (#328, 2026-08-23: no
+# `worker.launch` event, head unchanged, while the reviewer re-read identical
+# code). Neither is reachable from a wrapper — there is no environment hook for
+# either, and inventing one would put the bound in two places. The tests pin
+# that this file is not where either comes from, so the fix is not attempted
+# here by mistake.
+
 if [ -z "$GH_TOKEN" ]; then
   GH_TOKEN=$(gh auth token)
 fi
