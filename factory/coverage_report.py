@@ -90,6 +90,7 @@ ACCEPTANCE = {
     "acceptance/test_phase4_delivery_loop.py",
     "acceptance/test_phase4_requirement_coverage.py",
     "acceptance/test_phase4_live.py",
+    "acceptance/test_phase4_real_harness.py",
     "acceptance/test_coverage_report.py",
     "acceptance/test_acceptance_touch.py",
     "acceptance/test_acceptance_touch_live.py",
