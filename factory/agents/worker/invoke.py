@@ -391,7 +391,11 @@ def changed_paths(worktree: pathlib.Path, base: str,
                   runner=subprocess.run) -> list[str]:
     tracked = git(["diff", "--name-only", f"{base}...HEAD"], worktree,
                   runner=runner).stdout.splitlines()
-    pending = git(["status", "--porcelain"], worktree, runner=runner).stdout.splitlines()
+    # --untracked-files=all: plain --porcelain collapses a brand-new directory
+    # to one `dir/` line, which no `dir/sub/**` scope can match — the worker
+    # then refuses its own in-scope work (#358, found live by fixture #357).
+    pending = git(["status", "--porcelain", "--untracked-files=all"], worktree,
+                  runner=runner).stdout.splitlines()
     paths = tracked + [line[3:] for line in pending if len(line) > 3]
     return sorted(set(path for path in paths if path))
 
