@@ -167,11 +167,10 @@ class OperatorWrapper(unittest.TestCase):
         self.assertNotEqual([], specs, "configured_workers() saw an empty list")
         self.assertIn("delivery", set().union(*(s.capabilities for s in specs)))
 
-    def test_both_default_delivery_engines_resolve(self):
+    def test_only_codex_resolves_by_default(self):
         run = self.poll("--once")
         specs = self._configured_workers(run.environment)
-        self.assertEqual(["claude-delivery", "codex-delivery"],
-                         [spec.name for spec in specs])
+        self.assertEqual(["codex-delivery"], [spec.name for spec in specs])
 
     def test_each_default_worker_selects_the_engine_it_names(self):
         run = self.poll("--once")
@@ -179,6 +178,13 @@ class OperatorWrapper(unittest.TestCase):
         self.assertIn("--engine codex", run.launch("codex-delivery"))
         self.assertNotEqual(run.launch("claude-delivery"),
                             run.launch("codex-delivery"))
+
+    def test_plain_poll_dispatches_to_codex(self):
+        run = self.poll("--once")
+        spec = self._configured_workers(run.environment)[0]
+        command = workers.launch_command(spec, story=367, project=314)
+        self.assertEqual("codex-delivery", spec.name)
+        self.assertEqual("codex", command[command.index("--engine") + 1])
 
     def test_refuses_to_poll_when_no_worker_resolves(self):
         """The defect that poisoned #299 and #300: claim work, launch nothing."""
