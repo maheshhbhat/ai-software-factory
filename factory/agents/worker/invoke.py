@@ -339,11 +339,24 @@ def run(cmd: list[str], *, cwd: pathlib.Path, timeout: int, env=None,
         result = runner(cmd, cwd=str(cwd), capture_output=True, text=True,
                         timeout=timeout, env=env)
     except subprocess.TimeoutExpired as exc:
-        raise DeliveryError(f"bounded execution exhausted after {timeout}s",
-                            printed(exc.stdout)) from exc
+        # Keep both streams. A timeout's stderr was dropped entirely, and for
+        # an engine killed mid-explanation that was the half worth reading.
+        detail = f"bounded execution exhausted after {timeout}s"
+        stderr_tail = runlog.tail(printed(exc.stderr))
+        if stderr_tail:
+            detail += f"; stderr tail: {stderr_tail}"
+        raise DeliveryError(detail, printed(exc.stdout)) from exc
     if result.returncode:
+        # The engine's own explanation lives in these streams. A 300-character
+        # slice of stderr lost it twice: the 2026-08-22 authentication refusal
+        # ("Please run /login") was printed to stdout and discarded, and the
+        # 2026-08-23 failures of #332 recorded `command failed (1):` with
+        # nothing after the colon. runlog.tail keeps 2000 characters and
+        # redacts credentials — both properties wanted here.
         raise DeliveryError(
-            f"command failed ({result.returncode}): {(result.stderr or '')[:300]}",
+            f"command failed ({result.returncode})"
+            f"; stderr tail: {runlog.tail(result.stderr)}"
+            f"; stdout tail: {runlog.tail(result.stdout)}",
             printed(result.stdout))
     return result
 
@@ -509,6 +522,12 @@ def main(argv=None) -> int:
                          timeout=args.timeout, max_usd=args.max_usd)
     except Exception as exc:
         print(f"delivery failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+        # The engine's own account, when one exists, travels with the failure:
+        # the launcher records this stream on worker.launch.end, which is where
+        # a poison report goes looking for an explanation (#330).
+        output = getattr(exc, "output", "")
+        if output:
+            print(f"engine output tail:\n{runlog.tail(output)}", file=sys.stderr)
         return 1
     print(json.dumps(result.__dict__, sort_keys=True))
     return 0

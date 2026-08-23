@@ -4,6 +4,7 @@ import pathlib
 import subprocess
 import sys
 import tempfile
+import io
 import unittest
 from unittest import mock
 
@@ -378,6 +379,68 @@ class LaunchEnvironmentTests(DeliveryHarness):
         declared = {name for group in invoke.ENGINE_CREDENTIALS.values()
                     for source in group for name in source.variables}
         self.assertEqual(set(), declared & set(env))
+
+
+class EngineExplanationTests(unittest.TestCase):
+    """#330 — the engine's own account of a failure must survive into the
+    error. Twice it did not: the 2026-08-22 authentication refusal was printed
+    to stdout and discarded by a 300-character stderr slice, and #332's
+    2026-08-23 failures recorded `command failed (1):` with nothing after the
+    colon."""
+
+    def failing(self, code=1, stdout="", stderr=""):
+        def runner(cmd, **kwargs):
+            return subprocess.CompletedProcess(cmd, code, stdout, stderr)
+        return runner
+
+    def test_a_stdout_only_explanation_reaches_the_error(self):
+        """The exact 2026-08-22 case: the refusal was on stdout."""
+        message = "Not logged in \u00b7 Please run /login"
+        with self.assertRaises(invoke.DeliveryError) as caught:
+            invoke.run(["engine"], cwd=pathlib.Path("."), timeout=5,
+                       runner=self.failing(stdout=message))
+        self.assertIn("Please run /login", str(caught.exception))
+
+    def test_stderr_is_no_longer_cut_to_300_characters(self):
+        long_explanation = "x" * 400 + " THE ACTUAL REASON"
+        with self.assertRaises(invoke.DeliveryError) as caught:
+            invoke.run(["engine"], cwd=pathlib.Path("."), timeout=5,
+                       runner=self.failing(stderr=long_explanation))
+        self.assertIn("THE ACTUAL REASON", str(caught.exception))
+
+    def test_a_timeout_keeps_the_stderr_the_engine_managed(self):
+        """A timeout's stderr was dropped entirely, and for an engine killed
+        mid-explanation that was the half worth reading."""
+        def timing_out(cmd, **kwargs):
+            raise subprocess.TimeoutExpired(cmd, 5, output=b"partial out",
+                                            stderr=b"engine was saying this")
+        with self.assertRaises(invoke.DeliveryError) as caught:
+            invoke.run(["engine"], cwd=pathlib.Path("."), timeout=5,
+                       runner=timing_out)
+        self.assertIn("engine was saying this", str(caught.exception))
+
+    def test_main_surfaces_the_engine_output_on_stderr(self):
+        """The launcher records the worker's stderr on worker.launch.end; the
+        engine's account must be printed there, not swallowed."""
+        error = invoke.DeliveryError("boom", "the engine said: cannot write")
+        buffer = io.StringIO()
+        with mock.patch.object(invoke, "execute", side_effect=error), \
+             mock.patch.dict(invoke.os.environ, {"GH_TOKEN": "t"}), \
+             mock.patch.object(invoke.sys, "stderr", buffer):
+            code = invoke.main(["--repo", "o/r", "--story", "1"])
+        self.assertEqual(1, code)
+        self.assertIn("the engine said: cannot write", buffer.getvalue())
+
+    def test_credentials_are_redacted_from_the_explanation(self):
+        """runlog.tail owns redaction; the error must go through it."""
+        secret = "sk-ant-oat01-" + "a" * 40
+        with mock.patch.dict(invoke.os.environ,
+                             {"CLAUDE_CODE_OAUTH_TOKEN": secret}):
+            with self.assertRaises(invoke.DeliveryError) as caught:
+                invoke.run(["engine"], cwd=pathlib.Path("."), timeout=5,
+                           runner=self.failing(stderr=f"token {secret} leaked"))
+        self.assertNotIn(secret, str(caught.exception))
+
 
 
 if __name__ == "__main__":
