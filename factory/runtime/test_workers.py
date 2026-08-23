@@ -345,3 +345,88 @@ class TestLaunchIsObservable(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestLaunchCapComesFromTheStory(unittest.TestCase):
+    """#345 — the launcher must not kill the worker before the bound the Story
+    set. A fixed 60s cap bounded the Phase 2 acknowledgement bridge; applied to
+    a real delivery it killed every worker at sixty seconds and recorded
+    AMBIGUOUS (#316 took ~7 minutes)."""
+
+    BODY = ("### Spec\n\nwork\n\n### Spend cap\n\n$5 / 60 min\n\n"
+            "### Scope\n\nsomething.py\n")
+
+    def test_the_declared_cap_plus_grace_is_the_bound(self):
+        self.assertEqual(60 * 60 + w.LAUNCH_GRACE_SECONDS,
+                         w.launch_timeout(self.BODY))
+
+    def test_a_missing_or_unparseable_cap_selects_the_fallback(self):
+        for body in (None, "", "### Spec\n\nno cap section\n",
+                     "### Spend cap\n\nunbounded\n"):
+            self.assertEqual(w.fallback_timeout(), w.launch_timeout(body))
+
+    def test_the_fallback_is_operator_adjustable_at_call_time(self):
+        os.environ["FACTORY_LAUNCH_TIMEOUT_SECONDS"] = "90"
+        try:
+            self.assertEqual(90, w.fallback_timeout())
+            self.assertEqual(90, w.launch_timeout("no sections at all"))
+        finally:
+            del os.environ["FACTORY_LAUNCH_TIMEOUT_SECONDS"]
+
+    def test_a_worker_is_not_killed_before_the_story_bound(self):
+        """The runner must be asked to wait the Story's bound, not 60s."""
+        waited = []
+
+        def recording(cmd, **kwargs):
+            waited.append(kwargs.get("timeout"))
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        w.launch(spec(), 104, 95, runner=recording, timeout_s=3720)
+        self.assertEqual([3720], waited)
+
+    def test_the_bound_travels_through_dispatch(self):
+        waited = []
+
+        def recording(cmd, **kwargs):
+            waited.append(kwargs.get("timeout"))
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        report, _ = w.dispatch_to_worker([spec()], 104, 95,
+                                         runner=recording, timeout_s=3720)
+        self.assertEqual(w.Result.LAUNCHED, report.result)
+        self.assertIn(3720, waited)
+
+    def test_a_genuine_overrun_is_still_ambiguous_with_failover_suppressed(self):
+        """Raising the bound must not soften the verdict past it."""
+        timeout = subprocess.TimeoutExpired(cmd="w", timeout=3720)
+        report, trail = w.dispatch_to_worker(
+            [spec(), spec(name="second-worker")], 104, 95,
+            runner=runner_returning(raises=timeout), timeout_s=3720)
+        self.assertIsNone(report)
+        launches = [r for r in trail if isinstance(r, w.LaunchReport)]
+        self.assertEqual(1, len(launches), "no second worker after AMBIGUOUS")
+        self.assertEqual(w.Result.AMBIGUOUS, launches[0].result)
+
+
+class TestATimeoutKillsTheWholeProcessGroup(unittest.TestCase):
+    """#345 — the 2h56m hang. `kill()` alone left the engine grandchild alive
+    holding the inherited pipes, and the bare `communicate()` that followed
+    blocked until the grandchild exited, freezing the single-threaded poller.
+    The cap must surface within seconds of expiring, grandchildren included."""
+
+    def test_timeout_surfaces_despite_a_pipe_holding_grandchild(self):
+        import sys as _sys
+        import time as _time
+        child = (
+            "import subprocess, time, sys\n"
+            "subprocess.Popen(['sleep', '60'])\n"   # inherits our pipes
+            "time.sleep(60)\n"
+        )
+        started = _time.monotonic()
+        with self.assertRaises(subprocess.TimeoutExpired):
+            w.run_observed([_sys.executable, "-c", child],
+                           capture_output=True, text=True, timeout=1)
+        elapsed = _time.monotonic() - started
+        self.assertLess(elapsed, 10,
+                        f"timeout took {elapsed:.1f}s to surface; the poller "
+                        f"would have been frozen behind the grandchild's pipes")
