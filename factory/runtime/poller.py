@@ -36,8 +36,13 @@ conditions and the transition are `completion.py`'s; this file only asks.
 Idempotency comes from GitHub, not from here. A claimed story is no longer
 `story:ready`, so the next poll's dispatcher simply does not emit it. The
 in-process `seen` set is a belt-and-braces guard against double-launching inside
-a single run; it is not a cursor, nothing persists it, and a restart with no
-local state re-derives identical behaviour.
+a single *cycle* — it must not survive the cycle it was set in. A set built
+once per process silently skipped every redispatch: a Story returned to
+`story:ready` by review findings was claimed again and no worker was ever
+launched (#328 cycled ready → claimed → in-review on 2026-08-23 with head
+6147e002 unchanged while the reviewer re-read identical code). `cycle()` owns
+the guard's lifetime; nothing persists it, and a restart with no local state
+re-derives identical behaviour.
 
 Usage:
     poller.py --repo owner/name --commitment 54 [--interval 60] [--once]
@@ -374,6 +379,16 @@ def wake_planner(repo: str, artifact: int) -> None:
         print(f"[planning] #{artifact}: {result.stdout.strip()}", flush=True)
 
 
+def cycle(repo: str, commitment: int, claim: bool = True) -> list[dict]:
+    """One poll with a fresh intra-cycle duplicate guard.
+
+    The guard exists to stop one cycle double-launching a story its own
+    dispatcher printed twice; scoped any wider it becomes a skip list that
+    outlives the redispatch it is supposed to allow (#342).
+    """
+    return poll_once(repo, commitment, set(), claim=claim)
+
+
 def poll_once(repo: str, commitment: int, seen: set[int], claim: bool = True) -> list[dict]:
     """One cycle. Returns the dispatches that produced a wake-up."""
     # Reconciliation runs first: a story whose delivery merged should leave
@@ -433,9 +448,9 @@ def poll_once(repo: str, commitment: int, seen: set[int], claim: bool = True) ->
     woken = []
     for dispatch in parse_dispatches(stdout):
         if dispatch["story"] in seen:
-            # Belt and braces only: GitHub already prevents this by not
-            # re-offering a claimed story.
-            print(f"[poller] already woken this run, skipping story "
+            # Belt and braces only, and only within this cycle: GitHub already
+            # prevents this by not re-offering a claimed story.
+            print(f"[poller] already woken this cycle, skipping story "
                   f"#{dispatch['story']}", flush=True)
             continue
         runlog.event("dispatch.received", story=dispatch["story"],
@@ -483,10 +498,9 @@ def main(argv: list[str]) -> int:
           f"every {args.interval}s"
           + (" (dry run — no claims)" if args.dry_run else ""), flush=True)
 
-    seen: set[int] = set()
     while True:
         try:
-            poll_once(args.repo, args.commitment, seen, claim=not args.dry_run)
+            cycle(args.repo, args.commitment, claim=not args.dry_run)
         except MalformedDispatch as exc:
             print(f"[poller] FAIL: dispatcher emitted a non-canonical DISPATCH line, "
                   f"so no worker was launched: {exc}", flush=True)
