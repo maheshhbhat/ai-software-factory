@@ -40,9 +40,11 @@ import argparse
 import json
 import os
 import pathlib
+import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime, timezone
 
@@ -106,6 +108,10 @@ malformed value fails startup rather than inventing health data.
 ### Phase
 
 build
+
+### Depends-on
+
+none
 
 ### Hazard
 
@@ -179,11 +185,25 @@ def verdict(ledger: dict, findings_leg: str) -> tuple[bool, dict]:
     return True, {**detail, "findings_leg": "not-exercised"}
 
 
+def runtime_workspace(run_id: str) -> pathlib.Path:
+    """Where a run writes while it is alive: outside the repository, always.
+
+    The worker runs in the repository working tree and its scope check
+    compares that tree before and after the engine. Run 20260823T130637Z
+    failed exactly there: the harness's own poller.log, growing inside
+    `runs/phase4-real/`, read as an out-of-scope change and the delivery was
+    correctly refused. The evidence bundle is copied into the repository only
+    after the poller is dead and nothing is being written.
+    """
+    return pathlib.Path(tempfile.mkdtemp(prefix=f"phase4-real-{run_id}-"))
+
+
 class Run:
     def __init__(self, args):
         self.args = args
         self.run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        self.directory = pathlib.Path(args.evidence_root) / self.run_id
+        self.directory = runtime_workspace(self.run_id)
+        self.final_directory = pathlib.Path(args.evidence_root) / self.run_id
         self.token = ""
         self.story = 0
         self.pull = 0
@@ -384,7 +404,6 @@ def main(argv=None) -> int:
               file=sys.stderr)
         return 2
 
-    run.directory.mkdir(parents=True, exist_ok=False)
     run.create_fixture()
     print(f"[phase4-real] fixture story #{run.story}; run {run.run_id}",
           flush=True)
@@ -396,9 +415,14 @@ def main(argv=None) -> int:
 
     passed, detail = verdict(ledger, args.findings_leg)
     run.write_evidence(ledger, passed, detail)
+    # Only now, with the poller dead and nothing writing, may the evidence
+    # enter the repository tree.
+    run.final_directory.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(run.directory, run.final_directory)
     print(f"[phase4-real] {'PASS' if passed else 'FAIL'}: "
           f"{json.dumps(detail)}", flush=True)
-    print(f"[phase4-real] evidence: {run.directory}/evidence.json", flush=True)
+    print(f"[phase4-real] evidence: {run.final_directory}/evidence.json",
+          flush=True)
     # §9.3 — the fixture story is never closed by this harness. If the run
     # failed mid-lifecycle the leftover fixture *is* the finding.
     return 0 if passed else 1
