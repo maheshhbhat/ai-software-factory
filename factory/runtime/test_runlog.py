@@ -250,3 +250,20 @@ class TestNoReasoningIsRecorded(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestEngineCredentialsAreValueRedacted(unittest.TestCase):
+    """#330 — engine stderr rides into errors and launch records now, and an
+    engine refused mid-authentication is exactly the case that echoes its
+    credential back."""
+
+    def test_the_oauth_token_and_api_key_are_removed_exactly(self):
+        import runlog
+        from unittest import mock
+        secrets = {"CLAUDE_CODE_OAUTH_TOKEN": "sk-ant-oat01-" + "a" * 40,
+                   "ANTHROPIC_API_KEY": "sk-ant-api03-" + "b" * 40}
+        with mock.patch.dict(os.environ, secrets):
+            for value in secrets.values():
+                cleaned = runlog.redact(f"engine said: token {value} rejected")
+                self.assertNotIn(value, cleaned)
+                self.assertIn(runlog.REDACTED, cleaned)
