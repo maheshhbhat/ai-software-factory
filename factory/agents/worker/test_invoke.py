@@ -80,6 +80,105 @@ class BoundaryTests(unittest.TestCase):
         self.assertIn("--max-budget-usd", command)
         self.assertIn("--no-session-persistence", command)
 
+    def test_default_command_grants_write_permission(self):
+        """`dontAsk` denies Edit/Write; the Story asks the engine to edit files."""
+        with mock.patch.dict(invoke.os.environ, {}, clear=True), \
+             mock.patch.object(invoke.pathlib.Path, "read_text", return_value="prompt"):
+            command = invoke.model_command("input.json", invoke.Bounds(3.0, 10))
+        self.assertEqual("acceptEdits",
+                         command[command.index("--permission-mode") + 1])
+
+
+# A fully populated operator shell, written out rather than derived from the
+# declarations, so a new credential must be justified against a real session.
+OPERATOR_SESSION = {
+    "PATH": "/usr/bin:/bin",
+    "LANG": "en_US.UTF-8",
+    "LC_ALL": "en_US.UTF-8",
+    "TMPDIR": "/tmp/",
+    "SHELL": "/bin/zsh",
+    "HOME": "/home/operator",
+    "USER": "operator",
+    "LOGNAME": "operator",
+    "ANTHROPIC_API_KEY": "model-key",
+    "CLAUDE_CODE_OAUTH_TOKEN": "model-token",
+    "GITHUB_TOKEN": "repository-write",
+    "GH_TOKEN": "repository-write",
+    "FACTORY_WORKER_ORDER": "claude-delivery,codex-delivery",
+    "FACTORY_WORKER_CLAUDE_DELIVERY_LAUNCH": "python3 bridge.py --engine claude",
+}
+PLATFORMS = ("darwin", "linux")
+
+
+class EngineAuthenticationTests(unittest.TestCase):
+    """Ask whether each engine can log in, not whether a given name is present."""
+
+    def environment(self, engine, platform):
+        return invoke.clean_environment(engine, platform, OPERATOR_SESSION)
+
+    def test_every_engine_can_authenticate_on_every_platform(self):
+        for engine in invoke.ENGINE_CREDENTIALS:
+            for platform in PLATFORMS:
+                with self.subTest(engine=engine, platform=platform):
+                    cut_off = invoke.unreachable_credentials(
+                        engine, self.environment(engine, platform), platform)
+                    self.assertEqual(
+                        [], [source.source for source in cut_off],
+                        f"{engine} cannot log in on {platform}")
+
+    def test_an_unrecognised_engine_still_gets_every_declared_login(self):
+        """A custom FACTORY_DELIVERY_MODEL_CMD could be any of them."""
+        for platform in PLATFORMS:
+            with self.subTest(platform=platform):
+                self.assertEqual([], invoke.unreachable_credentials(
+                    "some-other-engine", self.environment("some-other-engine",
+                                                          platform), platform))
+
+    def test_the_credential_each_engine_needs_is_platform_specific(self):
+        """One shared list of names would pass one platform and fail the other."""
+        macos = self.environment("claude", "darwin")
+        linux = self.environment("claude", "linux")
+        self.assertIn("USER", macos)      # keychain lookup, macOS only
+        self.assertNotIn("HOME", macos)
+        self.assertIn("HOME", linux)      # credential file, Linux only
+        self.assertNotIn("USER", linux)
+
+    def test_stripping_a_declared_login_is_reported_as_a_lost_capability(self):
+        """The regression this guards: USER absent, so the keychain is unreachable."""
+        stripped = {key: value for key, value in
+                    self.environment("claude", "darwin").items() if key != "USER"}
+        cut_off = invoke.unreachable_credentials("claude", stripped, "darwin")
+        self.assertIn("USER", {name for source in cut_off
+                               for name in source.variables})
+
+    def test_environment_stays_an_allowlist_for_every_engine(self):
+        """A leaked FACTORY_WORKER_* or GITHUB_TOKEN must not reach the engine."""
+        for engine in (*invoke.ENGINE_CREDENTIALS, None):
+            for platform in PLATFORMS:
+                with self.subTest(engine=engine, platform=platform):
+                    env = self.environment(engine, platform)
+                    self.assertNotIn("GITHUB_TOKEN", env)
+                    self.assertNotIn("GH_TOKEN", env)
+                    self.assertEqual([], [key for key in env
+                                          if key.startswith("FACTORY_")])
+                    self.assertNotIn("LOGNAME", env)
+
+    def test_engine_is_read_from_the_command_the_worker_will_run(self):
+        self.assertEqual("claude", invoke.engine_name(["claude", "-p", "..."]))
+        self.assertEqual("codex", invoke.engine_name(["/opt/bin/codex", "exec"]))
+        self.assertIsNone(invoke.engine_name(["./scripted-model.sh"]))
+        self.assertIsNone(invoke.engine_name([]))
+
+    def test_the_default_command_gets_an_environment_it_can_log_in_with(self):
+        with mock.patch.dict(invoke.os.environ, {}, clear=True), \
+             mock.patch.object(invoke.pathlib.Path, "read_text", return_value="prompt"):
+            command = invoke.model_command("input.json", invoke.Bounds(3.0, 10))
+        engine = invoke.engine_name(command)
+        for platform in PLATFORMS:
+            with self.subTest(platform=platform):
+                self.assertEqual([], invoke.unreachable_credentials(
+                    engine, self.environment(engine, platform), platform))
+
 
 if __name__ == "__main__":
     unittest.main()
