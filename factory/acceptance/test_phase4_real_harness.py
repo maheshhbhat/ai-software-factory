@@ -161,5 +161,38 @@ class HarnessDisciplineTests(unittest.TestCase):
             self.assertIn(promise, doc)
 
 
+class HarnessHygieneTests(unittest.TestCase):
+    """#355 — the first two live runs failed on the harness, not the factory:
+    a fixture the dispatcher refused as malformed, and a poller.log growing
+    inside the tree the worker's scope check was watching."""
+
+    def test_the_fixture_declares_no_dependencies_in_the_dispatcher_dialect(self):
+        sys.path.insert(0, str(ROOT / "factory" / "dispatcher"))
+        import dispatcher
+        refs, error = dispatcher.parse_depends_on(
+            ph.fixture_body("r", 322, "require"))
+        self.assertEqual(([], None), (refs, error),
+                         "#354 sat unclaimable behind DEPENDS_ON_MALFORMED")
+
+    def test_the_runtime_workspace_is_outside_the_repository(self):
+        import shutil
+        workspace = ph.runtime_workspace("hygiene-test")
+        try:
+            self.assertNotIn(ROOT, workspace.parents,
+                             "run 20260823T130637Z: the harness's own log, "
+                             "growing in-tree, read as an out-of-scope change "
+                             "and the delivery was correctly refused")
+        finally:
+            shutil.rmtree(workspace, ignore_errors=True)
+
+    def test_evidence_enters_the_repository_only_after_teardown(self):
+        source = (HERE / "phase4_real.py").read_text()
+        copy_at = source.index("shutil.copytree(run.directory, run.final_directory)")
+        teardown_at = source.index("run.teardown()")
+        self.assertGreater(copy_at, teardown_at,
+                           "the copy into runs/phase4-real must follow teardown")
+
+
+
 if __name__ == "__main__":
     unittest.main()
