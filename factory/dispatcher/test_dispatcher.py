@@ -13,6 +13,7 @@ from __future__ import annotations
 import contextlib
 import datetime as dt
 import io
+import os
 import re
 import unittest
 import urllib.error
@@ -372,6 +373,19 @@ class TestDispatchLine(unittest.TestCase):
         # business context. The worker reads the substrate itself.
         self.assertNotIn("Spec", line)
         self.assertNotIn("Scope", line)
+
+    def test_line_names_the_first_configured_worker(self):
+        with patch.dict(os.environ,
+                        {"FACTORY_WORKER_ORDER": "codex-delivery"}):
+            self.assertEqual(
+                "DISPATCH story=#42 project=#901 agent=codex-delivery",
+                dp.dispatch_line(42, 901))
+
+    def test_line_refuses_an_invalid_configured_identity(self):
+        with patch.dict(os.environ,
+                        {"FACTORY_WORKER_ORDER": "Codex Worker"}):
+            with self.assertRaisesRegex(ValueError, "valid first Agent-ID"):
+                dp.dispatch_line(42, 901)
 
 
 
