@@ -22,9 +22,9 @@ re-implementation of the wrapper's logic in Python.
 
 ## What is deliberately *not* asserted here, and why
 
-Three defects in the same failure story live in `factory/runtime/`, outside the
-declared scope of the Story this file was written for, and outside what any
-wrapper can reach:
+Three defects in the same failure story live in `factory/runtime/`, outside what
+any wrapper can reach. They are owned by #345 (the launch cap) and #342 (the two
+findings-retry defects), which depend on this Story:
 
 * `workers.LAUNCH_TIMEOUT_SECONDS = 60` bounds every launch. Sixty seconds was
   the right bound for the Phase 2 acknowledgement bridge, whose task was posting
@@ -40,9 +40,10 @@ wrapper can reach:
   progress" — it reclaimed #328 sixty-two seconds after the claim.
 
 None has an environment hook, and exporting one from `poll.sh` would put the
-bound in two places. What this file *can* pin is that the wrapper is not their
-source, so the fix is not attempted at the wrong layer — that is what the
-"bounds the wrapper must not be the source of" tests below do.
+bound in two places — and would collide with the Story that owns it. What this
+file *can* pin is that the wrapper is not their source, so none of the three
+lands at this layer by mistake — that is what the "bounds the wrapper must not
+be the source of" tests below do.
 """
 
 from __future__ import annotations
