@@ -99,6 +99,7 @@ PROJECT_ACTIVE = "project:active"
 TERMINAL_SUCCESS = frozenset({MERGED, COMPLETED})
 
 ISSUE_REF_RE = re.compile(r"^#(\d+)$")
+AGENT_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{2,31}$")
 
 
 class Reason:
@@ -739,7 +740,12 @@ def dispatch_line(number: int, project: int | None) -> str:
     GitHub remains the source of truth; this line is a wake-up, not authorization
     (§9.12).
     """
-    return f"DISPATCH story=#{number} project=#{project} agent=claude-delivery"
+    order = os.environ.get(
+        "FACTORY_WORKER_ORDER", "claude-delivery,codex-delivery")
+    agents = [item.strip() for item in order.split(",") if item.strip()]
+    if not agents or not AGENT_ID_RE.fullmatch(agents[0]):
+        raise ValueError("FACTORY_WORKER_ORDER has no valid first Agent-ID")
+    return f"DISPATCH story=#{number} project=#{project} agent={agents[0]}"
 
 
 # --------------------------------------------------------------------------
