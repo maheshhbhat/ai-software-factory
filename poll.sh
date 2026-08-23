@@ -68,11 +68,11 @@ if [ -z "$CLAUDE_CODE_OAUTH_TOKEN" ] && [ -r "$HOME/.factory-reviewer-token" ]; 
   export CLAUDE_CODE_OAUTH_TOKEN
 fi
 
-# Preference order, and the two real engines it names. Each declaration selects
-# its engine explicitly, so the audit trail records the process that actually
-# ran and failover cannot relabel a Claude invocation as Codex.
+# Active delivery engines. Codex is the sole production selection for now;
+# Claude remains declared below so an operator can restore or test it with an
+# explicit FACTORY_WORKER_ORDER override without editing this wrapper.
 if [ -z "$FACTORY_WORKER_ORDER" ]; then
-  FACTORY_WORKER_ORDER="claude-delivery,codex-delivery"
+  FACTORY_WORKER_ORDER="codex-delivery"
 fi
 export FACTORY_WORKER_ORDER
 
