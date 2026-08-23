@@ -341,5 +341,46 @@ class OperatorWrapper(unittest.TestCase):
             os.environ.update(saved)
 
 
+class ReviewerCredential(OperatorWrapper):
+    """#349 — the reviewer builds a fresh identity and so needs a credential of
+    its own. On macOS the CLI keeps credentials in the login keychain, which
+    the reviewer's replaced HOME cannot reach, so with no explicit token every
+    review refused `reviewer credential unavailable`. The wrapper reads a token
+    minted once by `claude setup-token` from a file outside the repository."""
+
+    TOKEN_FILE = ".factory-reviewer-token"
+
+    def mint(self, value: str = "file-token") -> None:
+        token = pathlib.Path(self.tmp, self.TOKEN_FILE)
+        token.write_text(value)
+        token.chmod(0o600)
+
+    def test_the_token_file_reaches_the_poller_environment(self):
+        self.mint()
+        run = self.poll("--once")
+        self.assertTrue(run.polled)
+        self.assertEqual("file-token",
+                         run.environment.get("CLAUDE_CODE_OAUTH_TOKEN"))
+
+    def test_an_explicit_token_always_wins(self):
+        self.mint("file-token")
+        run = self.poll("--once", CLAUDE_CODE_OAUTH_TOKEN="caller-token")
+        self.assertEqual("caller-token",
+                         run.environment.get("CLAUDE_CODE_OAUTH_TOKEN"))
+
+    def test_no_file_and_no_token_still_polls(self):
+        """Reviews fail with their own named error; the wrapper adds none."""
+        run = self.poll("--once")
+        self.assertTrue(run.polled)
+        self.assertNotIn("CLAUDE_CODE_OAUTH_TOKEN", run.environment)
+
+    def test_the_token_never_appears_in_the_wrapper_output(self):
+        self.mint("secret-value-1234")
+        run = self.poll("--once")
+        for stream in (run.completed.stdout, run.completed.stderr):
+            self.assertNotIn("secret-value-1234", stream)
+
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

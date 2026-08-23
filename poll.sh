@@ -53,6 +53,21 @@ if [ -z "$FACTORY_PHASE4_REVIEWS" ]; then
 fi
 export FACTORY_PHASE4_REVIEWS
 
+# Reviewer credential. The reviewer builds a fresh identity — its own HOME,
+# USER and LOGNAME — so it cannot inherit the operator or worker session, and
+# then needs a credential of its own. When CLAUDE_CODE_OAUTH_TOKEN is unset it
+# reads $HOME/.claude/.credentials.json, which does not exist where the CLI
+# stores credentials in the macOS keychain, so every review refuses with
+# `reviewer credential unavailable`. Read a token minted once by
+# `claude setup-token` from a file outside the repository, if one is present.
+# An explicit CLAUDE_CODE_OAUTH_TOKEN from the caller always wins; with
+# neither, the wrapper still starts and reviews fail with their own named
+# error rather than this file inventing one.
+if [ -z "$CLAUDE_CODE_OAUTH_TOKEN" ] && [ -r "$HOME/.factory-reviewer-token" ]; then
+  CLAUDE_CODE_OAUTH_TOKEN=$(cat "$HOME/.factory-reviewer-token")
+  export CLAUDE_CODE_OAUTH_TOKEN
+fi
+
 # Preference order, and the engines it names. `codex-delivery` is left in the
 # order but undeclared here: `invoke.py` has no engine selector, and pointing a
 # second worker name at the same command would put "codex ran" in the audit
