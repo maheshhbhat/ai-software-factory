@@ -36,8 +36,8 @@ as a required argument for the same reason: a call site has to say whether it
 is launching an engine, and only an engine launch can reach a credential.
 
 Write permission is granted deliberately: Claude receives `acceptEdits` and
-Codex receives its `workspace-write` sandbox, because the Story asks the engine
-to change files. That does not widen what may be delivered — `execute()`
+Codex receives automatic approval inside its workspace-write sandbox, because
+the Story asks the engine to change files. That does not widen what may be delivered — `execute()`
 compares every changed path against the Story's declared `### Scope` after the
 engine exits and refuses the delivery if anything falls outside it.
 """
@@ -315,8 +315,10 @@ def model_command(input_file: str, bounds: Bounds,
         # Codex has no CLI dollar-cap option. The enclosing subprocess timeout
         # still enforces the Story's time bound, and its JSONL events preserve
         # the usage it actually reports. Do not invent a spend guarantee.
-        return ["codex", "exec", "--sandbox", "workspace-write",
-                "--ephemeral", "--ignore-user-config", "--json", payload]
+        # --approve-for-me supplies the workspace-write sandbox itself. Codex
+        # rejects combining it with an explicit --sandbox option.
+        return ["codex", "exec", "--approve-for-me", "--ephemeral",
+                "--ignore-user-config", "--json", payload]
     if engine != "claude":
         raise DeliveryError(f"unsupported delivery engine: {engine}")
     # acceptEdits grants Edit/Write; dontAsk denies them. The Story asks the

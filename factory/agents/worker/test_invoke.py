@@ -99,13 +99,12 @@ class BoundaryTests(unittest.TestCase):
             command = invoke.model_command(
                 "input.json", invoke.Bounds(3.0, 10), "codex")
         self.assertEqual(["codex", "exec"], command[:2])
-        self.assertEqual("workspace-write",
-                         command[command.index("--sandbox") + 1])
-        for flag in ("--ephemeral", "--ignore-user-config", "--json"):
+        for flag in ("--approve-for-me", "--ephemeral", "--ignore-user-config",
+                     "--json"):
             self.assertIn(flag, command)
-        # In codex-cli 0.149.0 --approve-for-me conflicts with an explicit
-        # sandbox and makes every invocation exit 2 before the engine starts.
-        self.assertNotIn("--approve-for-me", command)
+        # --approve-for-me already supplies workspace-write. Combining it with
+        # an explicit --sandbox makes codex-cli 0.149.0 exit 2 before launch.
+        self.assertNotIn("--sandbox", command)
         self.assertNotIn("--dangerously-bypass-approvals-and-sandbox", command)
         self.assertNotIn("--max-budget-usd", command)
 
