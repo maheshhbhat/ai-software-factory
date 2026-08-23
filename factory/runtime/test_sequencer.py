@@ -1,7 +1,10 @@
+import os
 import unittest
 from unittest import mock
 
 import sequencer as sq
+
+SCHEMA = os.path.join(sq.HERE, "..", "spec", "state-schema.md")
 
 
 def issue(number, kind, lifecycle, body="", association="OWNER"):
@@ -107,6 +110,77 @@ class ProjectCompletionTests(unittest.TestCase):
             self.assertEqual(1, len(sq.run("o/r", "token")))
             self.assertEqual([], sq.run("o/r", "token"))
             self.assertEqual(1, apply.call_count)
+
+
+class StandingProjectTests(unittest.TestCase):
+    """§4.1.1 — a standing project is continuous work and has no acceptance edge.
+
+    The point of these tests is *why* it is excluded, not just that it is. The
+    sequencer already skips a project whose `### Stories` section is empty or
+    unparseable, so a standing project with an empty Stories section would be
+    left alone for the wrong reason — and #298 is removing that skip, which would
+    then silently turn the standing state back on. Every case below therefore
+    declares real, parseable, finished stories.
+    """
+
+    FINISHED = "#20\n#21"
+
+    def shaped(self, lifecycle, stories=FINISHED):
+        """One project shape, varying only the lifecycle label."""
+        return {10: project(lifecycle=lifecycle, stories=stories),
+                20: story(20, "story:merged"), 21: story(21, "story:completed")}
+
+    def test_the_shared_shape_would_otherwise_advance(self):
+        """Pins the premise: nothing but the label distinguishes these cases."""
+        issues = self.shaped(sq.STANDING)
+        self.assertEqual(([20, 21], None),
+                         sq._references(issues[10]["body"], "Stories"))
+        for number in (20, 21):
+            self.assertIn(
+                sq.dispatcher.lifecycle_of(issues[number], sq.dispatcher.STORY_LIFECYCLE),
+                sq.dispatcher.TERMINAL_SUCCESS)
+
+    def test_standing_project_is_excluded_and_says_it_is_for_being_standing(self):
+        issues = self.shaped(sq.STANDING)
+        self.assertEqual([], sq.plan_project_completion(issues))
+        self.assertEqual(sq.Skip.STANDING, sq.completion_skip(issues[10], issues))
+
+    def test_the_identical_bounded_project_still_advances(self):
+        issues = self.shaped("project:active")
+        self.assertIsNone(sq.completion_skip(issues[10], issues))
+        self.assertEqual([sq.AWAITING_ACCEPTANCE],
+                         [d.target for d in sq.plan_project_completion(issues)])
+
+    def test_no_state_of_its_stories_advances_a_standing_project(self):
+        """§4.1.1: excluded whatever the stories do — and always for the same reason."""
+        for stories in (self.FINISHED, "#20", "#99", "_No response_", "- #20"):
+            with self.subTest(stories=stories):
+                issues = self.shaped(sq.STANDING, stories)
+                self.assertEqual([], sq.plan_project_completion(issues))
+                self.assertEqual(sq.Skip.STANDING,
+                                 sq.completion_skip(issues[10], issues))
+
+    def test_a_second_project_label_leaves_no_lifecycle_at_all(self):
+        """§2.1 — standing is exclusive of the bounded states by construction."""
+        for other in ("project:active", "project:awaiting-acceptance",
+                      "project:accepted", "project:awaiting-ready"):
+            with self.subTest(other=other):
+                issues = self.shaped(sq.STANDING)
+                issues[10]["labels"].append({"name": other})
+                self.assertIsNone(sq.dispatcher.lifecycle_of(
+                    issues[10], sq.dispatcher.PROJECT_LIFECYCLE))
+                self.assertEqual(sq.Skip.NOT_ACTIVE,
+                                 sq.completion_skip(issues[10], issues))
+                self.assertEqual([], sq.plan_project_completion(issues))
+
+    def test_the_standing_label_is_the_one_the_schema_defines(self):
+        with open(SCHEMA, encoding="utf-8") as handle:
+            schema = handle.read()
+        self.assertIn(f"`{sq.STANDING}`", schema, "§2.1 must define the label")
+        self.assertIn(f"| `{sq.STANDING}` | `project:awaiting-ready` |", schema,
+                      "§4.1 must give it a supersession edge")
+        self.assertNotIn(f"| `{sq.STANDING}` | `{sq.AWAITING_ACCEPTANCE}` |", schema,
+                         "§4.1 must not give it a completion edge")
 
 
 if __name__ == "__main__":

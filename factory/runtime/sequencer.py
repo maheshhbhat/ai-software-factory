@@ -24,6 +24,10 @@ BLOCKED = "story:blocked"
 READY = "story:ready"
 ACTIVE = "project:active"
 AWAITING_ACCEPTANCE = "project:awaiting-acceptance"
+# §4.1.1 — continuous work. It has no end, so it has no acceptance edge, and the
+# sequencer must exclude it by recognising this value rather than by falling
+# through some other guard.
+STANDING = "project:standing"
 IN_FLIGHT = frozenset({dispatcher.READY, dispatcher.CLAIMED, dispatcher.IN_REVIEW})
 
 
@@ -116,26 +120,54 @@ def plan_story_readiness(issues: dict[int, dict], wip_limit: int) -> list[Decisi
     return decisions
 
 
-def plan_project_completion(issues: dict[int, dict]) -> list[Decision]:
-    """Advance only active projects whose declared children all succeeded."""
-    decisions = []
-    for number in sorted(issues):
-        project = issues[number]
-        if "type:project" not in dispatcher.labels_of(project):
-            continue
-        if dispatcher.lifecycle_of(project, dispatcher.PROJECT_LIFECYCLE) != ACTIVE:
-            continue
-        if not dispatcher.is_trusted(project):
-            continue
-        stories, error = _references(project.get("body") or "", "Stories")
-        if error or not stories or any(story not in issues for story in stories):
-            continue
-        if all(dispatcher.is_trusted(issues[story]) and
+class Skip:
+    """Named reasons a project is not advanced to `project:awaiting-acceptance`.
+
+    A project the sequencer leaves alone has to be able to say which fact about
+    itself excluded it. Without that, "standing projects are excluded" and "this
+    project happened to trip an unrelated guard" look identical from outside.
+    """
+    NOT_A_PROJECT = "not a type:project issue"
+    STANDING = "standing project — §4.1.1: no acceptance edge exists"
+    NOT_ACTIVE = "project is not active"
+    UNTRUSTED = "project author is outside the §9.9 trust boundary"
+    STORIES_UNUSABLE = "declared stories missing, empty, or unparseable"
+    STORIES_UNFINISHED = "a declared story has not reached terminal success"
+
+
+def completion_skip(project: dict, issues: dict[int, dict]) -> str | None:
+    """The reason this project may not advance, or None if it may.
+
+    Each clause tests an independent property of the project, and the two
+    lifecycle outcomes are chosen by the *value* of the lifecycle label rather
+    than by which guard happens to run first. So reordering these clauses cannot
+    change the reason a given project yields: a standing project is excluded for
+    being standing, never as a side effect of the `Stories` guard below — which
+    matters because that guard is silent today and #298 is removing it.
+    """
+    if "type:project" not in dispatcher.labels_of(project):
+        return Skip.NOT_A_PROJECT
+    lifecycle = dispatcher.lifecycle_of(project, dispatcher.PROJECT_LIFECYCLE)
+    if lifecycle != ACTIVE:
+        return Skip.STANDING if lifecycle == STANDING else Skip.NOT_ACTIVE
+    if not dispatcher.is_trusted(project):
+        return Skip.UNTRUSTED
+    stories, error = _references(project.get("body") or "", "Stories")
+    if error or not stories or any(story not in issues for story in stories):
+        return Skip.STORIES_UNUSABLE
+    if not all(dispatcher.is_trusted(issues[story]) and
                dispatcher.lifecycle_of(issues[story], dispatcher.STORY_LIFECYCLE)
                in dispatcher.TERMINAL_SUCCESS for story in stories):
-            decisions.append(Decision(number, ACTIVE, AWAITING_ACCEPTANCE,
-                                      "all declared stories reached terminal success"))
-    return decisions
+        return Skip.STORIES_UNFINISHED
+    return None
+
+
+def plan_project_completion(issues: dict[int, dict]) -> list[Decision]:
+    """Advance only active projects whose declared children all succeeded."""
+    return [Decision(number, ACTIVE, AWAITING_ACCEPTANCE,
+                     "all declared stories reached terminal success")
+            for number in sorted(issues)
+            if completion_skip(issues[number], issues) is None]
 
 
 def plan(issues: dict[int, dict], wip_limit: int = dispatcher.WIP_LIMIT) -> list[Decision]:

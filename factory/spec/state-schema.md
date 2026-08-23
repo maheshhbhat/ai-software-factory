@@ -42,7 +42,11 @@ project:queued
   → project:awaiting-acceptance
   → project:accepted
 
-correction edge: project:active → project:awaiting-ready   (§4.1: criteria amended after approval)
+standing branch: project:awaiting-ready → project:standing  (§4.1.1: continuous work; no acceptance edge)
+
+correction edges:
+  project:active   → project:awaiting-ready   (§4.1: criteria amended after approval)
+  project:standing → project:awaiting-ready   (§4.1: criteria amended after approval)
 ```
 
 Canonical name for the approval state is `project:awaiting-ready` (resolves `READY`/`awaiting-ready` drift).
@@ -58,6 +62,7 @@ Suggested GitHub label definitions:
 | `project:active` | `0e8a16` | Approved; stories being worked |
 | `project:awaiting-acceptance` | `d93f0b` | All stories merged; awaiting outcome acceptance |
 | `project:accepted` | `0e8a16` | Acceptance passed; terminal |
+| `project:standing` | `5319e7` | Approved and continuous; accepts stories, never reaches acceptance (§4.1.1) |
 
 **Story lifecycle:**
 
@@ -232,8 +237,26 @@ All transitions are effected by editing the single lifecycle label (Phase 1: by 
 | `project:awaiting-acceptance` | `project:accepted` | human | acceptance comment records **pass for every criterion** (§5.3) | **yes** `acceptance` / `decision` | terminal |
 | `project:awaiting-acceptance` | `project:active` | human | acceptance comment records **any criterion failed** (§5.3) | **yes** `acceptance` / `rescue` or `decision` | new story or re-planning spawned; returns to `awaiting-acceptance` when merged |
 | `project:accepted` | — | — | terminal — issue **closed as completed** (§9.3) | — | — |
+| `project:awaiting-ready` | `project:standing` | human | approves the criteria of a **standing** Project; **approval comment posted first** (§5.1) | **yes** `plan-approval` / `decision` | sequencer may mark stories ready |
+| `project:standing` | `project:awaiting-ready` | human | **criteria amended after approval** — the standing approval is superseded (§5.2) | no (no human bell rung; supersession comment required) | human re-approval gate |
+| `project:standing` | — | — | **no completion edge** — a standing Project never reaches `project:awaiting-acceptance` or `project:accepted` (§4.1.1) | — | — |
 
 Both former self-loops (`awaiting-ready → awaiting-ready`, `awaiting-acceptance → awaiting-acceptance`) are replaced by real edges above: a label edit that ends on the same label emits no transition and therefore cannot be routed (`architecture-v2.1.md` §4, "route on transitions, not states").
+
+#### 4.1.1 Standing projects — continuous work, no acceptance edge
+
+`project:standing` is a Project lifecycle value for work that is **continuous rather than bounded**: it has no definite end, so there is no point at which "did this deliver what it promised?" can be asked once and answered. Factory maintenance is the case it exists for (#314).
+
+A Project in `project:standing`:
+
+1. **Is approved exactly once, through the ordinary §5.1 plan-approval bell**, at `project:awaiting-ready → project:standing`. Same comment shape, same bell, same approval-binding rule — editing its `### Falsifiable acceptance criteria` supersedes the approval and returns it to `project:awaiting-ready` via §5.2, exactly as it does for `project:active`. Adding or completing Stories never supersedes the approval.
+2. **Accepts Stories and dispatches normally.** Stories declare it in `### Project` and move through the unchanged §4.2 Story lifecycle. Each Story is still reviewed at the merge gate. *Not yet live:* `plan_story_readiness` and the dispatcher's §9.9 authorization chain both still require `project:active`, so this clause is contract-only until #314 SM-01 wires them — deliberately, because making stories ready ahead of the dispatcher would park them in `story:ready` consuming WIP with nothing able to claim them.
+3. **Never transitions to `project:awaiting-acceptance` or `project:accepted`.** There is no such edge in §4.1, and no actor may synthesise one. `plan_project_completion` (`factory/runtime/sequencer.py`) must recognise this state and exclude it **by name**, not by relying on the empty-or-unparseable-`### Stories` skip — that skip is silent and Project #298 is removing it, so a deliberate design must not be built on it.
+4. **Is mutually exclusive with every other project lifecycle value by construction.** §2.1 permits exactly one `project:*` label, and `lifecycle_of` resolves an issue carrying two of them to *no* lifecycle rather than to the first — so a Project cannot be standing and bounded at the same time, and one that is mislabelled is inert rather than ambiguous.
+
+**The bounded lifecycle is unchanged for every other Project.** A Project not carrying `project:standing` follows §4.1 exactly as before: it still reaches `project:awaiting-acceptance` when all its Stories reach a terminal success, and it still gets a criterion-by-criterion §5.3 acceptance bell. Nothing in this section relaxes that.
+
+**What this costs, stated here rather than discovered later.** A standing Project never reaches outcome acceptance, so its work never gets the per-Project, criterion-by-criterion review every bounded Project gets. Per-Story review at the merge gate and the sampling audit carry that weight instead, and neither is a substitute for it. The ADR required by #314 SM-04 is where that trade and its compensating controls are recorded.
 
 ### 4.2 Story transitions
 

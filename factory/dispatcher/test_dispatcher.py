@@ -597,6 +597,40 @@ class TestLifecycleVocabularyMatchesTheSchema(unittest.TestCase):
         self.assertNotIn(dp.CANCELLED, dp.TERMINAL_SUCCESS)
 
 
+class TestStandingProjectIsExclusiveOfTheBoundedStates(unittest.TestCase):
+    """§2.1/§4.1.1 — `project:standing` is a lifecycle *value*, not a marker.
+
+    Nothing at the GitHub end stops someone adding a second `project:` label, so
+    the exclusivity has to come from the reader. `lifecycle_of` resolving two
+    labels to *no* lifecycle is what makes the standing state mutually exclusive
+    with the bounded ones by construction rather than by convention — so it is
+    worth pinning rather than assuming.
+    """
+
+    STANDING = "project:standing"        # §2.1
+
+    def test_either_label_alone_resolves_to_itself(self):
+        for lifecycle in (self.STANDING, "project:active"):
+            self.assertEqual(lifecycle, dp.lifecycle_of(
+                project(lifecycle=lifecycle), dp.PROJECT_LIFECYCLE), lifecycle)
+
+    def test_standing_beside_another_project_label_resolves_to_nothing(self):
+        for other in ("project:active", "project:awaiting-ready",
+                      "project:awaiting-acceptance", "project:accepted"):
+            with self.subTest(other=other):
+                both = project(lifecycle=self.STANDING)
+                both["labels"].append({"name": other})
+                self.assertIsNone(dp.lifecycle_of(both, dp.PROJECT_LIFECYCLE))
+
+    def test_an_ambiguous_project_authorizes_nothing(self):
+        """The failure is inert, not "the first label wins"."""
+        both = project(lifecycle=self.STANDING)
+        both["labels"].append({"name": "project:active"})
+        s = story(10)
+        self.assertEqual(R.PROJECT_NOT_ACTIVE, dp.evaluate_story(
+            s, {901: both}, {10: s}, COMMITMENT).reason)
+
+
 class TestClosedDependencyResolution(unittest.TestCase):
     """#107 — a dependency that succeeded is closed, and closed is not in the queue.
 
