@@ -103,6 +103,10 @@ class WorkerLaunchFailed(Exception):
     """The worker adapter could not be launched. The claim has already landed in
     GitHub, so this is loud: the story is claimed but nothing is working it."""
 
+    def __init__(self, message: str, *, definite: bool = False):
+        super().__init__(message)
+        self.definite = definite
+
 
 class RateLimitExhausted(Exception):
     """GitHub told the whole cycle to stop making requests."""
@@ -252,7 +256,9 @@ def wake_worker(dispatch: dict,
             print(f"[worker] {entry.worker}: {reason} {entry.detail}".rstrip(), flush=True)
         if report is None:
             raise WorkerLaunchFailed(
-                "no worker accepted the assignment; see the [worker] trail above")
+                "no worker accepted the assignment; see the [worker] trail above",
+                definite=not any(getattr(item, "result", "") == workers.Result.AMBIGUOUS
+                                 for item in trail))
         return report
 
     cmd = worker_command(dispatch)
@@ -261,11 +267,16 @@ def wake_worker(dispatch: dict,
                  project=dispatch["project"], cmd=runlog.command(cmd), legacy=True)
     try:
         result = workers.run_observed(cmd, capture_output=True, text=True, timeout=60)
-    except (OSError, subprocess.SubprocessError) as exc:
+    except OSError as exc:
         runlog.event("worker.launch.end", worker=dispatch["agent"], story=dispatch["story"],
                      project=dispatch["project"], result="FAILED", legacy=True,
                      elapsed_ms=runlog.elapsed_ms(started), detail=str(exc))
-        raise WorkerLaunchFailed(f"{cmd[0]}: {exc}") from exc
+        raise WorkerLaunchFailed(f"{cmd[0]}: {exc}", definite=True) from exc
+    except subprocess.SubprocessError as exc:
+        runlog.event("worker.launch.end", worker=dispatch["agent"], story=dispatch["story"],
+                     project=dispatch["project"], result="AMBIGUOUS", legacy=True,
+                     elapsed_ms=runlog.elapsed_ms(started), detail=str(exc))
+        raise WorkerLaunchFailed(f"{cmd[0]}: {exc}", definite=False) from exc
     report = workers.report_from(dispatch["agent"], result, started)
     runlog.event("worker.launch.end", worker=report.worker, story=dispatch["story"],
                  project=dispatch["project"], result=report.result, legacy=True,
@@ -273,7 +284,8 @@ def wake_worker(dispatch: dict,
                  stdout=report.stdout, stderr=report.stderr)
     if not report.launched:
         raise WorkerLaunchFailed(
-            f"{cmd[0]} exited {result.returncode}: {(result.stderr or '').strip()[:200]}")
+            f"{cmd[0]} exited {result.returncode}: {(result.stderr or '').strip()[:200]}",
+            definite=True)
     return report
 
 
@@ -529,8 +541,26 @@ def poll_once(repo: str, commitment: int, seen: set[int],
         with obs.Activity("poller", "worker-delivery", "launching", repo=repo,
                           story=dispatch["story"], project=dispatch["project"],
                           worker=dispatch["agent"], trace_id=attempt_trace) as activity:
-            report = wake_worker(
-                dispatch, timeout_s=story_launch_bound(repo, dispatch["story"]))
+            try:
+                report = wake_worker(
+                    dispatch, timeout_s=story_launch_bound(repo, dispatch["story"]))
+            except WorkerLaunchFailed as exc:
+                if not (claim and exc.definite):
+                    raise
+                token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or ""
+                evidence = os.path.join(os.environ.get("FACTORY_RUN_DIR", "run log"),
+                                        "process-events.jsonl")
+                try:
+                    released, detail = dispatcher.release_definite_failure(
+                        repo, dispatch["story"], token, reason=str(exc), evidence=evidence)
+                except Exception as recovery_error:  # claim remains safe and visible
+                    raise exc from recovery_error
+                if not released:
+                    raise WorkerLaunchFailed(
+                        f"confirmed failure could not release claim: {detail}",
+                        definite=True) from exc
+                print(f"[recovery] Story #{dispatch['story']}: {detail}", flush=True)
+                continue
             activity.progress("worker-returned", result=report.result)
         seen.add(dispatch["story"])
         # Report the engine that actually ran, not the agent named on the

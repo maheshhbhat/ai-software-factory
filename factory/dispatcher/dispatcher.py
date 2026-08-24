@@ -671,6 +671,39 @@ def apply_recovery(repo: str, story: dict, decision: RecoveryDecision,
     return True, f"{decision.reason}: {decision.detail}{note_suffix}".rstrip()
 
 
+def release_definite_failure(repo: str, story_number: int, token: str, *,
+                             reason: str, evidence: str,
+                             operator: bool = False) -> tuple[bool, str]:
+    """Release a claim only when a completed worker is known to have failed.
+
+    Unlike lease recovery, this preserves Attempt: a worker really ran and the
+    failed attempt must remain visible to retry and poison accounting.
+    """
+    fresh = fetch_issue(repo, story_number, token)
+    if fresh is None or lifecycle_of(fresh, STORY_LIFECYCLE) != CLAIMED:
+        return False, "story is not currently claimed"
+    pulls = fetch_pull_requests(repo, token)
+    linked, error = linked_delivery_prs(story_number, pulls)
+    if error:
+        return False, error
+    if linked:
+        return False, f"linked delivery PR exists: #{linked[0].get('number')}"
+    heading = "Operator recovery" if operator else "Factory failure recovery"
+    provenance = ("This is a human intervention and must not be reported as "
+                  "autonomous delivery." if operator else
+                  "The poller directly observed the completed non-zero worker exit.")
+    comment = (f"## {heading}\n\n"
+               "A confirmed factory malfunction stranded this claim.\n\n"
+               f"Reason: {reason}\n\nEvidence: `{evidence}`\n\n"
+               f"The failed Attempt is preserved. {provenance}")
+    _api(f"https://api.github.com/repos/{repo}/issues/{story_number}/comments",
+         token, method="POST", payload={"body": comment})
+    labels = sorted((labels_of(fresh) - {CLAIMED}) | {READY})
+    _api(f"https://api.github.com/repos/{repo}/issues/{story_number}", token,
+         method="PATCH", payload={"labels": labels})
+    return True, f"confirmed failure released; Attempt preserved; labels {' '.join(labels)}"
+
+
 def poison(repo: str, story: dict, token: str) -> tuple[bool, str]:
     """§4.3.5: the fourth dispatch opportunity does not dispatch; it poisons.
 

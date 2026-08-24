@@ -249,12 +249,14 @@ class WorkerFailureAndFailover(Scenario):
                 redirect_stdout(buffer):
             poller.main(["--repo", "o/r", "--commitment", "54", "--once"])
         output = buffer.getvalue()
-        assert "FAIL" in output and "did not start" in output, output
-        assert hub.lifecycle(10) == dispatcher.CLAIMED, \
-            "the runtime edited lifecycle to compensate for a launch failure"
+        assert "confirmed failure released" in output, output
+        assert hub.lifecycle(10) == dispatcher.READY, \
+            "a confirmed stopped worker should not hold the ambiguity lease"
+        assert hub.section(10, "Attempt") == "1", \
+            "the failed worker attempt must remain counted"
         assert hub.state(10) == "open"
-        self.note("every engine failing was loud, woke nobody, and left the claim "
-                  "alone for the §9.4 lease to resolve")
+        self.note("every engine failing was loud, woke nobody, and immediately "
+                  "released the claim while preserving the failed attempt")
 
         # Ambiguity must never fall back — two workers on one story is the one
         # outcome worse than none.
