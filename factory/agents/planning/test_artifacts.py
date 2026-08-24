@@ -110,6 +110,8 @@ class CampaignTests(unittest.TestCase):
         self.assertEqual(2, written.project)
         self.assertEqual(2, len(store.issues))
         self.assertNotIn("type:story", {label for issue in store.issues for label in issue["labels"]})
+        self.assertIn("project:planning", store.get_issue(written.project)["labels"])
+        self.assertNotIn("project:awaiting-ready", store.get_issue(written.project)["labels"])
         self.assertEqual(written, artifacts.verify(store, trigger, "v1", written.altitude))
 
     def test_campaign_replay_creates_no_duplicates(self):
@@ -120,6 +122,46 @@ class CampaignTests(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertEqual(2, len(store.issues))
         self.assertEqual(1, len(store.comments[1]))
+
+    def test_campaign_replay_repairs_incomplete_premature_ready_project(self):
+        store = FakeStore([{"number": 1, "labels": ["type:roadmap-commitment"], "body": ""}])
+        trigger = store.get_issue(1)
+        first = artifacts.write(store, trigger, "v1", campaign_output())
+        store.update_labels(first.project, ["type:project", "project:awaiting-ready"])
+
+        replayed = artifacts.write(store, trigger, "v1", campaign_output())
+
+        self.assertEqual(first, replayed)
+        self.assertIn("project:planning", store.get_issue(first.project)["labels"])
+        self.assertNotIn("project:awaiting-ready", store.get_issue(first.project)["labels"])
+        self.assertEqual(2, len(store.issues))
+
+    def test_campaign_replay_does_not_move_expanded_project_backwards(self):
+        store = FakeStore([{"number": 1, "labels": ["type:roadmap-commitment"], "body": ""}])
+        trigger = store.get_issue(1)
+        first = artifacts.write(store, trigger, "v1", campaign_output())
+        project = store.get_issue(first.project)
+        store.update_issue(first.project, project["body"].replace("_No response_", "#99"))
+        store.update_labels(first.project, ["type:project", "project:awaiting-ready"])
+
+        replayed = artifacts.write(store, trigger, "v1", campaign_output())
+
+        self.assertEqual(first, replayed)
+        self.assertIn("project:awaiting-ready", store.get_issue(first.project)["labels"])
+        self.assertNotIn("project:planning", store.get_issue(first.project)["labels"])
+
+    def test_campaign_readback_rejects_ready_project_without_stories_section(self):
+        store = FakeStore([{"number": 1, "labels": ["type:roadmap-commitment"], "body": ""}])
+        trigger = store.get_issue(1)
+        first = artifacts.write(store, trigger, "v1", campaign_output())
+        project = store.get_issue(first.project)
+        project["body"] = project["body"].replace(
+            "### Stories\n\n_No response_\n\n", "")
+        store.update_issue(first.project, project["body"])
+        store.update_labels(first.project, ["type:project", "project:awaiting-ready"])
+
+        with self.assertRaisesRegex(artifacts.ArtifactError, "labels do not match"):
+            artifacts.verify(store, trigger, "v1", contract.Altitude.CAMPAIGN)
 
 
 class ProjectTests(unittest.TestCase):
