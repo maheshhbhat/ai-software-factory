@@ -364,6 +364,34 @@ class TestClaimRecovery(unittest.TestCase):
         self.assertNotIn("story:merged", payload["labels"])
 
     @patch.object(dp, "_api")
+    @patch.object(dp, "fetch_pull_requests", return_value=[])
+    @patch.object(dp, "fetch_issue")
+    def test_definite_failure_release_preserves_attempt(self, fetch_issue, pulls, api):
+        fetch_issue.return_value = self.claimed(attempt="2")
+        ok, note = dp.release_definite_failure(
+            "owner/repo", 10, "token", reason="worker exited 1",
+            evidence="runs/x/process-events.jsonl")
+        self.assertTrue(ok, note)
+        patch = api.call_args_list[-1].kwargs["payload"]
+        self.assertIn("story:ready", patch["labels"])
+        self.assertNotIn("story:claimed", patch["labels"])
+        self.assertNotIn("body", patch)
+        self.assertIn("directly observed the completed non-zero worker exit",
+                      api.call_args_list[0].kwargs["payload"]["body"])
+
+    @patch.object(dp, "_api")
+    @patch.object(dp, "fetch_pull_requests",
+                  return_value=[{"number": 77, "body": "Story: #10\n"}])
+    @patch.object(dp, "fetch_issue")
+    def test_definite_failure_release_refuses_a_linked_pr(self, fetch_issue, pulls, api):
+        fetch_issue.return_value = self.claimed()
+        ok, note = dp.release_definite_failure(
+            "owner/repo", 10, "token", reason="x", evidence="x")
+        self.assertFalse(ok)
+        self.assertIn("#77", note)
+        api.assert_not_called()
+
+    @patch.object(dp, "_api")
     @patch.object(dp, "fetch_timeline", return_value=[])
     @patch.object(dp, "fetch_issue")
     def test_poison_keeps_attempt_three_and_leaves_the_issue_open(self, fetch_issue,

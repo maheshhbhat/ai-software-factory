@@ -358,6 +358,26 @@ class TestPollOnce(unittest.TestCase):
             with self.assertRaises(poller.WorkerLaunchFailed):
                 poller.poll_once("o/r", 54, seen)
 
+    def test_confirmed_worker_failure_is_released_immediately(self):
+        failure = poller.WorkerLaunchFailed("worker exited 1", definite=True)
+        with mock.patch.object(poller, "run_dispatcher", return_value=REPORT), \
+             mock.patch.object(poller, "wake_worker", side_effect=failure), \
+             mock.patch.object(poller.dispatcher, "release_definite_failure",
+                               return_value=(True, "released")) as release:
+            result = poller.poll_once("o/r", 54, set())
+        self.assertEqual([], result)
+        release.assert_called_once()
+
+    def test_ambiguous_worker_failure_keeps_the_claim(self):
+        failure = poller.WorkerLaunchFailed("timeout", definite=False)
+        with mock.patch.object(poller, "run_dispatcher", return_value=REPORT), \
+             mock.patch.object(poller, "wake_worker", side_effect=failure), \
+             mock.patch.object(poller.dispatcher,
+                               "release_definite_failure") as release:
+            with self.assertRaises(poller.WorkerLaunchFailed):
+                poller.poll_once("o/r", 54, set())
+        release.assert_not_called()
+
     def test_malformed_output_wakes_nobody(self):
         seen: set[int] = set()
         with mock.patch.object(poller, "run_dispatcher",

@@ -367,13 +367,13 @@ class TestUnprovenWorkKeepsTheOldSafeBehaviour(LifecycleCase):
         self.assertIn("story:completed", self.hub.labels(STORY),
                       "and this time it proved the work and completed")
 
-    def test_a_failed_launch_leaves_the_story_claimed_and_is_loud(self):
-        """A claim with nothing working it must never be silent, and must never
-        be quietly closed by the runtime."""
+    def test_a_confirmed_failed_launch_is_released_and_is_loud(self):
+        """A worker proven stopped must not hold the ambiguity lease."""
         worker = worker_that(self.hub, posts=False, exit_code=1)
-        with self.assertRaises(poller.WorkerLaunchFailed):
-            self.poll(worker)
-        self.assertIn("story:claimed", self.hub.labels(STORY))
+        self.poll(worker)
+        self.assertIn("story:ready", self.hub.labels(STORY))
+        self.assertNotIn("story:claimed", self.hub.labels(STORY))
+        self.assertEqual("1", self.hub.section(STORY, "Attempt"))
         self.assertEqual("open", self.hub.issues[STORY]["state"])
 
 
