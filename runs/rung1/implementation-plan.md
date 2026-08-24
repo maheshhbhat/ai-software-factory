@@ -25,8 +25,11 @@ loop and KPI plumbing. The delivery rails no longer need rebuilding.
   hand-maintained rate table.
 
 - **KPI report.** No reproducible Rung 1 report exists on `main`. Story #338 —
-  Build the reproducible Rung 1 KPI report remains open and is the minimum
-  implementation gap.
+  Build the reproducible Rung 1 KPI report and Project #322 — Phase 5 Rung 1 —
+  toy /health rung with a reproducible KPI report are historical requirements
+  and evaluation input. They do not authorize or define this direct Codex
+  implementation. The implementation boundary comes from the Phase 5 objective,
+  current `main`, and the accepted evidence.
 
 - **Black-box evidence.** Project #410 proves the normal production path, but it
   predates the Rung 1 reporter and its durable touch log contains plan approval
@@ -34,25 +37,38 @@ loop and KPI plumbing. The delivery rails no longer need rebuilding.
   measurement path is correct. A fresh black-box `/health` run is required after
   the reporter exists.
 
-Open Projects are not implementation requirements by themselves. Project #335 —
-Do not approve a Project that has no Stories is not part of the KPI implementation.
-The temporary dependency from Story #338 to that Project remains unchanged until
-the owner or factory lifecycle restores it.
+Open Projects and their dependency state are not implementation requirements by
+themselves. Codex implements Phase 5 directly; the factory is the system under
+test. No old Story or Project lifecycle is advanced, repaired, or used to add
+scope.
 
 ## Minimum implementation
 
-### Recorded evidence snapshot
+### Evidence inputs — reuse before collection
 
-Add a deterministic, read-only capture command for Project #322 — Phase 5 Rung
-1 — toy /health rung with a reproducible KPI report. It captures the GitHub
-artifacts needed by the report: Project and Story timelines, lifecycle labels,
-comments containing canonical decisions, linked pull requests, exact heads,
-merge timestamps and check results. It also captures the relevant runtime
-process and telemetry records and touch-log entries.
+Do not build a generalized snapshot service. Reuse the durable run bundle added
+by PR #415 — Repair observable black-box factory delivery: `evidence.json`, the
+typed process-event stream, telemetry stream, operation stream and touch-log
+receipts. Add a field to the Rung 1 bundle only when the table below identifies
+it as missing.
 
-The capture command never changes GitHub state. Its output is a versioned JSON
-snapshot under `runs/rung1/`. Report reproducibility is defined over this
-snapshot, not repeated live API reads.
+| KPI | Required raw fields | Existing source | Missing collection, if any |
+|---|---|---|---|
+| Human touches | project, story, bell type, classification, seconds, timestamp | `factory/touchlog/touchlog.jsonl` and run receipts | Canonical acceptance receipt must be present in the frozen bundle |
+| Autonomy | merged Story, factory claim trace, delivered head, any human code intervention | process events plus Story/PR evidence | Human code involvement is not independently attributable under the shared credential; report unavailable unless the run produces independent evidence |
+| Attempts / retries | Story, claim transition event ID, attempt | process events (`story.claimed`) | None |
+| Poison rate | Story lifecycle label walk | `evidence.json` | Preserve `story:blocked:poison` if observed |
+| Escaped defects | defect observation, source, discovery time after merge | sampling and acceptance artifacts | Record only explicit observations; otherwise unavailable |
+| Acceptance catches | canonical criterion result at outcome acceptance | Project acceptance comment | Freeze the parsed canonical result in the run bundle |
+| Usage / cost | engine, phase, Story, reported usage and cost availability | telemetry (`engine.usage`) | None; do not add pricing |
+| Cycle time | canonical plan-approval and outcome-acceptance timestamps | Project comments/timeline | Freeze both verified boundaries in the run bundle |
+
+The Rung 1 harness performs the smallest read-only GitHub capture needed for the
+three missing acceptance-bound fields: the canonical acceptance receipt,
+criterion results and decision timestamp. It writes them into the run's existing
+`evidence.json`; it does not introduce a reusable collector, service or new
+observability stream. Report reproducibility is defined over that frozen bundle,
+not repeated live API reads.
 
 ### KPI report
 
@@ -93,6 +109,15 @@ The JSON report includes the source artifact identifiers and observation cutoff.
 The Markdown report presents the same values and unavailable states without
 adding interpretations not present in the JSON.
 
+Measurement integrity and KPI availability are separate results. Integrity
+fails when evidence is missing, contradictory, malformed, duplicated where
+uniqueness is required, or cannot be traced to its named source. Availability
+states whether a trustworthy numeric value can be derived. An honest
+`unavailable` cost, autonomy, escaped-defect or acceptance-catch value does not
+by itself fail Rung 1. It is reported with the exact missing evidence. Rung 1
+fails only when the production outcome fails, manual glue or relay occurs, or
+the measurement mechanism makes an unsupported claim.
+
 ## Deterministic verification
 
 Tests use recorded fixtures, never live GitHub. They prove:
@@ -127,10 +152,27 @@ After the KPI implementation is merged, run one fresh toy `/health` Project
 through the same normal external path used for real work. The fixture remains
 under `runs/rung1/live_product/**`, as approved on Project #322.
 
-The run must use `poll.sh`, real GitHub, real Codex delivery, and the configured
-fresh-context reviewer. It must not invoke internal components directly, use
-engine overrides, mock an integration, move lifecycle labels by hand, or add a
-test-only production route. Monitor it only with the repository's
+The exact external entrypoint is:
+
+```bash
+sh poll.sh --interval <approved interval>
+```
+
+The harness may start and stop that process, but it may not import or directly
+invoke dispatcher, worker, reviewer, sequencer or merge-gate internals to make
+progress. The tested production path has no mocked, stubbed, faked or substituted
+integration or dependency anywhere: GitHub, coding engine, reviewer engine,
+merge checks and lifecycle routing are all real. Unit and deterministic tests
+may substitute dependencies, but their evidence cannot establish UAT PASS.
+
+Before spending an engine call or creating a Story, preflight fails if any
+production substitution override is present, including
+`FACTORY_DELIVERY_MODEL_CMD`, `FACTORY_REVIEW_MODEL_CMD`, `FACTORY_WORKER_CMD`,
+`FACTORY_REVIEW_CMD`, or any `FACTORY_WORKER_*` override. It also verifies real
+GitHub authentication, real coding and reviewer engine authentication, required
+merge checks, the approved Project state and the writable evidence location.
+The run must not move lifecycle labels by hand, rescue a failure into green, or
+add a test-only production route. Monitor it only with the repository's
 `factory-monitor` script.
 
 The UAT is PASS only if the intended `/health` outcome is achieved without
