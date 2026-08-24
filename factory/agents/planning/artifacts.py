@@ -236,6 +236,11 @@ def write_project(store: Store, trigger: dict, key: str, output: dict) -> Writte
             or any(not isinstance(item, str) or not item.strip()
                    for item in project_criteria)):
         raise ArtifactError("project acceptance criteria must be non-empty strings")
+    initial_body = (store.get_issue(trigger["number"]).get("body") or "")
+    if not re.search(
+            r"### Falsifiable acceptance criteria\n\n.*?\n\n### Stories",
+            initial_body, flags=re.S):
+        raise ArtifactError("project issue has no writable acceptance criteria section")
     # Validate the complete envelope before the first durable write. Dependency
     # issue numbers are substituted later, but every semantic field is checked now.
     _adr_body(output["adr"])

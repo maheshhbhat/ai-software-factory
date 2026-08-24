@@ -1,4 +1,5 @@
 import copy
+import re
 import unittest
 
 import artifacts
@@ -208,6 +209,17 @@ class ProjectTests(unittest.TestCase):
         output["acceptance_criteria"] = []
         with self.assertRaisesRegex(artifacts.ArtifactError, "acceptance criteria"):
             artifacts.write(store, store.get_issue(10), "v2", output)
+        self.assertEqual(1, len(store.issues))
+        self.assertEqual({}, store.comments)
+
+    def test_missing_project_criteria_section_writes_nothing(self):
+        issue = project_issue()
+        issue["body"] = re.sub(
+            r"### Falsifiable acceptance criteria\n\n.*?\n\n(?=### Stories)",
+            "", issue["body"], flags=re.S)
+        store = FakeStore([issue])
+        with self.assertRaisesRegex(artifacts.ArtifactError, "no writable acceptance"):
+            artifacts.write(store, store.get_issue(10), "v2", project_output())
         self.assertEqual(1, len(store.issues))
         self.assertEqual({}, store.comments)
 
