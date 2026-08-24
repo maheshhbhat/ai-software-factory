@@ -96,14 +96,18 @@ def platform_diagnostics(checkout: pathlib.Path) -> dict:
     real Git operation returns ``EPERM``, the useful conclusion is that an
     external policy (for example a process sandbox) denied the operation.
     """
-    checkout = checkout.resolve()
+    checkout = checkout.absolute()
     git_dir = checkout / ".git"
-    if git_dir.is_file():
-        marker = git_dir.read_text(errors="replace").strip()
-        if marker.startswith("gitdir:"):
-            candidate = pathlib.Path(marker.removeprefix("gitdir:").strip())
-            git_dir = candidate if candidate.is_absolute() else checkout / candidate
-    git_dir = git_dir.resolve()
+    resolution_error = None
+    try:
+        if git_dir.is_file():
+            marker = git_dir.read_text(errors="replace").strip()
+            if marker.startswith("gitdir:"):
+                candidate = pathlib.Path(marker.removeprefix("gitdir:").strip())
+                git_dir = candidate if candidate.is_absolute() else checkout / candidate
+        git_dir = git_dir.resolve()
+    except OSError as exc:
+        resolution_error = f"{type(exc).__name__}: {exc}"
 
     def describe(path: pathlib.Path) -> dict:
         try:
@@ -118,7 +122,7 @@ def platform_diagnostics(checkout: pathlib.Path) -> dict:
             "writable_by_access_check": os.access(path, os.W_OK),
         }
 
-    return {
+    result = {
         "platform": sys.platform,
         "effective_uid": os.geteuid() if hasattr(os, "geteuid") else None,
         "effective_gid": os.getegid() if hasattr(os, "getegid") else None,
@@ -128,6 +132,9 @@ def platform_diagnostics(checkout: pathlib.Path) -> dict:
             name for name in os.environ
             if "SANDBOX" in name.upper() or name.upper().startswith("CODEX_")),
     }
+    if resolution_error:
+        result["git_dir_resolution_error"] = resolution_error
+    return result
 
 
 @dataclass(frozen=True)

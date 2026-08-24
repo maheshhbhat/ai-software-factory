@@ -477,6 +477,14 @@ class EngineExplanationTests(unittest.TestCase):
         self.assertEqual("0o755", diagnostics["git_worktrees_dir"]["mode"])
         self.assertNotIn("secret", json.dumps(diagnostics))
 
+    def test_diagnostics_cannot_hide_the_primary_failure(self):
+        with mock.patch.object(pathlib.Path, "read_text",
+                               side_effect=PermissionError("sandbox denied read")), \
+             mock.patch.object(pathlib.Path, "is_file", return_value=True):
+            diagnostics = invoke.platform_diagnostics(pathlib.Path("."))
+        self.assertIn("PermissionError", diagnostics["git_dir_resolution_error"])
+        self.assertIn("git_dir", diagnostics)
+
     def test_credentials_are_redacted_from_the_explanation(self):
         """runlog.tail owns redaction; the error must go through it."""
         secret = "sk-ant-oat01-" + "a" * 40
