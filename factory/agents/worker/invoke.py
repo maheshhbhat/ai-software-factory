@@ -45,6 +45,7 @@ engine exits and refuses the delivery if anything falls outside it.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import os
@@ -459,6 +460,33 @@ def git(args: list[str], cwd: pathlib.Path, *, timeout=300, runner=subprocess.ru
     return run(["git", *args], cwd=cwd, timeout=timeout, runner=runner)
 
 
+def _remote_repo(url: str) -> str:
+    value = url.strip().removesuffix(".git")
+    if value.startswith("git@github.com:"):
+        return value.removeprefix("git@github.com:")
+    marker = "github.com/"
+    return value.split(marker, 1)[1] if marker in value else ""
+
+
+@contextlib.contextmanager
+def checkout_for_repo(repo: str, configured: pathlib.Path,
+                      runner=subprocess.run):
+    """Use the configured checkout only when its origin is the requested repo."""
+    try:
+        origin = git(["remote", "get-url", "origin"], configured,
+                     runner=runner).stdout.strip()
+    except DeliveryError:
+        origin = ""
+    if _remote_repo(origin).lower() == repo.lower():
+        yield configured
+        return
+    with tempfile.TemporaryDirectory(prefix="factory-product-checkout-") as temp:
+        checkout = pathlib.Path(temp) / "repository"
+        run(["gh", "repo", "clone", repo, str(checkout), "--", "--quiet"],
+            cwd=pathlib.Path(temp), timeout=300, runner=runner)
+        yield checkout
+
+
 def changed_paths(worktree: pathlib.Path, base: str,
                   runner=subprocess.run) -> list[str]:
     tracked = git(["diff", "--name-only", f"{base}...HEAD"], worktree,
@@ -613,9 +641,10 @@ def main(argv=None) -> int:
         print("delivery failed: no GH_TOKEN/GITHUB_TOKEN", file=sys.stderr)
         return 2
     try:
-        result = execute(args.repo, args.story, token, pathlib.Path(args.checkout),
-                         timeout=args.timeout, max_usd=args.max_usd,
-                         engine=args.engine)
+        with checkout_for_repo(args.repo, pathlib.Path(args.checkout)) as checkout:
+            result = execute(args.repo, args.story, token, checkout,
+                             timeout=args.timeout, max_usd=args.max_usd,
+                             engine=args.engine)
     except Exception as exc:
         obs.operational_log("ERROR", "delivery worker failed", exc=exc,
                             component="delivery-worker", operation="delivery",
