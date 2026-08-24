@@ -110,6 +110,7 @@ PLANNING_UNIT = {
     "agents/planning/test_artifacts.py",
     "agents/planning/test_contract.py",
     "agents/planning/test_invoke.py",
+    "agents/planning/test_run_wrapper.py",
 }
 
 PHASE4_UNIT = {
