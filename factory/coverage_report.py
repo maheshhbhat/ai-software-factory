@@ -96,6 +96,9 @@ ACCEPTANCE = {
     "acceptance/test_acceptance_touch_live.py",
     "acceptance/test_acceptance_touch_requirements.py",
     "acceptance/test_product_definition.py",
+    "acceptance/test_reviewer_real.py",
+    "acceptance/test_two_story_real.py",
+    "acceptance/test_e2e_doctor.py",
 }
 LAYERS = ("unit", "integration", "acceptance")
 
@@ -111,6 +114,7 @@ PHASE4_UNIT = {
     "runtime/test_phase4_shared_credential.py", "runtime/test_sampling.py",
     "runtime/test_review_route.py", "agents/worker/test_invoke.py",
     "agents/review/test_invoke.py",
+    "runtime/test_observability.py", "runtime/test_runlog.py",
 }
 PHASE4_MODULES = ("factory/agents/worker/invoke.py", "factory/agents/review/invoke.py",
                   "factory/runtime/sampling.py", "factory/runtime/review_route.py",
@@ -160,6 +164,9 @@ def clean_environment() -> dict:
         "TZ": "UTC",
         "LC_ALL": "C",
         "FACTORY_RUNTIME_LOG_STDERR": "0",
+        # OS thread scheduling is not a reproducible line-coverage input. The
+        # heartbeat behaviour has an explicit test which opts it back in.
+        "FACTORY_HEARTBEATS": "0",
     })
     return env
 
@@ -219,10 +226,14 @@ def classify() -> dict[str, list[str]]:
     phase4 = {path for path in found if ("phase4" in path or path.startswith("agents/worker/")
                                          or path.startswith("agents/review/")
                                          or path == "runtime/test_sampling.py"
-                                         or path == "runtime/test_review_route.py")}
+                                         or path == "runtime/test_review_route.py"
+                                         or path in {"runtime/test_observability.py",
+                                                     "runtime/test_runlog.py"})}
     declared_phase4 = PHASE4_UNIT | {path for path in INTEGRATION | ACCEPTANCE
                                      if "phase4" in path or path.startswith("agents/worker/")
-                                     or path.startswith("agents/review/")}
+                                     or path.startswith("agents/review/")
+                                     or path in {"runtime/test_observability.py",
+                                                 "runtime/test_runlog.py"}}
     if phase4 != declared_phase4:
         raise SystemExit(f"Phase 4 tests must be explicitly classified; "
                          f"unclassified={sorted(phase4-declared_phase4) or 'none'}, "
@@ -340,6 +351,12 @@ def measure(python: str, workdir: Path, e2e: dict | None = None) -> dict:
     env = clean_environment()
     purge_pycache()
     workdir.mkdir(parents=True, exist_ok=True)
+    # Observability defaults to a long-lived production directory. Whether a
+    # 5 MiB stream happens to rotate during this measurement is external state
+    # and changes line coverage. Give every measurement a clean private stream.
+    observation_dir = workdir / "observability"
+    shutil.rmtree(observation_dir, ignore_errors=True)
+    env["FACTORY_RUN_DIR"] = str(observation_dir)
     grouped = classify()
 
     per_layer, data_files, failures = {}, {}, []

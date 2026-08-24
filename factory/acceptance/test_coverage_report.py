@@ -2,6 +2,7 @@
 
 import importlib.util
 import pathlib
+import tempfile
 import unittest
 from unittest import mock
 
@@ -14,6 +15,28 @@ SPEC.loader.exec_module(coverage_report)
 
 
 class PlanningCoverageClassificationTests(unittest.TestCase):
+    def test_each_measurement_gets_a_clean_private_observability_directory(self):
+        with tempfile.TemporaryDirectory() as root:
+            workdir = pathlib.Path(root)
+            observation = workdir / "observability"
+            observation.mkdir()
+            (observation / "stale.jsonl").write_text("old")
+            environments = []
+            def run_layer(_python, _data, _files, env):
+                environments.append(dict(env)); return True
+            empty = {layer: [] for layer in coverage_report.LAYERS}
+            report = {"total": 0.0, "modules": {}}
+            with mock.patch.object(coverage_report, "purge_pycache"), \
+                 mock.patch.object(coverage_report, "classify", return_value=empty), \
+                 mock.patch.object(coverage_report, "run_layer", side_effect=run_layer), \
+                 mock.patch.object(coverage_report, "combine"), \
+                 mock.patch.object(coverage_report, "report", return_value=report):
+                coverage_report.measure("python", workdir)
+            self.assertFalse((observation / "stale.jsonl").exists())
+            self.assertTrue(environments)
+            self.assertTrue(all(env["FACTORY_RUN_DIR"] == str(observation)
+                                for env in environments))
+
     def test_phase4_suites_are_explicit_and_risks_are_reported(self):
         grouped = coverage_report.classify()
         for path in coverage_report.PHASE4_UNIT:

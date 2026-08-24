@@ -13,3 +13,5 @@ Write one JSON object to the output path supplied by the wrapper:
 Do not call GitHub, alter files, commit, push, approve, merge, or change labels.
 An approval is advisory routing evidence under the accepted shared-credential
 ADR; it is not a trusted merge-gate input.
+
+Review the supplied material directly. Do not delegate or spawn subagents.

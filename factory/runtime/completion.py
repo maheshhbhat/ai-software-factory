@@ -105,6 +105,7 @@ sys.path.insert(0, os.path.join(HERE, "..", "dispatcher"))
 import bridge     # noqa: E402 — what an acknowledgement looks like, defined once
 import dispatcher  # noqa: E402 — §9.5 linkage and lifecycle primitives, defined once
 import runlog     # noqa: E402
+import observability as obs  # noqa: E402
 import workers    # noqa: E402 — the launch verdicts this reads
 
 # The heading of the comment this module records. Deliberately *not* the
@@ -337,6 +338,10 @@ def record_success(repo: str, story: int, project: int, launch_result: str,
         return outcome
 
     timeline = dispatcher.fetch_timeline(repo, story, token)
+    try:
+        attempt_trace = obs.story_trace_id(repo, story, timeline)
+    except ValueError:
+        attempt_trace = None
     comments = fetch_comments(repo, story, token)
     pull_requests = dispatcher.fetch_pull_requests(repo, token)
 
@@ -354,7 +359,8 @@ def record_success(repo: str, story: int, project: int, launch_result: str,
             # and the returned outcome must not claim otherwise.
             outcome = Outcome(story, None, Reason.NOT_APPLIED, note)
 
-    runlog.event("story.completion", story=story, project=project, worker=worker,
+    runlog.event("story.completion", trace_id=attempt_trace,
+                 story=story, project=project, worker=worker,
                  decided=decision.action, action=outcome.action,
                  reason=outcome.reason, detail=outcome.detail,
                  applied=applied, note=note)

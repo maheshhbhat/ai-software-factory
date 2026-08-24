@@ -1,0 +1,134 @@
+#!/usr/bin/env python3
+"""Tests for the read-only E2E readiness doctor."""
+
+from __future__ import annotations
+
+import json
+import os
+import pathlib
+import subprocess
+import sys
+import unittest
+from unittest import mock
+
+HERE = pathlib.Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+import e2e_doctor as doctor
+
+
+def completed(args, code=0, stdout="", stderr=""):
+    return subprocess.CompletedProcess(args, code, stdout, stderr)
+
+
+class RecordingRunner:
+    def __init__(self, responses=None):
+        self.responses = responses or {}
+        self.calls = []
+
+    def __call__(self, args, **kwargs):
+        self.calls.append((list(args), kwargs))
+        return self.responses.get(tuple(args), completed(args))
+
+
+class SafetyTests(unittest.TestCase):
+    def test_mutating_commands_are_refused_before_the_runner(self):
+        runner = RecordingRunner()
+        value = doctor.Doctor("owner/repo", 400, environ={"PATH":"/bin"}, runner=runner)
+        for command in (["gh","api","graphql","-f","query=mutation { x }"],
+                        ["git","push","origin","main"],
+                        ["sh","poll.sh","--claim"]):
+            with self.assertRaisesRegex(RuntimeError,"refused mutating"):
+                value.command(command)
+        self.assertEqual([], runner.calls)
+
+    def test_dry_run_uses_only_the_normal_entrypoint(self):
+        runner = RecordingRunner({("sh","poll.sh","--once","--dry-run"):
+                                  completed([],stdout="nothing eligible")})
+        value = doctor.Doctor("owner/repo",400,environ={"PATH":"/bin"},runner=runner)
+        value.token="token"
+        value.dry_run()
+        args, kwargs = runner.calls[0]
+        self.assertEqual(["sh","poll.sh","--once","--dry-run"],args)
+        self.assertEqual("384",kwargs["env"]["FACTORY_COMMITMENT"])
+        self.assertTrue(value.checks[-1].passed)
+
+    def test_source_contains_no_github_mutation_operation(self):
+        source=pathlib.Path(doctor.__file__).read_text()
+        before, rest = source.split("MUTATING_WORDS =",1)
+        _allowlist, after = rest.split("\n\n",1)
+        executable = before + after
+        for operation in ('method="POST"','method="PATCH"','method="DELETE"',
+                          '"createIssue"','"updateIssue"','"addComment"'):
+            self.assertNotIn(operation,executable)
+
+
+class GitHubChecks(unittest.TestCase):
+    def test_authorization_branch_protection_and_capacity_are_checked(self):
+        payload={"data":{"repository":{"isPrivate":True,"viewerPermission":"ADMIN",
+          "project":{"number":400,"state":"OPEN","body":"### Roadmap commitment\n\n#384\n",
+                     "labels":{"nodes":[{"name":"type:project"},{"name":"project:awaiting-ready"}]}},
+          "commitment":{"number":384,"state":"OPEN",
+                        "body":"No product or factory implementation work may descend from this commitment.",
+                        "labels":{"nodes":[{"name":"type:roadmap-commitment"}]}},
+          "defaultBranchRef":{"branchProtectionRule":{"requiresStatusChecks":True,
+                                "requiredStatusCheckContexts":["merge-gate"]}}},
+          "rateLimit":{"remaining":4999,"resetAt":"later"}}}
+        rulesets=[{"id":7,"enforcement":"active"}]
+        ruleset={"rules":[{"type":"required_status_checks","parameters":{
+                 "required_status_checks":[{"context":"merge-gate"}]}}]}
+        runner=RecordingRunner()
+        def respond(args,**kwargs):
+            runner.calls.append((list(args),kwargs))
+            if args[-1]=="repos/owner/repo/rulesets": return completed(args,stdout=json.dumps(rulesets))
+            if args[-1]=="repos/owner/repo/rulesets/7": return completed(args,stdout=json.dumps(ruleset))
+            return completed(args,stdout=json.dumps(payload))
+        value=doctor.Doctor("owner/repo",400,environ={"PATH":"/bin"},runner=respond)
+        value.token="token"; value.github()
+        self.assertTrue(all(check.passed for check in value.checks),value.checks)
+        self.assertTrue(all("mutation" not in " ".join(call[0]) for call in runner.calls))
+
+    def test_real_rest_failure_blocks_even_when_graphql_capacity_is_healthy(self):
+        payload={"data":{"repository":{"isPrivate":False,"viewerPermission":"ADMIN",
+          "project":{"number":400,"state":"OPEN","body":"### Roadmap commitment\n\n#384\n",
+                     "labels":{"nodes":[{"name":"type:project"},{"name":"project:active"}]}},
+          "commitment":{"number":384,"state":"OPEN",
+                        "body":"No product or factory implementation work",
+                        "labels":{"nodes":[{"name":"type:roadmap-commitment"}]}},
+          "defaultBranchRef":{"branchProtectionRule":{"requiredStatusCheckContexts":["merge-gate"]}}},
+          "rateLimit":{"remaining":4999,"resetAt":"later"}}}
+        def respond(args,**_):
+            if "issues?state=open" in args[-1]:
+                return completed(args,code=1,stderr="API rate limit exceeded")
+            if args[-1].endswith("/rulesets"):
+                return completed(args,stdout="[]")
+            return completed(args,stdout=json.dumps(payload))
+        value=doctor.Doctor("owner/repo",400,environ={"PATH":"/bin"},runner=respond)
+        value.token="token"; value.github()
+        check=next(row for row in value.checks if row.name=="production REST read path")
+        self.assertFalse(check.passed)
+        self.assertIn("rate limit",check.detail)
+
+
+class LocalChecks(unittest.TestCase):
+    def test_substitution_overrides_block_readiness(self):
+        value=doctor.Doctor("owner/repo",400,
+                            environ={"FACTORY_DELIVERY_MODEL_CMD":"fake"})
+        value.substitutions()
+        self.assertFalse(value.checks[0].passed)
+        self.assertIn("FACTORY_DELIVERY_MODEL_CMD",value.checks[0].detail)
+
+    def test_observability_smoke_writes_all_streams_and_a_heartbeat(self):
+        value=doctor.Doctor("owner/repo",400,environ=dict(os.environ))
+        value.observability()
+        self.assertTrue(value.checks[-1].passed,value.checks[-1])
+
+    def test_render_is_a_clear_blocking_verdict(self):
+        text=doctor.render([doctor.Check("one",True,"ok"),
+                            doctor.Check("two",False,"broken")])
+        self.assertIn("PASS  one",text)
+        self.assertIn("FAIL  two",text)
+        self.assertIn("BLOCKED — fix 1 failure",text)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

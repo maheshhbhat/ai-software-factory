@@ -51,6 +51,9 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "runtime"))
+import observability as obs  # noqa: E402
+
 # The schema major this gate implements. §9.1: pin a major, halt on anything else.
 SUPPORTED_SCHEMA_MAJOR = 2
 
@@ -384,6 +387,13 @@ def fetch_story(repo: str, number: int, token: str) -> tuple[dict | None, str | 
         return None, str(exc)
 
 
+def story_attempt_trace(repo: str, number: int, token: str) -> str:
+    timeline = _api(
+        f"https://api.github.com/repos/{repo}/issues/{number}/timeline?per_page=100",
+        token)
+    return obs.story_trace_id(repo, number, timeline)
+
+
 # --------------------------------------------------------------------------
 # CLI
 # --------------------------------------------------------------------------
@@ -505,6 +515,16 @@ def main(argv: list[str]) -> int:
     if story_number is not None and not link_error:
         story, story_error = fetch_story(args.repo, story_number, token)
 
+    attempt_trace = None
+    if story_number is not None:
+        try:
+            attempt_trace = story_attempt_trace(args.repo, story_number, token)
+        except Exception as trace_error:  # noqa: BLE001 - gate verdict stays independent
+            obs.operational_log("ERROR", "merge-gate trace could not be read back",
+                                exc=trace_error, component="merge-gate",
+                                operation="trace", repo=args.repo,
+                                story=story_number, pull_request=args.pr)
+
     verdict = evaluate(
         pr_body=pr.get("body") or "",
         changed_paths=changed_paths,
@@ -512,6 +532,10 @@ def main(argv: list[str]) -> int:
         tests_passed=(args.tests_passed == "true"),
         story_fetch_error=story_error,
     )
+    obs.process_event("merge-gate.evaluated", trace_id=attempt_trace, repo=args.repo,
+                      pull_request=args.pr, story=(story or {}).get("number"),
+                      passed=verdict.passed,
+                      evidence={"violations": [item.code for item in verdict.findings]})
     print(render(verdict, f"{args.repo}#{args.pr}"))
     return 0 if verdict.passed else 1
 
@@ -525,6 +549,8 @@ def guarded_main(argv: list[str]) -> int:
         raise
     except BaseException as exc:  # noqa: BLE001 - deliberately total
         import traceback
+        obs.operational_log("CRITICAL", "merge gate failed closed", exc=exc,
+                            component="merge-gate", operation="evaluate")
 
         print("Merge gate — FAIL", file=sys.stdout)
         print("", file=sys.stdout)

@@ -54,6 +54,9 @@ class FakeGitHub:
                 "labels": [{"name": x} for x in sorted(self.story_labels)]}
 
     def pages(self, path):
+        if path == "/issues/215/timeline":
+            return [{"event":"labeled","label":{"name":"story:claimed"},
+                     "created_at":"2026-01-01T00:00:00Z"}]
         if path == "/issues/215/comments":
             return self.comments
         if path == "/pulls/9/files":

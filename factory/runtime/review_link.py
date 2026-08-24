@@ -49,6 +49,7 @@ sys.path.insert(0, os.path.join(HERE, "..", "gates"))
 
 import dispatcher  # noqa: E402 — §9.5 linkage and the lifecycle vocabulary, defined once
 import runlog  # noqa: E402
+import observability as obs  # noqa: E402
 from review_route import outcomes as review_outcomes  # noqa: E402
 
 RECONCILABLE = (dispatcher.CLAIMED, dispatcher.IN_REVIEW)
@@ -250,6 +251,16 @@ def run(repo: str, token: str, apply: bool = True) -> list[Outcome]:
 
     moved = []
     for outcome in reconcile_all(stories, pull_requests, comments_by_story):
+        attempt_trace = None
+        try:
+            attempt_trace = obs.story_trace_id(
+                repo, outcome.number,
+                dispatcher.fetch_timeline(repo, outcome.number, token))
+        except Exception as trace_error:  # noqa: BLE001 - transition remains independent
+            obs.operational_log("ERROR", "review-link trace could not be read back",
+                                exc=trace_error, component="review-link",
+                                operation="reconcile", repo=repo,
+                                story=outcome.number, pull_request=outcome.pr)
         if outcome.action is None:
             # Silence only for the states that are somebody else's business by
             # design. Everything else names itself — §9.11's "no silent drops"
@@ -260,7 +271,8 @@ def run(repo: str, token: str, apply: bool = True) -> list[Outcome]:
                                       Reason.CORRECTION_IN_PROGRESS):
                 print(f"[review-link] #{outcome.number} not reconciled: "
                       f"{outcome.reason} ({outcome.detail})", flush=True)
-                runlog.event("review_link.declined", story=outcome.number,
+                runlog.event("review_link.declined", trace_id=attempt_trace,
+                             story=outcome.number,
                              reason=outcome.reason, pr=outcome.pr, detail=outcome.detail)
             continue
 
@@ -274,10 +286,12 @@ def run(repo: str, token: str, apply: bool = True) -> list[Outcome]:
         if ok:
             print(f"[review-link] #{outcome.number}: {note} ({outcome.reason}) "
                   f"— {outcome.detail}", flush=True)
-            runlog.event("review_link.transition", story=outcome.number,
+            runlog.event("review_link.transition", trace_id=attempt_trace,
+                         story=outcome.number,
                          to=outcome.action, reason=outcome.reason, pr=outcome.pr)
             moved.append(outcome)
         else:
             print(f"[review-link] #{outcome.number} skipped: {note}", flush=True)
-            runlog.event("review_link.skipped", story=outcome.number, detail=note)
+            runlog.event("review_link.skipped", trace_id=attempt_trace,
+                         story=outcome.number, detail=note)
     return moved

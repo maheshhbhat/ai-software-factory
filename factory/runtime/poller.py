@@ -57,6 +57,8 @@ import shlex
 import subprocess
 import sys
 import time
+import urllib.error
+from datetime import datetime, timezone
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -68,6 +70,7 @@ import humanqueue   # noqa: E402  — what is waiting on a person (#111)
 import planning_route  # noqa: E402  — project planning invocation route (#190)
 import review_link  # noqa: E402  — delivery-PR lifecycle reconciliation (#111)
 import review_route  # noqa: E402  — exact-head advisory review routing (#215)
+import observability as obs  # noqa: E402
 import runlog       # noqa: E402  — operational record (#104)
 import sequencer    # noqa: E402  — dependency/project lifecycle sequencing (#193)
 import workers      # noqa: E402  — standard worker contract (#84)
@@ -82,6 +85,7 @@ DISPATCH_RE = re.compile(
 )
 
 DEFAULT_INTERVAL = 60
+MAX_IDLE_INTERVAL = 300
 
 
 class MalformedDispatch(Exception):
@@ -98,6 +102,50 @@ class DispatcherFailed(Exception):
 class WorkerLaunchFailed(Exception):
     """The worker adapter could not be launched. The claim has already landed in
     GitHub, so this is loud: the story is claimed but nothing is working it."""
+
+
+class RateLimitExhausted(Exception):
+    """GitHub told the whole cycle to stop making requests."""
+
+    def __init__(self, reset_epoch: int | None = None):
+        self.reset_epoch = reset_epoch
+        super().__init__("GitHub API rate limit exhausted")
+
+
+class PollResult(list):
+    """Dispatch list with a flag for non-dispatch lifecycle progress."""
+
+    def __init__(self):
+        super().__init__()
+        self.changed = False
+
+
+def rate_limit_from(error: BaseException) -> RateLimitExhausted | None:
+    """Classify only explicit GitHub limit responses; ordinary 403s stay errors."""
+    if not isinstance(error, urllib.error.HTTPError) or error.code not in (403, 429):
+        return None
+    headers = error.headers or {}
+    remaining = headers.get("X-RateLimit-Remaining")
+    retry_after = headers.get("Retry-After")
+    if remaining != "0" and retry_after is None:
+        return None
+    reset = headers.get("X-RateLimit-Reset")
+    try:
+        reset_epoch = int(reset) if reset else int(time.time()) + int(retry_after or 60)
+    except (TypeError, ValueError):
+        reset_epoch = int(time.time()) + 60
+    return RateLimitExhausted(reset_epoch)
+
+
+def rate_limit_delay(error: RateLimitExhausted, now: float | None = None) -> int:
+    now = time.time() if now is None else now
+    return max(60, int((error.reset_epoch or int(now) + 60) - now) + 1)
+
+
+def adaptive_interval(base: int, current: int, active: bool,
+                      maximum: int = MAX_IDLE_INTERVAL) -> int:
+    """Return to the requested interval on activity; double while idle."""
+    return base if active else min(maximum, max(base, current * 2))
 
 
 def parse_dispatches(stdout: str) -> list[dict]:
@@ -306,11 +354,13 @@ def wake_reviewer(repo: str, target: review_route.ReviewTarget) -> None:
     command = ([x.replace("{repo}", repo).replace("{pull_request}", str(target.pull_request))
                 for x in shlex.split(template)] if template
                else [wrapper, repo, str(target.pull_request)])
-    result = subprocess.run(command, capture_output=True, text=True,
-                            timeout=int(os.environ.get("FACTORY_REVIEW_TIMEOUT", "3600")))
+    # Keep stdout captured because poller stdout is a notification channel, but
+    # let the reviewer's structured progress events flow live on stderr.
+    result = subprocess.run(command, stdout=subprocess.PIPE, text=True,
+                            timeout=int(os.environ.get("FACTORY_REVIEW_TIMEOUT", "60")))
     if result.returncode:
         raise WorkerLaunchFailed(
-            f"review PR #{target.pull_request} failed: {(result.stderr or result.stdout)[:400]}")
+            f"review PR #{target.pull_request} failed: {(result.stdout or '')[:400]}")
 
 
 def route_merge(repo: str, pull: dict, comments: list[dict], *, apply=True) -> bool:
@@ -389,63 +439,65 @@ def cycle(repo: str, commitment: int, claim: bool = True) -> list[dict]:
     return poll_once(repo, commitment, set(), claim=claim)
 
 
-def poll_once(repo: str, commitment: int, seen: set[int], claim: bool = True) -> list[dict]:
+def poll_once(repo: str, commitment: int, seen: set[int],
+              claim: bool = True) -> PollResult:
     """One cycle. Returns the dispatches that produced a wake-up."""
+    woken = PollResult()
     # Reconciliation runs first: a story whose delivery merged should leave
     # `story:claimed` before WIP is counted, or finished work keeps a worker slot
     # it no longer needs. Isolated like every other pass — one failing pass must
     # never stop authorized work from dispatching.
-    try:
-        run_review_link(repo, claim)
-    except Exception as exc:  # noqa: BLE001 — reported, never fatal to dispatch
-        print(f"[poller] review-link pass failed, dispatch continues: "
-              f"{type(exc).__name__}: {exc}", flush=True)
+    def isolated(name, function):
+        try:
+            with obs.Activity("poller", name, "running", repo=repo,
+                              commitment=commitment) as activity:
+                result = function()
+                activity.progress("finished")
+                if result:
+                    woken.changed = True
+                return result
+        except Exception as exc:  # noqa: BLE001 - passes intentionally isolate failure
+            limited = rate_limit_from(exc)
+            if limited is not None:
+                raise limited from exc
+            obs.operational_log("ERROR", f"{name} pass failed; poll continues",
+                                exc=exc, component="poller", operation=name,
+                                repo=repo, commitment=commitment)
+            return None
+
+    isolated("review-link", lambda: run_review_link(repo, claim))
 
     if os.environ.get("FACTORY_PHASE4_REVIEWS") == "1":
-        try:
-            run_phase4_reviews(repo, claim)
-        except Exception as exc:  # noqa: BLE001 — review failure cannot halt recovery
-            print(f"[poller] phase4 review pass failed, dispatch continues: "
-                  f"{type(exc).__name__}: {exc}", flush=True)
+        isolated("independent-review", lambda: run_phase4_reviews(repo, claim))
 
     # A decision consumed now can unblock work the same cycle. Isolated: a
     # continuation failure must not stop already-authorized work from
     # dispatching — the two answer different questions, and coupling their
     # failure modes would let a malformed comment halt the whole factory.
-    try:
-        run_continuation(repo, claim)
-    except Exception as exc:  # noqa: BLE001 — reported, never fatal to dispatch
-        print(f"[poller] continuation pass failed, dispatch continues: "
-              f"{type(exc).__name__}: {exc}", flush=True)
+    isolated("continuation", lambda: run_continuation(repo, claim))
 
     # Sequencing consumes the active project created by continuation above and
     # may expose ready stories to dispatch in this same cycle.
-    try:
-        run_sequencer(repo, claim)
-    except Exception as exc:  # noqa: BLE001 — reported, never fatal to dispatch
-        print(f"[poller] sequencer pass failed, dispatch continues: "
-              f"{type(exc).__name__}: {exc}", flush=True)
+    isolated("sequencer", lambda: run_sequencer(repo, claim))
 
     # Claim each planning transition before invoking. A duplicate poll sees
     # `project:planning`, so GitHub state suppresses duplicate launches.
     try:
-        for artifact in run_planning_route(repo, claim):
+        for artifact in isolated("planning-route", lambda: run_planning_route(repo, claim)) or []:
             if claim:
-                wake_planner(repo, artifact)
+                with obs.Activity("planner", "planning", "launching", repo=repo,
+                                  artifact=artifact):
+                    wake_planner(repo, artifact)
     except Exception as exc:  # noqa: BLE001 — loud, dispatch remains isolated
-        print(f"[poller] planning pass failed, dispatch continues: "
-              f"{type(exc).__name__}: {exc}", flush=True)
+        obs.operational_log("ERROR", "planning launch failed; poll continues",
+                            exc=exc, component="poller", operation="planning",
+                            repo=repo, commitment=commitment, artifact=artifact)
 
     # Said on every poll, after the passes that can change what is waiting and
     # before dispatch, so the list describes this cycle rather than the last one.
-    try:
-        run_human_queue(repo)
-    except Exception as exc:  # noqa: BLE001 — reported, never fatal to dispatch
-        print(f"[poller] human-queue pass failed, dispatch continues: "
-              f"{type(exc).__name__}: {exc}", flush=True)
+    isolated("human-queue", lambda: run_human_queue(repo))
 
     stdout = run_dispatcher(repo, commitment, claim)
-    woken = []
     for dispatch in parse_dispatches(stdout):
         if dispatch["story"] in seen:
             # Belt and braces only, and only within this cycle: GitHub already
@@ -453,10 +505,26 @@ def poll_once(repo: str, commitment: int, seen: set[int], claim: bool = True) ->
             print(f"[poller] already woken this cycle, skipping story "
                   f"#{dispatch['story']}", flush=True)
             continue
-        runlog.event("dispatch.received", story=dispatch["story"],
-                     project=dispatch["project"], agent=dispatch["agent"], repo=repo)
-        report = wake_worker(
-            dispatch, timeout_s=story_launch_bound(repo, dispatch["story"]))
+        attempt_trace = None
+        try:
+            token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or ""
+            attempt_trace = obs.story_trace_id(
+                repo, dispatch["story"],
+                dispatcher.fetch_timeline(repo, dispatch["story"], token))
+        except Exception as trace_error:  # noqa: BLE001 - dispatch remains authorized
+            obs.operational_log("ERROR", "dispatch trace could not be read back",
+                                exc=trace_error, component="poller", operation="dispatch",
+                                repo=repo, story=dispatch["story"],
+                                project=dispatch["project"])
+        obs.process_event("dispatch.received", trace_id=attempt_trace,
+                          story=dispatch["story"], project=dispatch["project"],
+                          agent=dispatch["agent"], repo=repo)
+        with obs.Activity("poller", "worker-delivery", "launching", repo=repo,
+                          story=dispatch["story"], project=dispatch["project"],
+                          worker=dispatch["agent"], trace_id=attempt_trace) as activity:
+            report = wake_worker(
+                dispatch, timeout_s=story_launch_bound(repo, dispatch["story"]))
+            activity.progress("worker-returned", result=report.result)
         seen.add(dispatch["story"])
         # Report the engine that actually ran, not the agent named on the
         # DISPATCH line. Under failover those differ, and an audit trail that
@@ -471,23 +539,29 @@ def poll_once(repo: str, commitment: int, seen: set[int], claim: bool = True) ->
         try:
             complete_story({**dispatch, "repo": repo}, report, claim)
         except Exception as exc:  # noqa: BLE001 — reported, never fatal to the poll
-            print(f"[poller] completion pass failed for story #{dispatch['story']}, "
-                  f"the claim is left alone: {type(exc).__name__}: {exc}", flush=True)
+            obs.operational_log("ERROR", "completion failed; claim left unchanged",
+                                exc=exc, component="poller", operation="completion",
+                                repo=repo, story=dispatch["story"],
+                                project=dispatch["project"])
         woken.append(dispatch)
+        woken.changed = True
     return woken
-
-
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(description="Persistent dispatcher runtime (#65)")
     parser.add_argument("--repo", required=True, help="owner/name")
     parser.add_argument("--commitment", required=True, type=int,
                         help="issue number of the standing roadmap commitment")
     parser.add_argument("--interval", type=int, default=DEFAULT_INTERVAL,
-                        help=f"seconds between polls (default {DEFAULT_INTERVAL})")
+                        help=f"active/base seconds between polls (default {DEFAULT_INTERVAL})")
+    parser.add_argument("--max-idle-interval", type=int, default=MAX_IDLE_INTERVAL,
+                        help=f"idle backoff ceiling (default {MAX_IDLE_INTERVAL})")
     parser.add_argument("--once", action="store_true", help="poll once and exit")
     parser.add_argument("--dry-run", action="store_true",
                         help="do not claim; useful for observing decisions")
     args = parser.parse_args(argv)
+
+    if args.interval < 1 or args.max_idle_interval < args.interval:
+        parser.error("--interval must be positive and --max-idle-interval must be >= it")
 
     if not (os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")):
         print("[poller] FAIL: no GITHUB_TOKEN/GH_TOKEN. The dispatcher cannot read "
@@ -498,9 +572,25 @@ def main(argv: list[str]) -> int:
           f"every {args.interval}s"
           + (" (dry run — no claims)" if args.dry_run else ""), flush=True)
 
-    while True:
+    with obs.bound_context(repo=args.repo, commitment=args.commitment,
+                           component="poller"):
+      delay = args.interval
+      while True:
         try:
-            cycle(args.repo, args.commitment, claim=not args.dry_run)
+            with obs.Activity("poller", "cycle", "reconciling", repo=args.repo,
+                              commitment=args.commitment):
+                result = cycle(args.repo, args.commitment, claim=not args.dry_run)
+                delay = adaptive_interval(
+                    args.interval, delay,
+                    bool(result) or getattr(result, "changed", False),
+                    args.max_idle_interval)
+        except RateLimitExhausted as exc:
+            delay = rate_limit_delay(exc)
+            reset = datetime.fromtimestamp(time.time() + delay, timezone.utc).isoformat()
+            print(f"[poller] PAUSED: GitHub rate limit exhausted; no more API calls "
+                  f"until {reset}", flush=True)
+            if args.once:
+                return 75
         except MalformedDispatch as exc:
             print(f"[poller] FAIL: dispatcher emitted a non-canonical DISPATCH line, "
                   f"so no worker was launched: {exc}", flush=True)
@@ -511,11 +601,14 @@ def main(argv: list[str]) -> int:
                   f"start: {exc}. The claim is left alone — this runtime never edits "
                   f"lifecycle to compensate.", flush=True)
         except Exception as exc:  # noqa: BLE001 — a crash must not look like idleness
+            obs.operational_log("CRITICAL", "poll cycle crashed", exc=exc,
+                                component="poller", operation="cycle",
+                                repo=args.repo, commitment=args.commitment)
             print(f"[poller] FAIL: {type(exc).__name__}: {exc}", flush=True)
 
         if args.once:
             return 0
-        time.sleep(args.interval)
+        time.sleep(delay)
 
 
 if __name__ == "__main__":

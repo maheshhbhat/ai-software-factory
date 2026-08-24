@@ -18,10 +18,14 @@ class OutputTests(unittest.TestCase):
         with mock.patch.object(pathlib.Path, "read_text", return_value="prompt"):
             cmd = invoke.command(pathlib.Path("input.json"), pathlib.Path("out.json"))
         self.assertIn("acceptEdits", cmd)
+        self.assertEqual("Write", cmd[cmd.index("--tools") + 1])
         self.assertEqual("Write", cmd[cmd.index("--allowedTools") + 1])
-        self.assertEqual("Bash", cmd[cmd.index("--disallowedTools") + 1])
+        self.assertEqual("Bash,Agent", cmd[cmd.index("--disallowedTools") + 1])
         self.assertIn("--safe-mode", cmd)
         self.assertIn("--no-session-persistence", cmd)
+
+    def test_default_review_timeout_is_one_minute(self):
+        self.assertEqual(60, invoke.DEFAULT_REVIEW_TIMEOUT)
 
     def test_outcome_is_written_and_parsed_inside_checkout(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -126,17 +130,23 @@ class EngineUsageTests(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.dir.cleanup)
-        self.log = pathlib.Path(self.dir.name) / "runtime.jsonl"
+        self.log = pathlib.Path(self.dir.name)
         self.env = mock.patch.dict(os.environ,
-                                   {"FACTORY_RUNTIME_LOG": str(self.log),
+                                   {"FACTORY_RUN_DIR": str(self.log),
                                     "FACTORY_RUNTIME_LOG_STDERR": "0"})
         self.env.start()
         self.addCleanup(self.env.stop)
 
     def records(self):
-        if not self.log.exists():
-            return []
-        return [json.loads(line) for line in self.log.read_text().splitlines() if line.strip()]
+        records=[]
+        for name in ("process-events.jsonl","telemetry.jsonl"):
+            path=self.log/name
+            if path.exists(): records += [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+        return sorted(records,key=lambda row:row["timestamp"])
+
+    def usage_records(self):
+        return [record for record in self.records()
+                if record.get("metric") == runlog.USAGE_EVENT]
 
     def launch(self, result):
         with mock.patch.object(subprocess, "run", return_value=result):
@@ -147,17 +157,24 @@ class EngineUsageTests(unittest.TestCase):
         reported = json.dumps({"total_cost_usd": 0.11,
                                "usage": {"input_tokens": 400, "output_tokens": 20}})
         self.launch(subprocess.CompletedProcess([], 0, reported, ""))
-        record = self.records()[0]
-        self.assertEqual(runlog.USAGE_EVENT, record["event"])
+        record = self.usage_records()[0]
+        self.assertEqual(runlog.USAGE_EVENT, record["metric"])
         self.assertEqual((337, 9, "review", "claude", "completed"),
                          (record["story"], record["pull_request"], record["phase"],
                           record["engine"], record["launch"]))
         self.assertEqual({"input_tokens": 400, "output_tokens": 20,
                           "total_cost_usd": 0.11}, record["usage"])
 
+    def test_reviewer_start_and_finish_are_visible_before_usage(self):
+        reported = json.dumps({"usage": {"output_tokens": 20}})
+        self.launch(subprocess.CompletedProcess([], 0, reported, ""))
+        self.assertEqual(["review.engine.started", "review.engine.finished",
+                          runlog.USAGE_EVENT],
+                         [record.get("event",record.get("metric")) for record in self.records()])
+
     def test_a_reviewer_reporting_nothing_is_not_recorded_as_zero(self):
         self.launch(subprocess.CompletedProcess([], 0, "wrote the outcome", ""))
-        record = self.records()[0]
+        record = self.usage_records()[0]
         self.assertFalse(record["usage_reported"])
         self.assertEqual(runlog.USAGE_UNAVAILABLE, record["usage"])
 
@@ -167,7 +184,7 @@ class EngineUsageTests(unittest.TestCase):
         with self.assertRaisesRegex(invoke.ReviewError, "unavailable"):
             self.launch(failed)
         self.assertEqual([("failed", {"output_tokens": 2})],
-                         [(r["launch"], r["usage"]) for r in self.records()])
+                         [(r["launch"], r["usage"]) for r in self.usage_records()])
 
     def test_the_default_command_asks_the_reviewer_to_report_its_usage(self):
         with mock.patch.object(pathlib.Path, "read_text", return_value="prompt"):
@@ -181,7 +198,7 @@ class EngineUsageTests(unittest.TestCase):
         with mock.patch.object(pathlib.Path, "read_text", return_value="prompt"):
             cmd = invoke.command(pathlib.Path("input.json"), pathlib.Path("out.json"))
         self.assertEqual("Write", cmd[cmd.index("--allowedTools") + 1])
-        self.assertEqual("Bash", cmd[cmd.index("--disallowedTools") + 1])
+        self.assertEqual("Bash,Agent", cmd[cmd.index("--disallowedTools") + 1])
         self.assertIn("--safe-mode", cmd)
 
 

@@ -346,6 +346,7 @@ class TestStandingRefusalWritesNothing(unittest.TestCase):
         response = mock.MagicMock()
         response.__enter__.return_value.read.return_value = json.dumps(p).encode()
         with mock.patch.object(ct, "fetch_standing", return_value=[]), \
+             mock.patch.object(ct, "ensure_plan_approval_touch"), \
              mock.patch("urllib.request.urlopen", return_value=response) as github:
             ok, note = ct.apply_outcome("owner/repo", p, outcome, "token")
         self.assertTrue(ok)
@@ -521,6 +522,30 @@ class TestIdempotencyAndAuthority(unittest.TestCase):
         self.assertEqual([row["project"] for row in rows], ["#304", "#307"])
         self.assertEqual(len({row["note"].split(";", 1)[0] for row in rows}), 2)
         self.assertEqual(len({ct.acceptance_identity(decision)[0]}), 1)
+
+    def test_plan_approval_writes_one_receipt_and_replay_writes_none(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = pathlib.Path(temp) / "touchlog.jsonl"
+            with mock.patch.dict(os.environ, {"FACTORY_TOUCHLOG_FILE": str(path)}):
+                decision = approval()
+                for _ in range(2):
+                    ct.ensure_plan_approval_touch(375, decision)
+            rows = [json.loads(line) for line in path.read_text().splitlines()]
+        self.assertEqual(1, len(rows))
+        self.assertEqual("plan-approval", rows[0]["bell_type"])
+        self.assertEqual("#375", rows[0]["project"])
+
+    def test_missing_plan_approval_receipt_prevents_state_write(self):
+        p = project()
+        outcome = ct.evaluate_project(p, [approval()])
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = json.dumps(p).encode()
+        with mock.patch.object(ct, "ensure_plan_approval_touch",
+                               side_effect=ct.TouchEvidenceError("disk full")), \
+             mock.patch("urllib.request.urlopen", return_value=response) as github:
+            with self.assertRaisesRegex(ct.TouchEvidenceError, "disk full"):
+                ct.apply_outcome("owner/repo", p, outcome, "token")
+        self.assertEqual(1, github.call_count, "freshness read only; no state write")
 
     def test_touch_failure_allows_fresh_read_but_prevents_github_write(self):
         p = project(state=ct.AWAITING_ACCEPTANCE)

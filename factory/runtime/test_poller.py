@@ -14,6 +14,7 @@ from __future__ import annotations
 import os
 import tempfile
 import unittest
+import urllib.error
 from unittest import mock
 
 import poller
@@ -41,6 +42,16 @@ Selected (claimed, in order): #64
 
 
 class TestParsing(unittest.TestCase):
+    def test_idle_interval_doubles_to_a_five_minute_cap(self):
+        self.assertEqual(30, poller.adaptive_interval(15, 15, False))
+        self.assertEqual(300, poller.adaptive_interval(15, 240, False))
+        self.assertEqual(15, poller.adaptive_interval(15, 300, True))
+
+    def test_rate_limit_delay_obeys_reset_and_has_a_sixty_second_floor(self):
+        self.assertEqual(101, poller.rate_limit_delay(
+            poller.RateLimitExhausted(200), now=100))
+        self.assertEqual(60, poller.rate_limit_delay(
+            poller.RateLimitExhausted(110), now=100))
     def test_review_routing_ignores_an_unrelated_pull_request(self):
         unrelated = {"number": 25,
                      "body": "ordinary repository work mentioning Story: in prose",
@@ -58,6 +69,26 @@ class TestParsing(unittest.TestCase):
              mock.patch.object(poller, "review_targets", return_value=[]) as targets:
             self.assertEqual([], poller.run_phase4_reviews("o/r"))
         targets.assert_called_once_with([], {}, {})
+
+    def test_review_decision_is_read_again_after_reviewer_finishes(self):
+        """An external reviewer write must not be hidden by an earlier read."""
+        head = "a" * 40
+        target = poller.review_route.ReviewTarget(10, 9, head)
+        fresh_pull = {"number": 9, "head": {"sha": head}}
+        fresh_comments = [
+            {"body": f"<!-- review-outcome:9:{head}:approval -->"}]
+        with mock.patch.object(poller.dispatcher, "fetch_issues",
+                               return_value={10: {"number": 10}}), \
+             mock.patch.object(poller.dispatcher, "fetch_pull_requests",
+                               return_value=[]), \
+             mock.patch.object(poller.dispatcher, "_api",
+                               side_effect=[[], fresh_pull, fresh_comments]) as api, \
+             mock.patch.object(poller, "review_targets", return_value=[target]), \
+             mock.patch.object(poller, "wake_reviewer"), \
+             mock.patch.object(poller, "route_merge") as merge:
+            poller.run_phase4_reviews("o/r")
+        self.assertEqual(3, api.call_count)
+        merge.assert_called_once_with("o/r", fresh_pull, fresh_comments, apply=True)
 
     def test_review_target_is_once_per_exact_head(self):
         head = "a" * 40
@@ -168,8 +199,12 @@ class TestPollOnce(unittest.TestCase):
         self._bound = mock.patch.object(poller, "story_launch_bound",
                                         return_value=None)
         self._bound.start()
+        self._issues = mock.patch.object(poller.dispatcher, "fetch_issues",
+                                         return_value={})
+        self._issues.start()
 
     def tearDown(self):
+        self._issues.stop()
         self._bound.stop()
         self._completion.stop()
         for patcher in reversed(self._passes):
@@ -185,6 +220,18 @@ class TestPollOnce(unittest.TestCase):
              mock.patch.object(poller, "run_dispatcher", return_value=REPORT):
             woken = poller.poll_once("o/r", 54, seen)
         self.assertEqual([d["story"] for d in woken], [64])
+
+    def test_rate_limit_aborts_remaining_passes(self):
+        limited = urllib.error.HTTPError(
+            "url", 403, "Forbidden",
+            {"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "200"}, None)
+        with mock.patch.object(poller, "run_review_link", side_effect=limited), \
+             mock.patch.object(poller, "run_continuation") as continuation, \
+             mock.patch.object(poller, "run_dispatcher") as dispatch:
+            with self.assertRaises(poller.RateLimitExhausted):
+                poller.poll_once("o/r", 54, set())
+        continuation.assert_not_called()
+        dispatch.assert_not_called()
 
     def test_review_link_failure_does_not_block_dispatch(self):
         """A reconciliation failure must not halt authorized work, for the same
@@ -365,6 +412,9 @@ class TestWorkerContractRouting(unittest.TestCase):
         ]
         for patcher in self._passes:
             patcher.start()
+        self._issues = mock.patch.object(poller.dispatcher, "fetch_issues",
+                                         return_value={})
+        self._issues.start()
         self._completion = mock.patch.object(poller, "complete_story")
         self.completion = self._completion.start()
         # The launch bound is derived from the Story body over the network;
@@ -374,6 +424,7 @@ class TestWorkerContractRouting(unittest.TestCase):
         self._bound.start()
 
     def tearDown(self):
+        self._issues.stop()
         self._bound.stop()
         self._completion.stop()
         for patcher in reversed(self._passes):
@@ -433,8 +484,12 @@ class TestCompletionIsDelegated(unittest.TestCase):
         ]
         for patcher in self._passes:
             patcher.start()
+        self._issues = mock.patch.object(poller.dispatcher, "fetch_issues",
+                                         return_value={})
+        self._issues.start()
 
     def tearDown(self):
+        self._issues.stop()
         for patcher in reversed(self._passes):
             patcher.stop()
         os.environ.clear()
@@ -553,8 +608,12 @@ class TestTheSkipGuardDiesWithItsCycle(unittest.TestCase):
         ]
         for patcher in self._passes:
             patcher.start()
+        self._issues = mock.patch.object(poller.dispatcher, "fetch_issues",
+                                         return_value={})
+        self._issues.start()
 
     def tearDown(self):
+        self._issues.stop()
         for patcher in reversed(self._passes):
             patcher.stop()
         os.environ.clear()

@@ -484,6 +484,28 @@ resolution exactly as before.
 
 ## Operational logging (#104)
 
+### Live observability
+
+Each run writes three independent files under `FACTORY_RUN_DIR` (default
+`factory/runtime/logs/current`): `process-events.jsonl` for lifecycle facts,
+`operations.jsonl` for severity-classified diagnostics and full tracebacks, and
+`telemetry.jsonl` for heartbeats, timings, and engine usage. These streams are
+not interchangeable and their writers reject fields from another stream.
+
+Every long-running component emits a supervisor-owned heartbeat every five
+seconds. A component is shown as `STUCK` when no heartbeat arrives for fifteen
+seconds, or `ALIVE_NO_PROGRESS` when heartbeats continue but its stage has not
+advanced for thirty seconds. Inspect without changing factory state:
+
+```bash
+python3 factory/runtime/status.py --run-dir factory/runtime/logs/current
+```
+
+One delivery attempt uses one trace ID derived from the repository, Story, and
+latest durable `story:claimed` timestamp. The dispatcher, poller, delivery
+worker, independent reviewer, and merge gate re-derive that same ID from GitHub;
+no in-memory handoff is required.
+
 A factory-launched worker used to be observable only through whatever `[worker]`
 line reached stdout, and `workers.launch` kept a *launched* worker's stdout and
 a *failed* worker's stderr — so for any run that hung, the one channel with the

@@ -132,6 +132,7 @@ class OperatorWrapper(unittest.TestCase):
             "GH_TOKEN": "test-token",
             "POLL_TEST_ENV": str(env_file),
             "POLL_TEST_ARGV": str(argv_file),
+            "FACTORY_COMMITMENT": "99",
         }
         environment.update(overrides)
         completed = subprocess.run(
@@ -159,6 +160,13 @@ class OperatorWrapper(unittest.TestCase):
         self.assertIn("--once", run.argv)
         self.assertNotEqual("", run.launch(),
                             "poll.sh polled without declaring a delivery worker")
+
+    def test_refuses_without_an_explicit_commitment(self):
+        run = self.poll("--once", FACTORY_COMMITMENT="")
+        self.assertEqual(2, run.completed.returncode)
+        self.assertFalse(run.polled, "poller started without an authorization root")
+        self.assertIn("FACTORY_COMMITMENT is required", run.completed.stderr)
+        self.assertIn("must never select its own implementation work", run.completed.stderr)
 
     def test_declared_worker_is_the_one_configured_workers_resolves(self):
         """The wrapper's guard and the dispatcher must read the same thing."""
@@ -344,7 +352,7 @@ class OperatorWrapper(unittest.TestCase):
         anything here would be policy in a file whose header forbids it."""
         run = self.poll("--once", "--dry-run")
         self.assertEqual(["factory/runtime/poller.py", "--repo", "maheshhbhat/ai-software-factory",
-                          "--commitment", "54", "--once", "--dry-run"], run.argv)
+                      "--commitment", "99", "--once", "--dry-run"], run.argv)
 
     def _configured_workers(self, environment: dict) -> list:
         keep = {k: v for k, v in environment.items() if k.startswith("FACTORY_WORKER")}
