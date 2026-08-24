@@ -24,11 +24,22 @@ class ProductionRunTests(unittest.TestCase):
                 "timestamp": "2999-01-01T00:00:00Z", "span_id": "span",
                 "message": "activity started", "component": "delivery-worker",
                 "operation": "engine", "stage": "executing", "story": 20,
+            }) + "\n" + json.dumps({
+                "timestamp": "2999-01-01T00:00:01Z", "message": "engine output",
+                "component": "delivery-worker", "operation": "engine-stream",
+                "story": 20, "engine_output_tail": json.dumps({
+                    "type": "system", "subtype": "thinking_tokens",
+                    "estimated_tokens": 250}),
             }) + "\n")
             rendered, verdict = monitor.snapshot(run)
         self.assertIn("production observability", rendered)
         self.assertIn("ACTIVE: Story #20", rendered)
+        self.assertIn("progress: Story #20", rendered)
+        self.assertIn("thinking; estimated tokens=250", rendered)
         self.assertIsNone(verdict)
+
+    def test_unstructured_progress_is_bounded(self):
+        self.assertEqual(200, len(monitor.progress_summary("x" * 300)))
 
 
 if __name__ == "__main__":
