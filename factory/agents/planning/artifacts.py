@@ -139,7 +139,18 @@ def write_campaign(store: Store, trigger: dict, key: str, output: dict) -> Writt
     created = _issue_once(
         store, key, "project", f"[Project] {project['title']}",
         rendered_project,
-        ["type:project", "project:awaiting-ready"])
+        ["type:project", "project:planning"])
+    # Repair Projects created by the former campaign contract, which skipped
+    # directly to awaiting-ready before any Stories existed.  This is safe to
+    # replay: a Project whose Stories section has since been populated is never
+    # moved backwards.
+    labels = set(created.get("labels") or [])
+    if ("project:awaiting-ready" in labels
+            and section_lines(created.get("body") or "", "Stories") == ["_No response_"]):
+        labels.remove("project:awaiting-ready")
+        labels.add("project:planning")
+        store.update_labels(created["number"], sorted(labels))
+        created = store.get_issue(created["number"])
     return WrittenPlan(contract.Altitude.CAMPAIGN, created["number"], None, ())
 
 
@@ -283,7 +294,11 @@ def verify(store: Store, trigger: dict, key: str,
         if not project or not proposal:
             raise ArtifactError("campaign read-back missing proposal or project")
         labels = set(project.get("labels") or [])
-        if not {"type:project", "project:awaiting-ready"} <= labels:
+        stories = section_lines(project.get("body") or "", "Stories")
+        planning = {"type:project", "project:planning"} <= labels
+        already_expanded = ({"type:project", "project:awaiting-ready"} <= labels
+                            and stories != ["_No response_"])
+        if not (planning or already_expanded):
             raise ArtifactError("campaign project labels do not match contract")
         return WrittenPlan(altitude, project["number"], None, ())
 
