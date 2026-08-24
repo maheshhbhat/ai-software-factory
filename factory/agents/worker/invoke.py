@@ -45,7 +45,6 @@ engine exits and refuses the delivery if anything falls outside it.
 from __future__ import annotations
 
 import argparse
-import collections
 import contextlib
 import hashlib
 import json
@@ -57,7 +56,6 @@ import stat
 import subprocess
 import sys
 import tempfile
-import threading
 import time
 import urllib.error
 import urllib.parse
@@ -71,11 +69,10 @@ sys.path.insert(0, str(ROOT / "factory" / "runtime"))
 import merge_gate  # noqa: E402
 import observability as obs  # noqa: E402
 import runlog  # noqa: E402
+import streaming  # noqa: E402
 
 DEFAULT_TIMEOUT = 3600
 DEFAULT_MAX_USD = 40.0
-CAPTURE_LINES = 256
-CAPTURE_CHARS_PER_LINE = 64 * 1024
 MARKER = "worker-artifact"
 SECTION = r"^### {name}\s*$\n(.*?)(?=^### |\Z)"
 STORY_LINK = re.compile(r"(?m)^Story: #(\d+)$")
@@ -429,45 +426,17 @@ def run(cmd: list[str], *, cwd: pathlib.Path, timeout: int, env=None,
 def run_engine_streamed(cmd: list[str], *, cwd: pathlib.Path, timeout: int,
                         env, story: int, project: int | None) -> subprocess.CompletedProcess:
     """Stream bounded, redacted engine output while retaining usage evidence."""
-    process = subprocess.Popen(
-        cmd, cwd=str(cwd), env=env, stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE, text=True, start_new_session=True, bufsize=1)
-    captured = {"stdout": collections.deque(maxlen=CAPTURE_LINES),
-                "stderr": collections.deque(maxlen=CAPTURE_LINES)}
-
-    def consume(name: str, stream) -> None:
-        for line in iter(stream.readline, ""):
-            captured[name].append(line[-CAPTURE_CHARS_PER_LINE:])
-            obs.operational_log(
-                "INFO", "engine output", component="delivery-worker",
-                operation="engine-stream", stage="running", story=story,
-                project=project, engine=engine_name(cmd), stream=name,
-                engine_output_tail=runlog.tail(line.rstrip()))
-        stream.close()
-
-    threads = [threading.Thread(target=consume, args=(name, stream), daemon=True)
-               for name, stream in (("stdout", process.stdout),
-                                    ("stderr", process.stderr))]
-    for thread in threads:
-        thread.start()
     try:
-        returncode = process.wait(timeout=timeout)
+        return streaming.run(
+            cmd, cwd=cwd, env=env, timeout=timeout,
+            component="delivery-worker", operation="engine-stream",
+            story=story, project=project, engine=engine_name(cmd))
     except subprocess.TimeoutExpired as exc:
-        process.kill()
-        process.wait()
-        for thread in threads:
-            thread.join(timeout=1)
-        stdout = "".join(captured["stdout"])
-        stderr = "".join(captured["stderr"])
         detail = f"bounded execution exhausted after {timeout}s"
+        stderr = printed(exc.stderr)
         if stderr:
             detail += f"; stderr tail: {runlog.tail(stderr)}"
-        raise DeliveryError(detail, stdout) from exc
-    for thread in threads:
-        thread.join(timeout=1)
-    return subprocess.CompletedProcess(
-        cmd, returncode, "".join(captured["stdout"]),
-        "".join(captured["stderr"]))
+        raise DeliveryError(detail, printed(exc.stdout)) from exc
 
 
 def launch_engine(cmd: list[str], *, cwd: pathlib.Path, timeout: int, env,

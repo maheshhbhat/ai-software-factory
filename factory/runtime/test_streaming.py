@@ -3,6 +3,7 @@ import os
 import pathlib
 import sys
 import tempfile
+import subprocess
 import unittest
 from unittest import mock
 
@@ -10,6 +11,18 @@ import streaming
 
 
 class StreamingTests(unittest.TestCase):
+    def test_timeout_retains_output_and_stops_the_process_group(self):
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(
+                os.environ, {"FACTORY_RUN_DIR": directory,
+                             "FACTORY_RUNTIME_LOG_STDERR": "0"}, clear=True):
+            with self.assertRaises(subprocess.TimeoutExpired) as raised:
+                streaming.run(
+                    [sys.executable, "-c",
+                     "import time; print('started', flush=True); time.sleep(10)"],
+                    cwd=directory, env={}, timeout=0.1, component="worker",
+                    operation="engine-stream")
+        self.assertIn("started", raised.exception.stdout)
+
     def test_each_engine_line_is_logged_with_credentials_redacted(self):
         with tempfile.TemporaryDirectory() as directory, mock.patch.dict(
                 os.environ, {"FACTORY_RUN_DIR": directory,

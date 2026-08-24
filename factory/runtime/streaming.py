@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import collections
 import contextvars
-import pathlib
+import os
+import signal
 import subprocess
 import threading
 
@@ -43,7 +44,10 @@ def run(command: list[str], *, cwd, env, timeout: int, component: str,
     try:
         returncode = process.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
-        process.kill()
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except (OSError, AttributeError):
+            process.kill()
         process.wait()
         for thread in threads:
             thread.join(timeout=1)
