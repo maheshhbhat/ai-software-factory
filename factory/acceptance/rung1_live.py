@@ -87,6 +87,24 @@ def preflight_environment(env):
     return True
 
 
+def doctor_result(completed, external_process_guard=False):
+    """Accept an owner-run process guard only for sandbox inspection absence.
+
+    Every other doctor failure remains fatal. The attestation is evidence of a
+    real external check, not a claim that the sandbox inspected the host.
+    """
+    failures = [line for line in completed.stdout.splitlines() if line.startswith("FAIL  ")]
+    process_unavailable = [
+        "FAIL  no competing poller — process inspection unavailable"]
+    if completed.returncode == 0:
+        return completed.stdout.strip()
+    if external_process_guard and failures == process_unavailable:
+        return (completed.stdout.strip() +
+                "\nPASS  external competing-poller guard — owner reported no pgrep matches")
+    raise RuntimeError("real-dependency preflight failed: " +
+                       (completed.stderr or completed.stdout)[-800:])
+
+
 def decision_rows(comments):
     rows = []
     for comment in comments:
@@ -166,9 +184,7 @@ class Run(base.Run):
             [sys.executable, str(ROOT / "factory/acceptance/e2e_doctor.py"),
              "--repo", self.args.repo, "--project", str(self.args.project)],
             cwd=ROOT, capture_output=True, text=True, timeout=300)
-        if doctor.returncode:
-            raise RuntimeError("real-dependency preflight failed: " +
-                               (doctor.stderr or doctor.stdout)[-800:])
+        preflight = doctor_result(doctor, self.args.external_process_guard_no_matches)
         project = self.preflight()
         self.create(project); self.spawn()
         deadline = time.monotonic() + self.args.max_minutes * 60
@@ -204,7 +220,7 @@ class Run(base.Run):
                     "commitment": self.commitment,
                     "entrypoint": f"sh poll.sh --interval {self.args.heartbeat}",
                     "production_substitutions": [],
-                    "preflight": doctor.stdout.strip(), **data}
+                    "preflight": preflight, **data}
         (self.tmp / "evidence.json").write_text(json.dumps(evidence, indent=2, sort_keys=True)+"\n")
         self.persist(evidence)
         self.api(f"/issues/{self.args.project}/comments", "POST", {"body":
@@ -264,6 +280,8 @@ def main(argv=None):
     start.add_argument("--max-minutes", type=int, default=45)
     start.add_argument("--heartbeat", type=int, default=15)
     start.add_argument("--evidence-root", default="runs/rung1")
+    start.add_argument("--external-process-guard-no-matches", action="store_true",
+                       help="owner ran the documented pgrep guard and observed no matches")
     finish = sub.add_parser("finalize")
     finish.add_argument("--repo", default="maheshhbhat/ai-software-factory")
     finish.add_argument("--project", type=int, required=True)

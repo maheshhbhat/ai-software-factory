@@ -1,6 +1,7 @@
 import unittest
 from unittest import mock
 from pathlib import Path
+import subprocess
 
 from factory.acceptance import rung1_live as live
 
@@ -17,6 +18,20 @@ class Rung1LiveTests(unittest.TestCase):
         for name in (*live.FORBIDDEN, "FACTORY_WORKER_TEST_LAUNCH"):
             with self.subTest(name=name), self.assertRaisesRegex(RuntimeError, name):
                 live.preflight_environment({name: "not-real"})
+
+    def test_external_guard_only_replaces_unavailable_process_inspection(self):
+        unavailable = subprocess.CompletedProcess([], 1, stdout=(
+            "PASS  GitHub credential — available\n"
+            "FAIL  no competing poller — process inspection unavailable\n"), stderr="")
+        self.assertIn("owner reported no pgrep matches",
+                      live.doctor_result(unavailable, True))
+        with self.assertRaisesRegex(RuntimeError, "preflight failed"):
+            live.doctor_result(unavailable, False)
+        other = subprocess.CompletedProcess([], 1, stdout=(
+            "FAIL  GitHub credential — unavailable\n"
+            "FAIL  no competing poller — process inspection unavailable\n"), stderr="")
+        with self.assertRaisesRegex(RuntimeError, "preflight failed"):
+            live.doctor_result(other, True)
 
     def test_decisions_require_canonical_owner_headings(self):
         comments = [
