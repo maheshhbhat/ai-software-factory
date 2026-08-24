@@ -33,7 +33,9 @@ class RecordingRunner:
 class SafetyTests(unittest.TestCase):
     def test_mutating_commands_are_refused_before_the_runner(self):
         runner = RecordingRunner()
-        value = doctor.Doctor("owner/repo", 400, environ={"PATH":"/bin"}, runner=runner)
+        value = doctor.Doctor("owner/repo", 400, commitment=384,
+                              target="runs/rung1/live_product/project-400/app.py",
+                              environ={"PATH":"/bin"}, runner=runner)
         for command in (["gh","api","graphql","-f","query=mutation { x }"],
                         ["git","push","origin","main"],
                         ["sh","poll.sh","--claim"]):
@@ -43,14 +45,32 @@ class SafetyTests(unittest.TestCase):
 
     def test_dry_run_uses_only_the_normal_entrypoint(self):
         runner = RecordingRunner({("sh","poll.sh","--once","--dry-run"):
-                                  completed([],stdout="nothing eligible")})
-        value = doctor.Doctor("owner/repo",400,environ={"PATH":"/bin"},runner=runner)
+                                  completed([],stdout=(
+                                      "Dispatcher — 0 issue(s) considered, WIP 0/2\n"
+                                      "No eligible work — nothing dispatched."))})
+        value = doctor.Doctor("owner/repo",400,commitment=777,
+                              target="runs/rung1/live_product/project-400/app.py",
+                              environ={"PATH":"/bin"},runner=runner)
         value.token="token"
         value.dry_run()
         args, kwargs = runner.calls[0]
         self.assertEqual(["sh","poll.sh","--once","--dry-run"],args)
-        self.assertEqual("384",kwargs["env"]["FACTORY_COMMITMENT"])
+        self.assertEqual("777",kwargs["env"]["FACTORY_COMMITMENT"])
         self.assertTrue(value.checks[-1].passed)
+
+    def test_dry_run_blocks_when_global_worker_capacity_is_full(self):
+        runner = RecordingRunner({("sh","poll.sh","--once","--dry-run"):
+                                  completed([],stdout=(
+                                      "Dispatcher — 3 issue(s) considered, WIP 2/2\n"
+                                      "No eligible work — nothing dispatched."))})
+        value = doctor.Doctor(
+            "owner/repo", 400, commitment=777,
+            target="runs/rung1/live_product/project-400/app.py",
+            environ={"PATH": "/bin"}, runner=runner)
+        value.token = "token"
+        value.dry_run()
+        self.assertFalse(value.checks[-1].passed)
+        self.assertIn("capacity exhausted", value.checks[-1].detail)
 
     def test_source_contains_no_github_mutation_operation(self):
         source=pathlib.Path(doctor.__file__).read_text()
@@ -70,6 +90,10 @@ class GitHubChecks(unittest.TestCase):
           "commitment":{"number":384,"state":"OPEN",
                         "body":"No product or factory implementation work may descend from this commitment.",
                         "labels":{"nodes":[{"name":"type:roadmap-commitment"}]}},
+          "issues":{"nodes":[
+              {"number":400,"body":"### Roadmap commitment\n\n#384\n",
+               "labels":{"nodes":[{"name":"type:project"}]}}],
+              "pageInfo":{"hasNextPage":False}},
           "defaultBranchRef":{"branchProtectionRule":{"requiresStatusChecks":True,
                                 "requiredStatusCheckContexts":["merge-gate"]}}},
           "rateLimit":{"remaining":4999,"resetAt":"later"}}}
@@ -82,7 +106,9 @@ class GitHubChecks(unittest.TestCase):
             if args[-1]=="repos/owner/repo/rulesets": return completed(args,stdout=json.dumps(rulesets))
             if args[-1]=="repos/owner/repo/rulesets/7": return completed(args,stdout=json.dumps(ruleset))
             return completed(args,stdout=json.dumps(payload))
-        value=doctor.Doctor("owner/repo",400,environ={"PATH":"/bin"},runner=respond)
+        value=doctor.Doctor("owner/repo",400,commitment=384,
+                            target="runs/rung1/live_product/project-400/app.py",
+                            environ={"PATH":"/bin"},runner=respond)
         value.token="token"; value.github()
         self.assertTrue(all(check.passed for check in value.checks),value.checks)
         self.assertTrue(all("mutation" not in " ".join(call[0]) for call in runner.calls))
@@ -94,6 +120,10 @@ class GitHubChecks(unittest.TestCase):
           "commitment":{"number":384,"state":"OPEN",
                         "body":"No product or factory implementation work",
                         "labels":{"nodes":[{"name":"type:roadmap-commitment"}]}},
+          "issues":{"nodes":[
+              {"number":400,"body":"### Roadmap commitment\n\n#384\n",
+               "labels":{"nodes":[{"name":"type:project"}]}}],
+              "pageInfo":{"hasNextPage":False}},
           "defaultBranchRef":{"branchProtectionRule":{"requiredStatusCheckContexts":["merge-gate"]}}},
           "rateLimit":{"remaining":4999,"resetAt":"later"}}}
         def respond(args,**_):
@@ -102,11 +132,45 @@ class GitHubChecks(unittest.TestCase):
             if args[-1].endswith("/rulesets"):
                 return completed(args,stdout="[]")
             return completed(args,stdout=json.dumps(payload))
-        value=doctor.Doctor("owner/repo",400,environ={"PATH":"/bin"},runner=respond)
+        value=doctor.Doctor("owner/repo",400,commitment=384,
+                            target="runs/rung1/live_product/project-400/app.py",
+                            environ={"PATH":"/bin"},runner=respond)
         value.token="token"; value.github()
         check=next(row for row in value.checks if row.name=="production REST read path")
         self.assertFalse(check.passed)
         self.assertIn("rate limit",check.detail)
+
+    def test_existing_project_or_story_blocks_commitment_isolation(self):
+        payload={"data":{"repository":{"isPrivate":False,"viewerPermission":"ADMIN",
+          "project":{"number":400,"state":"OPEN","body":"### Roadmap commitment\n\n#384\n",
+                     "labels":{"nodes":[{"name":"type:project"},{"name":"project:active"}]}},
+          "commitment":{"number":384,"state":"OPEN",
+                        "body":"No product or factory implementation work",
+                        "labels":{"nodes":[{"name":"type:roadmap-commitment"}]}},
+          "issues":{"nodes":[
+              {"number":400,"body":"### Roadmap commitment\n\n#384\n",
+               "labels":{"nodes":[{"name":"type:project"}]}},
+              {"number":401,"body":"### Roadmap commitment\n\n#384\n",
+               "labels":{"nodes":[{"name":"type:project"}]}},
+              {"number":402,"body":"### Project\n\n#400\n",
+               "labels":{"nodes":[{"name":"type:story"}]}}],
+              "pageInfo":{"hasNextPage":False}},
+          "defaultBranchRef":{"branchProtectionRule":{"requiredStatusCheckContexts":["merge-gate"]}}},
+          "rateLimit":{"remaining":4999,"resetAt":"later"}}}
+        def respond(args, **_):
+            if "issues?state=open" in args[-1]:
+                return completed(args, stdout="[]")
+            if args[-1].endswith("/rulesets"):
+                return completed(args, stdout="[]")
+            return completed(args, stdout=json.dumps(payload))
+        value=doctor.Doctor("owner/repo",400,commitment=384,
+                            target="runs/rung1/live_product/project-400/app.py",
+                            environ={"PATH":"/bin"},runner=respond)
+        value.token="token"; value.github()
+        check=next(row for row in value.checks if row.name=="isolated test commitment")
+        self.assertFalse(check.passed)
+        self.assertIn("projects=[400, 401]", check.detail)
+        self.assertIn("stories=[402]", check.detail)
 
 
 class LocalChecks(unittest.TestCase):
@@ -117,7 +181,9 @@ class LocalChecks(unittest.TestCase):
                                  stderr="fatal: cannot create .git/worktrees: Operation not permitted")
             self.fail(f"unexpected command: {args}")
 
-        value = doctor.Doctor("owner/repo", 400, environ={"PATH": "/bin"},
+        value = doctor.Doctor("owner/repo", 400, commitment=384,
+                              target="runs/rung1/live_product/project-400/app.py",
+                              environ={"PATH": "/bin"},
                               runner=respond)
         value.worktree()
         self.assertFalse(value.checks[-1].passed)
@@ -125,7 +191,9 @@ class LocalChecks(unittest.TestCase):
 
     def test_worktree_probe_removes_successful_probe(self):
         runner = RecordingRunner()
-        value = doctor.Doctor("owner/repo", 400, environ={"PATH": "/bin"},
+        value = doctor.Doctor("owner/repo", 400, commitment=384,
+                              target="runs/rung1/live_product/project-400/app.py",
+                              environ={"PATH": "/bin"},
                               runner=runner)
         value.worktree()
         self.assertTrue(value.checks[-1].passed)
@@ -135,16 +203,46 @@ class LocalChecks(unittest.TestCase):
         self.assertEqual(commands[0][4], commands[1][4])
 
     def test_substitution_overrides_block_readiness(self):
-        value=doctor.Doctor("owner/repo",400,
+        value=doctor.Doctor("owner/repo",400,commitment=384,
+                            target="runs/rung1/live_product/project-400/app.py",
                             environ={"FACTORY_DELIVERY_MODEL_CMD":"fake"})
         value.substitutions()
         self.assertFalse(value.checks[0].passed)
         self.assertIn("FACTORY_DELIVERY_MODEL_CMD",value.checks[0].detail)
 
     def test_observability_smoke_writes_all_streams_and_a_heartbeat(self):
-        value=doctor.Doctor("owner/repo",400,environ=dict(os.environ))
+        value=doctor.Doctor("owner/repo",400,commitment=384,
+                            target="runs/rung1/live_product/project-400/app.py",
+                            environ=dict(os.environ))
         value.observability()
         self.assertTrue(value.checks[-1].passed,value.checks[-1])
+
+    def test_existing_product_target_blocks_readiness(self):
+        target = "runs/rung1/live_product/project-400/app.py"
+        runner = RecordingRunner({
+            ("gh", "api", f"repos/owner/repo/contents/{target}?ref=main"):
+                completed([], stdout='{"type":"file"}'),
+        })
+        value = doctor.Doctor("owner/repo", 400, commitment=384,
+                              target=target, environ={"PATH": "/bin"},
+                              runner=runner)
+        value.token = "token"
+        value.target_freshness()
+        self.assertFalse(value.checks[-1].passed)
+        self.assertIn("already exists", value.checks[-1].detail)
+
+    def test_absent_product_target_passes_readiness(self):
+        target = "runs/rung1/live_product/project-400/app.py"
+        runner = RecordingRunner({
+            ("gh", "api", f"repos/owner/repo/contents/{target}?ref=main"):
+                completed([], code=1, stderr="HTTP 404: Not Found"),
+        })
+        value = doctor.Doctor("owner/repo", 400, commitment=384,
+                              target=target, environ={"PATH": "/bin"},
+                              runner=runner)
+        value.token = "token"
+        value.target_freshness()
+        self.assertTrue(value.checks[-1].passed)
 
     def test_render_is_a_clear_blocking_verdict(self):
         text=doctor.render([doctor.Check("one",True,"ok"),

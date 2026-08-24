@@ -151,6 +151,20 @@ class TestSurfaceClassification(unittest.TestCase):
         verdict, _, _ = mg.classify_surface([".github/workflows/other.yml"])
         self.assertEqual(verdict, "clean")
 
+    def test_factory_scope_classifier_fails_closed_on_protected_patterns(self):
+        protected = (
+            "factory/agents/**", "f*/**", "**", "*.sh", "poll.sh",
+            "approve-plan.sh", "live-e2e.sh", ".github/**", ".claude/**",
+            "AGENTS.md", "CLAUDE.md",
+        )
+        for pattern in protected:
+            with self.subTest(pattern=pattern):
+                self.assertEqual([pattern], mg.protected_factory_scope([pattern]))
+
+    def test_product_and_uat_scopes_are_not_factory_scopes(self):
+        patterns = ["src/**", "tests/**", "runs/rung1/live_product/**"]
+        self.assertEqual([], mg.protected_factory_scope(patterns))
+
 
 class TestVerdict(unittest.TestCase):
     """End-to-end evaluation. Each violation class must fail on its own."""
@@ -210,6 +224,30 @@ class TestVerdict(unittest.TestCase):
         story_covering_runner = story(scope_body(".github/workflows/**"))
         verdict = self.evaluate(changed_paths=[".github/workflows/merge-gate.yml"],
                                 story=story_covering_runner)
+        self.assertTrue(verdict.passed, verdict.codes())
+
+    def test_worker_artifact_cannot_change_factory_control_plane(self):
+        worker_body = VALID_PR + "\n<!-- worker-artifact:42:attempt -->\n"
+        paths = (
+            "factory/runtime/poller.py", "poll.sh", "approve-plan.sh",
+            "live-e2e.sh", ".github/workflows/merge-gate.yml", "AGENTS.md",
+            "CLAUDE.md", ".claude/skills/example/SKILL.md",
+        )
+        for path in paths:
+            with self.subTest(path=path):
+                verdict = self.evaluate(
+                    pr_body=worker_body,
+                    changed_paths=[path],
+                    story=story(scope_body(path)),
+                )
+                self.assertIn(V.FACTORY_SELF_MODIFICATION_FORBIDDEN,
+                              verdict.codes())
+
+    def test_direct_implementation_pr_can_change_factory_control_plane(self):
+        verdict = self.evaluate(
+            changed_paths=["approve-plan.sh"],
+            story=story(scope_body("approve-plan.sh")),
+        )
         self.assertTrue(verdict.passed, verdict.codes())
 
     def test_failing_tests_fail(self):

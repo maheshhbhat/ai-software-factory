@@ -498,6 +498,13 @@ def poll_once(repo: str, commitment: int, seen: set[int],
     isolated("human-queue", lambda: run_human_queue(repo))
 
     stdout = run_dispatcher(repo, commitment, claim)
+    if not claim:
+        # A dry run is the production entrypoint's readiness view. Preserve the
+        # dispatcher's read-only decision so operators and acceptance tooling can
+        # see capacity and the exact Stories that would be selected without
+        # invoking the dispatcher out of band.
+        print("[poller] dispatcher dry-run plan", flush=True)
+        print(stdout.rstrip(), flush=True)
     for dispatch in parse_dispatches(stdout):
         if dispatch["story"] in seen:
             # Belt and braces only, and only within this cycle: GitHub already

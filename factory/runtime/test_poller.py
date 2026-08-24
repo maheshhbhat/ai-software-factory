@@ -12,9 +12,11 @@ nobody authorized.
 from __future__ import annotations
 
 import os
+import io
 import tempfile
 import unittest
 import urllib.error
+from contextlib import redirect_stdout
 from unittest import mock
 
 import poller
@@ -520,6 +522,18 @@ class TestCompletionIsDelegated(unittest.TestCase):
              mock.patch.object(poller, "complete_story") as complete:
             poller.poll_once("o/r", 54, set(), claim=False)
         self.assertFalse(complete.call_args[0][2])
+
+    def test_a_dry_run_exposes_capacity_and_selection_through_the_poller(self):
+        report = REPORT.replace("Selected (claimed, in order)",
+                                "Selected (would claim, in order)")
+        output = io.StringIO()
+        with mock.patch.object(poller, "run_dispatcher", return_value=report), \
+             redirect_stdout(output):
+            poller.poll_once("o/r", 54, set(), claim=False)
+        visible = output.getvalue()
+        self.assertIn("[poller] dispatcher dry-run plan", visible)
+        self.assertIn("WIP 0/2", visible)
+        self.assertIn("Selected (would claim, in order): #64", visible)
 
     def test_a_completion_failure_does_not_stop_the_poll(self):
         """The Story stays claimed, which the §9.4 lease already resolves. A

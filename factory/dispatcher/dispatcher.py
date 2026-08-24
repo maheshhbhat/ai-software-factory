@@ -126,6 +126,7 @@ class Reason:
     DEPENDENCY_UNMET = "DEPENDENCY_UNMET"
     DEPENDS_ON_MALFORMED = "DEPENDS_ON_MALFORMED"
     SCOPE_INVALID = "SCOPE_INVALID"
+    FACTORY_SELF_MODIFICATION_FORBIDDEN = "FACTORY_SELF_MODIFICATION_FORBIDDEN"
     ATTEMPT_INVALID = "ATTEMPT_INVALID"
     ATTEMPT_EXHAUSTED = "ATTEMPT_EXHAUSTED"
     CANCELLED = "CANCELLED"
@@ -521,6 +522,11 @@ def evaluate_story(story: dict, projects: dict, stories: dict,
     if scope_err:
         return Decision(number, False, Reason.SCOPE_INVALID, project=project_number,
                         detail=scope_err)
+    protected = merge_gate.protected_factory_scope(patterns)
+    if protected:
+        return Decision(number, False, Reason.FACTORY_SELF_MODIFICATION_FORBIDDEN,
+                        project=project_number,
+                        detail="protected scope: " + ", ".join(protected))
 
     attempt_raw = (merge_gate.parse_section(body, "Attempt") or "").strip()
     if not attempt_raw.isdigit():
