@@ -21,7 +21,7 @@ def story(number, lifecycle="story:blocked", deps="none", project=10,
 
 def project(number=10, lifecycle="project:active", stories="_No response_"):
     return issue(number, "type:project", lifecycle,
-                 f"### Stories\n\n{stories}\n")
+                 f"### Stories\n\n{stories}\n\n### Roadmap commitment\n\n#17\n")
 
 
 class StoryReadinessTests(unittest.TestCase):
@@ -71,6 +71,16 @@ class StoryReadinessTests(unittest.TestCase):
                   23: story(23), 21: story(21), 22: story(22)}
         self.assertEqual([21], [d.number for d in sq.plan_story_readiness(issues, 2)])
 
+    def test_selected_commitment_does_not_advance_another_projects_story(self):
+        selected = project(10)
+        other = project(11)
+        other["body"] = other["body"].replace("#17", "#99")
+        issues = {10: selected, 11: other,
+                  20: story(20, project=10), 21: story(21, project=11)}
+        self.assertEqual(
+            [20],
+            [d.number for d in sq.plan_story_readiness(issues, 2, commitment=17)])
+
     def test_closed_claim_does_not_consume_wip_but_open_claim_does(self):
         closed_claim = story(19, "story:claimed")
         closed_claim["state"] = "CLOSED"
@@ -90,6 +100,17 @@ class ProjectCompletionTests(unittest.TestCase):
                   20: story(20, "story:merged"),
                   21: story(21, "story:completed")}
         self.assertEqual([10], [d.number for d in sq.plan_project_completion(issues)])
+
+    def test_selected_commitment_does_not_complete_another_project(self):
+        selected = project(10, stories="#20")
+        other = project(11, stories="#21")
+        other["body"] = other["body"].replace("#17", "#99")
+        issues = {10: selected, 11: other,
+                  20: story(20, "story:merged", project=10),
+                  21: story(21, "story:merged", project=11)}
+        self.assertEqual(
+            [10],
+            [d.number for d in sq.plan_project_completion(issues, commitment=17)])
 
     def test_nonterminal_cancelled_missing_or_empty_children_do_not_advance(self):
         cases = [

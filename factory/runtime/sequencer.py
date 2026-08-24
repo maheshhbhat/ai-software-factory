@@ -74,7 +74,16 @@ def _has_cycle(start: int, dependencies: dict[int, list[int]]) -> bool:
     return visit(start)
 
 
-def plan_story_readiness(issues: dict[int, dict], wip_limit: int) -> list[Decision]:
+def _matches_commitment(project: dict, commitment: int | None) -> bool:
+    if commitment is None:
+        return True
+    reference, error = dispatcher.section_ref(
+        project.get("body") or "", "Roadmap commitment")
+    return error is None and reference == commitment
+
+
+def plan_story_readiness(issues: dict[int, dict], wip_limit: int,
+                         commitment: int | None = None) -> list[Decision]:
     """Choose dependency-satisfied blocked stories in stable issue order."""
     stories = {n: issue for n, issue in issues.items()
                if "type:story" in dispatcher.labels_of(issue)}
@@ -115,6 +124,8 @@ def plan_story_readiness(issues: dict[int, dict], wip_limit: int) -> list[Decisi
             continue
         if not dispatcher.is_trusted(project):
             continue
+        if not _matches_commitment(project, commitment):
+            continue
         decisions.append(Decision(number, BLOCKED, READY, "dependencies satisfied"))
         capacity -= 1
     return decisions
@@ -133,9 +144,11 @@ class Skip:
     UNTRUSTED = "project author is outside the §9.9 trust boundary"
     STORIES_UNUSABLE = "declared stories missing, empty, or unparseable"
     STORIES_UNFINISHED = "a declared story has not reached terminal success"
+    OUTSIDE_COMMITMENT = "project is outside the selected roadmap commitment"
 
 
-def completion_skip(project: dict, issues: dict[int, dict]) -> str | None:
+def completion_skip(project: dict, issues: dict[int, dict],
+                    commitment: int | None = None) -> str | None:
     """The reason this project may not advance, or None if it may.
 
     Each clause tests an independent property of the project, and the two
@@ -152,6 +165,8 @@ def completion_skip(project: dict, issues: dict[int, dict]) -> str | None:
         return Skip.STANDING if lifecycle == STANDING else Skip.NOT_ACTIVE
     if not dispatcher.is_trusted(project):
         return Skip.UNTRUSTED
+    if not _matches_commitment(project, commitment):
+        return Skip.OUTSIDE_COMMITMENT
     stories, error = _references(project.get("body") or "", "Stories")
     if error or not stories or any(story not in issues for story in stories):
         return Skip.STORIES_UNUSABLE
@@ -162,16 +177,19 @@ def completion_skip(project: dict, issues: dict[int, dict]) -> str | None:
     return None
 
 
-def plan_project_completion(issues: dict[int, dict]) -> list[Decision]:
+def plan_project_completion(issues: dict[int, dict],
+                            commitment: int | None = None) -> list[Decision]:
     """Advance only active projects whose declared children all succeeded."""
     return [Decision(number, ACTIVE, AWAITING_ACCEPTANCE,
                      "all declared stories reached terminal success")
             for number in sorted(issues)
-            if completion_skip(issues[number], issues) is None]
+            if completion_skip(issues[number], issues, commitment) is None]
 
 
-def plan(issues: dict[int, dict], wip_limit: int = dispatcher.WIP_LIMIT) -> list[Decision]:
-    return plan_project_completion(issues) + plan_story_readiness(issues, wip_limit)
+def plan(issues: dict[int, dict], wip_limit: int = dispatcher.WIP_LIMIT,
+         commitment: int | None = None) -> list[Decision]:
+    return (plan_project_completion(issues, commitment)
+            + plan_story_readiness(issues, wip_limit, commitment))
 
 
 def fetch_all_issues(repo: str, token: str) -> dict[int, dict]:
@@ -210,8 +228,9 @@ def apply_decision(repo: str, decision: Decision, token: str) -> tuple[bool, str
 
 
 def run(repo: str, token: str, apply: bool = True,
-        wip_limit: int = dispatcher.WIP_LIMIT) -> list[Decision]:
-    decisions = plan(fetch_all_issues(repo, token), wip_limit)
+        wip_limit: int = dispatcher.WIP_LIMIT,
+        commitment: int | None = None) -> list[Decision]:
+    decisions = plan(fetch_all_issues(repo, token), wip_limit, commitment)
     applied = []
     for decision in decisions:
         if not apply:

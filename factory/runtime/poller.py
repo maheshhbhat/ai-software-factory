@@ -402,10 +402,10 @@ def run_human_queue(repo: str) -> list:
     return humanqueue.run(repo, token)
 
 
-def run_sequencer(repo: str, claim: bool = True) -> list:
+def run_sequencer(repo: str, commitment: int, claim: bool = True) -> list:
     """Advance dependency-ready stories and fully delivered projects."""
     token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or ""
-    return sequencer.run(repo, token, apply=claim)
+    return sequencer.run(repo, token, apply=claim, commitment=commitment)
 
 
 def run_planning_route(repo: str, claim: bool = True) -> list[int]:
@@ -478,7 +478,7 @@ def poll_once(repo: str, commitment: int, seen: set[int],
 
     # Sequencing consumes the active project created by continuation above and
     # may expose ready stories to dispatch in this same cycle.
-    isolated("sequencer", lambda: run_sequencer(repo, claim))
+    isolated("sequencer", lambda: run_sequencer(repo, commitment, claim))
 
     # Claim each planning transition before invoking. A duplicate poll sees
     # `project:planning`, so GitHub state suppresses duplicate launches.
