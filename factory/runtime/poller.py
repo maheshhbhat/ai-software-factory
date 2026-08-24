@@ -368,8 +368,12 @@ def wake_reviewer(repo: str, target: review_route.ReviewTarget) -> None:
                else [wrapper, repo, str(target.pull_request)])
     # Keep stdout captured because poller stdout is a notification channel, but
     # let the reviewer's structured progress events flow live on stderr.
-    result = subprocess.run(command, stdout=subprocess.PIPE, text=True,
-                            timeout=int(os.environ.get("FACTORY_REVIEW_TIMEOUT", "60")))
+    # The wrapper owns the reviewer's three-minute internal bound. Give it a
+    # separate cleanup margin so the outer poller cannot kill it at the exact
+    # instant it is writing a bounded failure or durable approval.
+    result = subprocess.run(
+        command, stdout=subprocess.PIPE, text=True,
+        timeout=int(os.environ.get("FACTORY_REVIEW_LAUNCH_TIMEOUT", "210")))
     if result.returncode:
         raise WorkerLaunchFailed(
             f"review PR #{target.pull_request} failed: {(result.stdout or '')[:400]}")

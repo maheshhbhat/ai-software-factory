@@ -79,6 +79,11 @@ def completed_durations(run: pathlib.Path) -> list[dict]:
             and isinstance(row.get("elapsed_seconds"), (int, float))]
 
 
+def failed_operations(run: pathlib.Path) -> list[dict]:
+    return [row for row in read_jsonl(run / "observability" / "operations.jsonl")
+            if row.get("message") == "activity failed"]
+
+
 def engine_progress(run: pathlib.Path) -> list[dict]:
     """Newest bounded streamed line for each active engine identity."""
     rows = read_jsonl(run / "observability" / "operations.jsonl")
@@ -97,7 +102,10 @@ def progress_summary(value: str) -> str:
     try:
         event = json.loads(value)
     except (TypeError, json.JSONDecodeError):
-        return str(value or "")[-200:]
+        text = str(value or "")
+        if '"type":"result"' in text or '"type": "result"' in text:
+            return "result (event exceeded display bound)"
+        return text[-200:]
     kind = event.get("type", "event") if isinstance(event, dict) else "event"
     subtype = event.get("subtype") if isinstance(event, dict) else None
     if kind == "system" and subtype == "thinking_tokens":
@@ -161,6 +169,12 @@ def snapshot(run: pathlib.Path) -> tuple[str, bool | None]:
                     f"artifact #{row['artifact']}" if row.get("artifact") else "run")
         lines.append(f"progress: {identity} — {row.get('component')}: "
                      f"{progress_summary(row.get('engine_output_tail', ''))}")
+    for row in failed_operations(run)[-5:]:
+        identity = (f"Story #{row['story']}" if row.get("story") else
+                    f"PR #{row['pull_request']}" if row.get("pull_request") else "run")
+        detail = str(row.get("exception_message") or "unknown failure")[-200:]
+        lines.append(f"FAILED: {identity} — {row.get('component')}/"
+                     f"{row.get('operation')} — {detail}")
     durations = completed_durations(run)
     story_durations = [row for row in durations if row.get("story")]
     run_durations = [row for row in durations if not row.get("story")]

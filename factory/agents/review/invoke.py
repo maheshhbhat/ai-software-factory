@@ -15,7 +15,7 @@ import tempfile
 import urllib.error
 import urllib.request
 
-DEFAULT_REVIEW_TIMEOUT = 60
+DEFAULT_REVIEW_TIMEOUT = 180
 
 HERE = pathlib.Path(__file__).resolve().parent
 ROOT = HERE.parents[2]
