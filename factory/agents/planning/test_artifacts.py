@@ -1,4 +1,5 @@
 import copy
+import re
 import unittest
 
 import artifacts
@@ -57,7 +58,10 @@ class FakeStore:
 
 def project_issue(number=10):
     return {"number": number, "labels": ["type:project", "project:active"],
-            "body": "### Stories\n\n_No response_\n\n### Expected bells\n\n2\n\n### Risks / notes\n\nNone\n"}
+            "body": ("### Falsifiable acceptance criteria\n\n"
+                     "- [ ] Original criterion\n\n"
+                     "### Stories\n\n_No response_\n\n### Expected bells\n\n2\n\n"
+                     "### Risks / notes\n\nNone\n")}
 
 
 def campaign_output():
@@ -71,7 +75,9 @@ def campaign_output():
 def project_output():
     base = {"phase": "build", "hazard": False, "spend_cap": "$5 / 60 min",
             "scope": ["src/model/**"], "acceptance_criteria": ["Example passes"]}
-    return {"altitude": "project", "adr": {"title": "Artifact ownership",
+    return {"altitude": "project",
+            "acceptance_criteria": ["A verified projection is returned or refusal is explicit"],
+            "adr": {"title": "Artifact ownership",
             "context": "Product stories belong with code.", "decision": "Write product artifacts here.",
             "alternatives": ["Factory repository"], "consequences": ["Product gate required"]},
             "stories": [{**base, "key": "model", "title": "Model retirement",
@@ -174,7 +180,48 @@ class ProjectTests(unittest.TestCase):
         dependent = store.get_issue(13)
         self.assertIn("### Depends-on\n\n#12", dependent["body"])
         self.assertIn("phase:build", dependent["labels"])
+        self.assertIn(
+            "- [ ] A verified projection is returned or refusal is explicit",
+            store.get_issue(10)["body"])
         self.assertEqual(written, artifacts.verify(store, trigger, "v2", written.altitude))
+
+    def test_project_revision_updates_owner_signable_criteria_in_place(self):
+        store = FakeStore([project_issue()])
+        trigger = store.get_issue(10)
+        first = artifacts.write(store, trigger, "v2", project_output())
+        revised = project_output()
+        revised["acceptance_criteria"] = [
+            "At most five candidates are attempted",
+            "No unverified portfolio is returned",
+        ]
+
+        second = artifacts.write(store, trigger, "v3", revised)
+
+        self.assertEqual(first.project, second.project)
+        body = store.get_issue(10)["body"]
+        self.assertIn("- [ ] At most five candidates are attempted", body)
+        self.assertIn("- [ ] No unverified portfolio is returned", body)
+        self.assertNotIn("A verified projection is returned or refusal is explicit", body)
+
+    def test_empty_project_criteria_write_nothing(self):
+        store = FakeStore([project_issue()])
+        output = project_output()
+        output["acceptance_criteria"] = []
+        with self.assertRaisesRegex(artifacts.ArtifactError, "acceptance criteria"):
+            artifacts.write(store, store.get_issue(10), "v2", output)
+        self.assertEqual(1, len(store.issues))
+        self.assertEqual({}, store.comments)
+
+    def test_missing_project_criteria_section_writes_nothing(self):
+        issue = project_issue()
+        issue["body"] = re.sub(
+            r"### Falsifiable acceptance criteria\n\n.*?\n\n(?=### Stories)",
+            "", issue["body"], flags=re.S)
+        store = FakeStore([issue])
+        with self.assertRaisesRegex(artifacts.ArtifactError, "no writable acceptance"):
+            artifacts.write(store, store.get_issue(10), "v2", project_output())
+        self.assertEqual(1, len(store.issues))
+        self.assertEqual({}, store.comments)
 
     def test_project_replay_creates_no_duplicates(self):
         store = FakeStore([project_issue()])

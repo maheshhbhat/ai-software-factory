@@ -231,6 +231,16 @@ def write_project(store: Store, trigger: dict, key: str, output: dict) -> Writte
         raise ArtifactError("expected_bells must include plan approval and acceptance")
     if not isinstance(output["digest"], str) or not output["digest"].strip():
         raise ArtifactError("planning digest must be non-empty")
+    project_criteria = output["acceptance_criteria"]
+    if (not isinstance(project_criteria, list) or not project_criteria
+            or any(not isinstance(item, str) or not item.strip()
+                   for item in project_criteria)):
+        raise ArtifactError("project acceptance criteria must be non-empty strings")
+    initial_body = (store.get_issue(trigger["number"]).get("body") or "")
+    if not re.search(
+            r"### Falsifiable acceptance criteria\n\n.*?\n\n### Stories",
+            initial_body, flags=re.S):
+        raise ArtifactError("project issue has no writable acceptance criteria section")
     # Validate the complete envelope before the first durable write. Dependency
     # issue numbers are substituted later, but every semantic field is checked now.
     _adr_body(output["adr"])
@@ -259,6 +269,12 @@ def write_project(store: Store, trigger: dict, key: str, output: dict) -> Writte
 
     live = store.get_issue(trigger["number"])
     body = live.get("body") or ""
+    criteria_lines = "\n".join(f"- [ ] {item}" for item in project_criteria)
+    body, count = re.subn(
+        r"(### Falsifiable acceptance criteria\n\n).*?(\n\n### Stories)",
+        rf"\g<1>{criteria_lines}\2", body, count=1, flags=re.S)
+    if count != 1:
+        raise ArtifactError("project issue has no writable acceptance criteria section")
     story_lines = "\n".join(f"#{created[item]['number']}" for item in order)
     body, count = re.subn(r"(### Stories\n\n).*?(\n\n### Expected bells)",
                           rf"\g<1>{story_lines}\2", body, count=1, flags=re.S)
@@ -335,6 +351,9 @@ def verify(store: Store, trigger: dict, key: str,
         if not section_lines(story.get("body") or "", "Acceptance notes"):
             raise ArtifactError(f"story #{story['number']} acceptance criteria missing")
     project = store.get_issue(trigger["number"])
+    criteria = section_lines(project.get("body") or "", "Falsifiable acceptance criteria")
+    if not criteria or any(not item.startswith("- [ ] ") for item in criteria):
+        raise ArtifactError("project acceptance criteria do not conform")
     declared = section_lines(project.get("body") or "", "Stories")
     if set(declared) != {f"#{number}" for number in numbers}:
         raise ArtifactError("project story references do not match durable stories")

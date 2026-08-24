@@ -30,7 +30,7 @@ REQUIRED_INPUTS = ("trigger", "product", "adrs", "repository", "review_comments"
 
 CAMPAIGN_KEYS = frozenset({"altitude", "project", "rationale", "risks"})
 PROJECT_KEYS = frozenset({
-    "altitude", "adr", "stories", "expected_bells", "digest",
+    "altitude", "acceptance_criteria", "adr", "stories", "expected_bells", "digest",
 })
 
 CAMPAIGN_JSON_SCHEMA = {
@@ -55,6 +55,8 @@ PROJECT_JSON_SCHEMA = {
     "type": "object", "additionalProperties": False,
     "properties": {
         "altitude": {"const": "project"},
+        "acceptance_criteria": {"type": "array", "items": {"type": "string"},
+                                "minItems": 1},
         "adr": {"type": "object", "additionalProperties": False,
                 "properties": {key: ({"type": "string"} if key in
                                       {"title", "context", "decision"} else
@@ -79,7 +81,8 @@ PROJECT_JSON_SCHEMA = {
                          "acceptance_criteria", "scope", "spend_cap"]}},
         "expected_bells": {"type": "integer", "minimum": 2},
         "digest": {"type": "string"},
-    }, "required": ["altitude", "adr", "stories", "expected_bells", "digest"],
+    }, "required": ["altitude", "acceptance_criteria", "adr", "stories",
+                    "expected_bells", "digest"],
 }
 
 
