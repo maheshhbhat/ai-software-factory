@@ -14,6 +14,7 @@ import os
 import dispatcher
 import review_link
 import runlog
+import observability
 import workers
 from driver import engine, factory, poll
 from github_double import FakeGitHub, project, pull, story
@@ -72,7 +73,7 @@ class ExecutionObservability(Scenario):
         worker = engine(hub, posts=acknowledging(hub, 10), stdout="hello", stderr="noise")
 
         records = []
-        real_event = runlog.event
+        real_event = observability.process_event
 
         def capture(name, **fields):
             record = real_event(name, **fields)
@@ -80,7 +81,7 @@ class ExecutionObservability(Scenario):
             return record
 
         import unittest.mock as mock
-        with mock.patch.object(runlog, "event", capture):
+        with mock.patch.object(observability, "process_event", capture):
             poll(hub, worker)
 
         names = [record["event"] for record in records]

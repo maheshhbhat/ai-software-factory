@@ -57,6 +57,8 @@ import sys
 import time
 from datetime import datetime, timezone
 
+import observability
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 DEFAULT_LOG_PATH = os.path.join(HERE, "logs", "runtime.jsonl")
@@ -159,23 +161,15 @@ def _write(record: dict) -> None:
 
 
 def event(name: str, **fields) -> dict:
-    """Record one operational event. Returns the record, for tests only.
+    """Compatibility entrypoint while producers migrate to ``process_event``.
 
-    Callers must not branch on the return value: this function's contract is
-    that it always succeeds and always means nothing.
+    It writes only to the process stream; the former mixed runtime file is no
+    longer a destination. New production code must call the typed API directly.
     """
-    record = {"ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
-              "run": RUN_ID,
-              "event": name}
-    for key, value in fields.items():
-        if value is None:
-            continue
-        record[key] = redact(value) if isinstance(value, str) else value
     try:
-        _write(record)
-    except Exception:  # noqa: BLE001 — see the module docstring; logging never raises
-        pass
-    return record
+        return observability.process_event(name, **fields)
+    except Exception:  # noqa: BLE001 - compatibility logger is best-effort
+        return {"record_type": "process", "event": name, **fields}
 
 
 USAGE_EVENT = "engine.usage"
@@ -265,11 +259,14 @@ def engine_usage(*, story, engine, phase, output: str | None = None,
     is defaulted, guessed, or carried over from another invocation.
     """
     reported = parse_usage(output) if usage is None else usage
-    if reported is None:
-        return event(USAGE_EVENT, story=story, engine=engine, phase=phase,
-                     usage_reported=False, usage=USAGE_UNAVAILABLE, **fields)
-    return event(USAGE_EVENT, story=story, engine=engine, phase=phase,
-                 usage_reported=True, usage=dict(reported), **fields)
+    values = dict(metric=USAGE_EVENT, story=story, engine=engine, phase=phase,
+                  usage_reported=reported is not None,
+                  usage=(dict(reported) if reported is not None else USAGE_UNAVAILABLE),
+                  **fields)
+    try:
+        return observability.telemetry(values.pop("metric"), **values)
+    except Exception:  # noqa: BLE001 - usage logging cannot stop the engine
+        return {"record_type": "telemetry", **values, "metric": USAGE_EVENT}
 
 
 def command(parts, elide: str | None = None) -> str:

@@ -25,6 +25,7 @@ import unittest
 from unittest import mock
 
 import runlog
+import observability
 
 
 class LogToTemp(unittest.TestCase):
@@ -34,8 +35,8 @@ class LogToTemp(unittest.TestCase):
         self._env = dict(os.environ)
         self.dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.dir.cleanup)
-        self.path = os.path.join(self.dir.name, "runtime.jsonl")
-        os.environ["FACTORY_RUNTIME_LOG"] = self.path
+        os.environ["FACTORY_RUN_DIR"] = self.dir.name
+        self.path = str(observability.stream_path("process"))
         os.environ["FACTORY_RUNTIME_LOG_STDERR"] = "0"
 
     def tearDown(self):
@@ -43,10 +44,10 @@ class LogToTemp(unittest.TestCase):
         os.environ.update(self._env)
 
     def lines(self) -> list[dict]:
-        if not os.path.exists(self.path):
-            return []
-        with open(self.path, encoding="utf-8") as handle:
-            return [json.loads(line) for line in handle if line.strip()]
+        records = []
+        for kind in ("process", "telemetry"):
+            records.extend(observability.read_records(kind))
+        return sorted(records, key=lambda row: row["timestamp"])
 
 
 class TestRecordShape(LogToTemp):
@@ -62,8 +63,8 @@ class TestRecordShape(LogToTemp):
         """Events from the poller and from the bridge subprocess it launched
         must be stitchable back together after the fact."""
         record = runlog.event("process.started", pid=1234)
-        self.assertTrue(record["ts"].endswith("Z"))
-        self.assertEqual(runlog.RUN_ID, record["run"])
+        self.assertTrue(record["timestamp"].endswith("Z"))
+        self.assertEqual("process", record["record_type"])
 
     def test_absent_fields_are_omitted_not_nulled(self):
         """A PID the runtime could not observe must not be recorded as a PID."""
@@ -118,7 +119,7 @@ class TestOutputIsBounded(LogToTemp):
     def test_the_file_rotates_rather_than_growing_without_bound(self):
         """A long-running loop appending forever is a loop without a bound."""
         with open(self.path, "w", encoding="utf-8") as handle:
-            handle.write("x" * (runlog.MAX_LOG_BYTES + 1))
+            handle.write("x" * (observability.MAX_STREAM_BYTES + 1))
         runlog.event("process.started", pid=1)
         self.assertTrue(os.path.exists(self.path + ".1"))
         self.assertEqual(1, len(self.lines()))
@@ -126,7 +127,7 @@ class TestOutputIsBounded(LogToTemp):
 
 class TestLoggingNeverCosts(LogToTemp):
     def test_an_unwritable_log_does_not_raise(self):
-        os.environ["FACTORY_RUNTIME_LOG"] = "/proc/nonexistent/runtime.jsonl"
+        os.environ["FACTORY_RUN_DIR"] = "/proc/nonexistent"
         runlog.event("worker.launch.start", story=104)  # must not raise
 
     def test_a_serialisation_failure_does_not_raise(self):
@@ -193,7 +194,7 @@ class TestEngineUsageIsCapturedNotEstimated(LogToTemp):
                             output=json.dumps({"usage": {"output_tokens": 99}}))
         runlog.engine_usage(story=337, engine="codex", phase="worker", output="quiet")
         mine = [r for r in self.lines()
-                if r["event"] == runlog.USAGE_EVENT and r["story"] == 337]
+                if r["metric"] == runlog.USAGE_EVENT and r["story"] == 337]
         self.assertEqual(14, sum(r["usage"]["output_tokens"]
                                  for r in mine if r["usage_reported"]))
         self.assertEqual(1, len([r for r in mine if not r["usage_reported"]]))

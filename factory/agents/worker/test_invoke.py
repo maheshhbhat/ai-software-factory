@@ -305,7 +305,7 @@ class DeliveryHarness(unittest.TestCase):
         self.addCleanup(self.dir.cleanup)
         self.log = os.path.join(self.dir.name, "runtime.jsonl")
         self.session = dict(OPERATOR_SESSION,
-                            FACTORY_RUNTIME_LOG=self.log,
+                            FACTORY_RUN_DIR=self.dir.name,
                             FACTORY_RUNTIME_LOG_STDERR="0")
 
     def deliver(self, engine_output="", engine="claude"):
@@ -319,10 +319,9 @@ class DeliveryHarness(unittest.TestCase):
         return runner
 
     def records(self):
-        if not os.path.exists(self.log):
-            return []
-        with open(self.log, encoding="utf-8") as handle:
-            return [json.loads(line) for line in handle if line.strip()]
+        path=pathlib.Path(self.dir.name)/"telemetry.jsonl"
+        return ([json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+                if path.exists() else [])
 
 
 class EngineUsageTests(DeliveryHarness):
@@ -333,7 +332,7 @@ class EngineUsageTests(DeliveryHarness):
         self.deliver(engine_output=json.dumps(
             {"type": "result", "total_cost_usd": 0.37,
              "usage": {"input_tokens": 900, "output_tokens": 120}}))
-        usage = [r for r in self.records() if r["event"] == runlog.USAGE_EVENT]
+        usage = [r for r in self.records() if r["metric"] == runlog.USAGE_EVENT]
         self.assertEqual(1, len(usage))
         self.assertEqual(214, usage[0]["story"])
         self.assertEqual(325, usage[0]["project"])
@@ -345,7 +344,7 @@ class EngineUsageTests(DeliveryHarness):
 
     def test_a_silent_engine_is_recorded_as_having_reported_nothing(self):
         self.deliver(engine_output="delivered.")
-        usage = [r for r in self.records() if r["event"] == runlog.USAGE_EVENT]
+        usage = [r for r in self.records() if r["metric"] == runlog.USAGE_EVENT]
         self.assertEqual(1, len(usage))
         self.assertFalse(usage[0]["usage_reported"])
         self.assertEqual(runlog.USAGE_UNAVAILABLE, usage[0]["usage"])
@@ -354,7 +353,7 @@ class EngineUsageTests(DeliveryHarness):
         self.deliver(engine="codex", engine_output=json.dumps(
             {"type": "turn.completed", "usage": {"input_tokens": 11,
                                                     "output_tokens": 7}}))
-        usage = [r for r in self.records() if r["event"] == runlog.USAGE_EVENT]
+        usage = [r for r in self.records() if r["metric"] == runlog.USAGE_EVENT]
         self.assertEqual(1, len(usage))
         self.assertEqual("codex", usage[0]["engine"])
         self.assertEqual({"input_tokens": 11, "output_tokens": 7},
@@ -376,7 +375,7 @@ class EngineUsageTests(DeliveryHarness):
             with self.assertRaisesRegex(invoke.DeliveryError, "denied"):
                 invoke.launch_engine(["claude", "-p", "x"], cwd=pathlib.Path("."),
                                      timeout=1, env={}, story=214, runner=fail)
-        usage = [r for r in self.records() if r["event"] == runlog.USAGE_EVENT]
+        usage = [r for r in self.records() if r["metric"] == runlog.USAGE_EVENT]
         self.assertEqual([("failed", True, {"output_tokens": 7})],
                          [(r["launch"], r["usage_reported"], r["usage"])
                           for r in usage])
@@ -389,7 +388,7 @@ class EngineUsageTests(DeliveryHarness):
             with self.assertRaisesRegex(invoke.DeliveryError, "exhausted"):
                 invoke.launch_engine(["claude", "-p", "x"], cwd=pathlib.Path("."),
                                      timeout=1, env={}, story=214, runner=timeout)
-        usage = [r for r in self.records() if r["event"] == runlog.USAGE_EVENT]
+        usage = [r for r in self.records() if r["metric"] == runlog.USAGE_EVENT]
         self.assertEqual([{"output_tokens": 3}], [r["usage"] for r in usage])
 
 

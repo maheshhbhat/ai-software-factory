@@ -346,8 +346,9 @@ def evaluate_project(project: dict, comments: list[dict], standing=()) -> Outcom
                                f"{STANDING}; §4.1.1 permits one standing project at a "
                                "time, so this approval is refused, not applied")
             return Outcome(number, STANDING, Reason.CONTINUED,
-                           "owner plan approval of a standing project" + anchor)
-        return Outcome(number, ACTIVE, Reason.CONTINUED, "owner plan approval" + anchor)
+                           "owner plan approval of a standing project" + anchor, comment)
+        return Outcome(number, ACTIVE, Reason.CONTINUED,
+                       "owner plan approval" + anchor, comment)
 
     if verdict == "pass":
         return Outcome(number, ACCEPTED, Reason.CONTINUED,
@@ -365,6 +366,72 @@ def touchlog_path() -> pathlib.Path:
     configured = os.environ.get("FACTORY_TOUCHLOG_FILE", "").strip()
     return (pathlib.Path(configured) if configured else
             pathlib.Path(__file__).resolve().parents[1] / "touchlog" / "touchlog.jsonl")
+
+
+def approval_identity(comment: dict) -> str:
+    """Stable identity for one plan decision, independent of comment metadata."""
+    verdict, error = classify_approval(comment)
+    if error:
+        raise ValueError(error)
+    criteria = quoted_criteria(comment.get("body") or "")
+    payload = json.dumps({"decision": verdict, "criteria": normalize(criteria or "")},
+                         sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def ensure_plan_approval_touch(project: int, comment: dict, *, runner=subprocess.run) -> str:
+    """Durably append and read back one plan-approval receipt before consumption."""
+    fingerprint = approval_identity(comment)
+    fingerprint_marker = f"plan-approval-fingerprint:{fingerprint}"
+    receipt_marker = f"plan-approval-receipt:#{project}:{fingerprint}"
+    path = touchlog_path()
+
+    def records() -> list[dict]:
+        if not path.exists():
+            return []
+        try:
+            return [json.loads(line) for line in path.read_text().splitlines() if line]
+        except (OSError, json.JSONDecodeError) as exc:
+            raise TouchEvidenceError("canonical touch evidence is unreadable") from exc
+
+    found = [entry for entry in records()
+             if entry.get("project") == f"#{project}"
+             and entry.get("bell_type") == "plan-approval"
+             and fingerprint_marker in (entry.get("note") or "")]
+    if len(found) > 1:
+        raise TouchEvidenceError("duplicate canonical plan-approval evidence")
+    if found:
+        return fingerprint
+
+    body = comment.get("body") or ""
+    actor_match = ACTOR_RE.search(body)
+    actor = (actor_match.group("value") if actor_match else
+             ((comment.get("user") or {}).get("login") or "unknown"))
+    seconds_match = SECONDS_RE.search(body)
+    seconds = int(seconds_match.group("value")) if seconds_match else 0
+    note = (f"{receipt_marker}; {fingerprint_marker}; "
+            "GitHub plan-approval decision consumed")
+    if not seconds_match:
+        note += "; time unavailable, recorded as 0"
+    script = pathlib.Path(__file__).resolve().parents[1] / "touchlog" / "append.py"
+    command = [sys.executable, str(script), "--project", f"#{project}",
+               "--bell-type", "plan-approval", "--classification", "decision",
+               "--seconds-spent", str(seconds), "--actor", f"@{actor}",
+               "--note", note, "--file", str(path),
+               "--unique-note-marker", receipt_marker]
+    created = comment.get("created_at") or comment.get("createdAt")
+    if created:
+        command.extend(["--timestamp", created])
+    result = runner(command, capture_output=True, text=True)
+    if result.returncode:
+        raise TouchEvidenceError(
+            f"canonical plan-approval append failed: {(result.stderr or result.stdout)[:300]}")
+    verified = [entry for entry in records()
+                if entry.get("project") == f"#{project}"
+                and fingerprint_marker in (entry.get("note") or "")]
+    if len(verified) != 1:
+        raise TouchEvidenceError("canonical plan-approval evidence read-back failed")
+    return fingerprint
 
 
 def ensure_acceptance_touch(project: int, comment: dict, *, runner=subprocess.run) -> str:
@@ -595,7 +662,11 @@ def apply_outcome(repo: str, project: dict, outcome: Outcome, token: str) -> tup
 
     # Freshness precedes evidence so a losing stale pass cannot append a receipt
     # for a decision it never consumes. Evidence still precedes the state write.
-    if current == AWAITING_ACCEPTANCE:
+    if current == AWAITING_READY:
+        if outcome.decision is None:
+            raise TouchEvidenceError("plan-approval outcome has no authoritative decision")
+        ensure_plan_approval_touch(number, outcome.decision)
+    elif current == AWAITING_ACCEPTANCE:
         if outcome.decision is None:
             raise TouchEvidenceError("acceptance outcome has no authoritative decision")
         ensure_acceptance_touch(number, outcome.decision)

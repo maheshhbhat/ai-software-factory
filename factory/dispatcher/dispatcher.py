@@ -39,7 +39,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "gates"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "runtime"))
 import merge_gate  # noqa: E402  — single source of truth for the §9.6 Scope dialect
+import observability as obs  # noqa: E402
 
 WIP_LIMIT = 2                      # §9.10 — a contract value, not a runtime tweak
 ATTEMPT_MAX = 3                    # §4.3.5 — checked at dispatch time, before incrementing
@@ -564,7 +566,6 @@ def plan_dispatch(stories: dict, projects: dict, commitment: int,
 # GitHub I/O
 # --------------------------------------------------------------------------
 
-
 def _api(url: str, token: str, method: str = "GET", payload: dict | None = None):
     data = json.dumps(payload).encode() if payload is not None else None
     request = urllib.request.Request(url, data=data, method=method, headers={
@@ -724,6 +725,20 @@ def claim(repo: str, story: dict, token: str) -> tuple[bool, str]:
     _api(f"https://api.github.com/repos/{repo}/issues/{number}", token,
          method="PATCH", payload={"body": new_body, "labels": labels})
 
+    try:
+        timeline = fetch_timeline(repo, number, token)
+        attempt_trace = obs.story_trace_id(repo, number, timeline)
+        obs.process_event("story.claimed", trace_id=attempt_trace, repo=repo,
+                          story=number, attempt=attempt + 1,
+                          evidence={"timeline_created_at": max(
+                              item.get("created_at", "") for item in timeline
+                              if item.get("event") == "labeled" and
+                              (item.get("label") or {}).get("name") == CLAIMED)})
+    except Exception as log_error:  # noqa: BLE001 - claim already succeeded
+        obs.operational_log("ERROR", "claimed Story trace could not be read back",
+                            exc=log_error, component="dispatcher", operation="claim",
+                            repo=repo, story=number)
+
     return True, f"Attempt {attempt} -> {attempt + 1}; labels {' '.join(labels)}"
 
 
@@ -875,6 +890,8 @@ def guarded_main(argv: list[str]) -> int:
         raise
     except BaseException as exc:  # noqa: BLE001 - deliberately total
         import traceback
+        obs.operational_log("CRITICAL", "dispatcher failed closed", exc=exc,
+                            component="dispatcher", operation="dispatch")
         print(f"Dispatcher — FAIL: {type(exc).__name__}: {exc}")
         print("Nothing was dispatched. Fail closed.")
         traceback.print_exc(file=sys.stdout)

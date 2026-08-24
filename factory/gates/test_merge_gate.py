@@ -7,6 +7,7 @@ Run: python3 -m unittest discover -s factory/gates -p 'test_*.py' -v
 from __future__ import annotations
 
 import unittest
+from unittest import mock
 
 import merge_gate as mg
 from merge_gate import Violation as V
@@ -268,6 +269,15 @@ class TestFailClosed(unittest.TestCase):
         self.assertIn(V.INTERNAL_ERROR, output)
         self.assertIn("fails closed", output)
         self.assertNotIn("PASS", output)
+
+
+class TestTraceContinuity(unittest.TestCase):
+    def test_gate_derives_the_attempt_trace_from_the_durable_claim(self):
+        timeline=[{"event":"labeled","label":{"name":"story:claimed"},
+                   "created_at":"2026-01-01T00:00:00Z"}]
+        with mock.patch.object(mg,"_api",return_value=timeline):
+            value=mg.story_attempt_trace("owner/repo",42,"token")
+        self.assertEqual(mg.obs.trace_id("owner/repo",42,"2026-01-01T00:00:00Z"),value)
 
 
 if __name__ == "__main__":

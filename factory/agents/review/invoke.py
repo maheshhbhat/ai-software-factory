@@ -15,10 +15,13 @@ import tempfile
 import urllib.error
 import urllib.request
 
+DEFAULT_REVIEW_TIMEOUT = 60
+
 HERE = pathlib.Path(__file__).resolve().parent
 ROOT = HERE.parents[2]
 sys.path.insert(0, str(ROOT / "factory" / "runtime"))
 import review_route  # noqa: E402
+import observability as obs  # noqa: E402
 import runlog  # noqa: E402
 
 
@@ -112,7 +115,8 @@ def command(input_path: pathlib.Path, output_path: pathlib.Path) -> list[str]:
     # for JSON on stdout costs the review nothing and is what makes the
     # reviewer state its own usage. It grants no tool and changes no identity.
     return ["claude", "-p", payload, "--permission-mode", "acceptEdits",
-            "--allowedTools", "Write", "--disallowedTools", "Bash",
+            "--tools", "Write", "--allowedTools", "Write",
+            "--disallowedTools", "Bash,Agent",
             "--output-format", "json",
             "--safe-mode", "--no-session-persistence"]
 
@@ -154,7 +158,7 @@ def printed(value) -> str:
     return value or ""
 
 
-def run(cmd, *, cwd, timeout=3600, env=None):
+def run(cmd, *, cwd, timeout=DEFAULT_REVIEW_TIMEOUT, env=None):
     try:
         result = subprocess.run(cmd, cwd=cwd, env=env or clean_environment(), timeout=timeout,
                                 capture_output=True, text=True)
@@ -177,15 +181,21 @@ def launch_reviewer(cmd, *, cwd, timeout, env, story, pull_request):
     recorded as having reported none; no number is substituted for it.
     """
     engine = engine_name(cmd)
+    runlog.event("review.engine.started", story=story, pull_request=pull_request,
+                 engine=engine, timeout_seconds=timeout)
     try:
         result = run(cmd, cwd=cwd, timeout=timeout, env=env)
     except ReviewError as error:
+        runlog.event("review.engine.failed", story=story, pull_request=pull_request,
+                     engine=engine, detail=str(error))
         runlog.engine_usage(story=story, engine=engine, phase="review",
                             pull_request=pull_request, launch="failed",
                             output=error.output)
         raise
     # A launch that produced no stdout at all reported no usage — that is a
     # record saying so, never a zero standing in for a measurement.
+    runlog.event("review.engine.finished", story=story, pull_request=pull_request,
+                 engine=engine)
     runlog.engine_usage(story=story, engine=engine, phase="review",
                         pull_request=pull_request, launch="completed",
                         output=printed(getattr(result, "stdout", None)))
@@ -219,12 +229,16 @@ def parse_result(path: pathlib.Path, head: str) -> dict:
     return value
 
 
-def execute(repo: str, pull_number: int, token: str, *, client=None, timeout=3600):
+def execute(repo: str, pull_number: int, token: str, *, client=None,
+            timeout=DEFAULT_REVIEW_TIMEOUT):
     client = client or GitHub(repo, token)
+    runlog.event("review.preparing", repo=repo, pull_request=pull_number)
     client.api("")
     pull = client.api(f"/pulls/{pull_number}")
     story_number = review_route.story_number(pull)
     story = client.api(f"/issues/{story_number}")
+    timeline = client.pages(f"/issues/{story_number}/timeline")
+    review_trace = obs.story_trace_id(repo, story_number, timeline)
     comments = client.pages(f"/issues/{story_number}/comments")
     target = review_route.target(pull, story, comments)
     if target is None:
@@ -248,16 +262,24 @@ def execute(repo: str, pull_number: int, token: str, *, client=None, timeout=360
                         "body": x.get("body")} for x in adrs]}
     with tempfile.TemporaryDirectory(prefix=f"factory-review-{pull_number}-{target.head[:8]}-") as temp:
         workspace = pathlib.Path(temp)
+        obs.process_event("review.clone.started", trace_id=review_trace, repo=repo,
+                          story=story_number, project=project_number,
+                          pull_request=pull_number, head=target.head)
         clone_env = clean_environment()
         clone_env.update({"GIT_CONFIG_COUNT": "1",
                           "GIT_CONFIG_KEY_0": "http.extraHeader",
                           "GIT_CONFIG_VALUE_0": git_auth_header(token)})
-        subprocess.run(["git", "clone", "--quiet", f"https://github.com/{repo}.git", "repo"],
-                       cwd=workspace, env=clone_env, check=True,
-                       capture_output=True, text=True, timeout=timeout)
-        subprocess.run(["git", "checkout", "--quiet", target.head], cwd=workspace / "repo",
-                       env=clean_environment(), check=True, capture_output=True,
-                       text=True, timeout=timeout)
+        with obs.Activity("independent-review", "clone", "cloning",
+                          trace_id=review_trace, repo=repo, story=story_number,
+                          project=project_number, pull_request=pull_number):
+            subprocess.run(["git", "clone", "--quiet", f"https://github.com/{repo}.git", "repo"],
+                           cwd=workspace, env=clone_env, check=True,
+                           capture_output=True, text=True, timeout=timeout)
+            subprocess.run(["git", "checkout", "--quiet", target.head], cwd=workspace / "repo",
+                           env=clean_environment(), check=True, capture_output=True,
+                           text=True, timeout=timeout)
+        runlog.event("review.clone.finished", story=story_number,
+                     pull_request=pull_number, head=target.head)
         input_path = workspace / "input.json"
         staging_path = staging_outcome_path(workspace)
         output_path = outcome_path(workspace)
@@ -267,12 +289,18 @@ def execute(repo: str, pull_number: int, token: str, *, client=None, timeout=360
         # credential that could not be assembled is not recorded as an engine
         # invocation that happened.
         reviewer_env = review_environment(workspace / "reviewer-home")
-        launch_reviewer(command(input_path, staging_path), cwd=workspace / "repo",
-                        timeout=timeout, env=reviewer_env, story=story_number,
-                        pull_request=pull_number)
+        with obs.Activity("independent-review", "engine", "reviewing",
+                          trace_id=review_trace, repo=repo, story=story_number,
+                          project=project_number, pull_request=pull_number):
+            launch_reviewer(command(input_path, staging_path), cwd=workspace / "repo",
+                            timeout=timeout, env=reviewer_env, story=story_number,
+                            pull_request=pull_number)
         finalize_outcome(staging_path, output_path)
         result = parse_result(output_path, target.head)
 
+    runlog.event("review.publishing", story=story_number,
+                 pull_request=pull_number, head=target.head,
+                 verdict=result["verdict"])
     fresh = client.api(f"/pulls/{pull_number}")
     if (fresh.get("head") or {}).get("sha") != target.head:
         raise ReviewError("stale-head result refused")
@@ -300,6 +328,13 @@ def execute(repo: str, pull_number: int, token: str, *, client=None, timeout=360
                                     pull_number, target.head)
     if durable != [result["verdict"]]:
         raise ReviewError("durable review read-back failed")
+    runlog.event("review.published", story=story_number,
+                 pull_request=pull_number, head=target.head,
+                 verdict=result["verdict"])
+    obs.process_event("review.outcome.published", trace_id=review_trace, repo=repo,
+                      story=story_number, project=project_number,
+                      pull_request=pull_number, head=target.head,
+                      verdict=result["verdict"])
     return {"status": result["verdict"], "pull_request": pull_number, "head": target.head}
 
 
@@ -307,7 +342,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", required=True)
     parser.add_argument("--pull-request", required=True, type=int)
-    parser.add_argument("--timeout", type=int, default=3600)
+    parser.add_argument("--timeout", type=int, default=DEFAULT_REVIEW_TIMEOUT)
     args = parser.parse_args(argv)
     token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
     if not token:
@@ -318,6 +353,9 @@ def main(argv=None):
                          sort_keys=True))
         return 0
     except Exception as exc:
+        obs.operational_log("ERROR", "independent review failed", exc=exc,
+                            component="independent-review", operation="review",
+                            repo=args.repo, pull_request=args.pull_request)
         print(f"review failed: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
 

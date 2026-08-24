@@ -40,7 +40,11 @@ if [ -z "$FACTORY_REPO" ]; then
   FACTORY_REPO="maheshhbhat/ai-software-factory"
 fi
 if [ -z "$FACTORY_COMMITMENT" ]; then
-  FACTORY_COMMITMENT="54"
+  echo "poll.sh: refusing to poll: FACTORY_COMMITMENT is required." >&2
+  echo "  Supply the roadmap commitment that authorizes this run." >&2
+  echo "  There is deliberately no factory-development default: the factory" >&2
+  echo "  must never select its own implementation work by accident." >&2
+  exit 2
 fi
 export FACTORY_REPO FACTORY_COMMITMENT
 

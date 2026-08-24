@@ -65,6 +65,7 @@ ROOT = HERE.parents[2]
 sys.path.insert(0, str(ROOT / "factory" / "gates"))
 sys.path.insert(0, str(ROOT / "factory" / "runtime"))
 import merge_gate  # noqa: E402
+import observability as obs  # noqa: E402
 import runlog  # noqa: E402
 
 DEFAULT_TIMEOUT = 3600
@@ -453,6 +454,7 @@ def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
         raise DeliveryError("effective timeout and spend bounds must be positive")
     events = client.pages(f"/issues/{story_number}/timeline")
     version = state_version(events)
+    delivery_trace = obs.story_trace_id(repo, story_number, events)
     durable = marker(story_number, version)
     pulls = linked_prs(story_number, client.pull_requests())
     if pulls and durable in (pulls[0].get("body") or ""):
@@ -481,10 +483,14 @@ def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
                 input_file = handle.name
             try:
                 command = model_command(input_file, bounds, engine)
-                launch_engine(command, cwd=worktree, timeout=bounds.timeout,
-                              env=clean_environment(engine_name(command)),
-                              story=story_number, project=project_number,
-                              runner=runner)
+                with obs.Activity("delivery-worker", "engine", "executing",
+                                  trace_id=delivery_trace, repo=repo,
+                                  story=story_number, project=project_number,
+                                  engine=engine_name(command)):
+                    launch_engine(command, cwd=worktree, timeout=bounds.timeout,
+                                  env=clean_environment(engine_name(command)),
+                                  story=story_number, project=project_number,
+                                  runner=runner)
             finally:
                 pathlib.Path(input_file).unlink(missing_ok=True)
             paths = changed_paths(worktree, f"origin/{default}", runner=runner)
@@ -499,8 +505,11 @@ def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
                 str(HERE / "test_repo.sh")).strip()
             # Not an engine: the delivered change's own tests have nothing to
             # log in to, so they run without any credential.
-            run(shlex.split(tests), cwd=worktree, timeout=bounds.timeout,
-                env=tool_environment(), runner=runner)
+            with obs.Activity("delivery-worker", "tests", "running",
+                              trace_id=delivery_trace, repo=repo,
+                              story=story_number, project=project_number):
+                run(shlex.split(tests), cwd=worktree, timeout=bounds.timeout,
+                    env=tool_environment(), runner=runner)
             git(["add", "--", *paths], worktree, runner=runner)
             git(["commit", "-m", f"Deliver Story #{story_number}"], worktree,
                 runner=runner)
@@ -518,6 +527,9 @@ def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
         pull = client.create_pr(f"Story #{story_number}: bounded delivery",
                                 branch, default, body)
     fresh = read_back_pr(client, story_number, durable)
+    obs.process_event("delivery.pull-request.written", trace_id=delivery_trace,
+                      repo=repo, story=story_number, project=project_number,
+                      pull_request=fresh["number"], head=head)
     return Delivery(story_number, project_number, branch, fresh["number"], head, False)
 
 
@@ -540,6 +552,9 @@ def main(argv=None) -> int:
                          timeout=args.timeout, max_usd=args.max_usd,
                          engine=args.engine)
     except Exception as exc:
+        obs.operational_log("ERROR", "delivery worker failed", exc=exc,
+                            component="delivery-worker", operation="delivery",
+                            repo=args.repo, story=args.story)
         print(f"delivery failed: {type(exc).__name__}: {exc}", file=sys.stderr)
         # The engine's own account, when one exists, travels with the failure:
         # the launcher records this stream on worker.launch.end, which is where
