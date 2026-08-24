@@ -297,7 +297,7 @@ def verify(store: Store, trigger: dict, key: str,
         stories = section_lines(project.get("body") or "", "Stories")
         planning = {"type:project", "project:planning"} <= labels
         already_expanded = ({"type:project", "project:awaiting-ready"} <= labels
-                            and stories != ["_No response_"])
+                            and bool(stories) and stories != ["_No response_"])
         if not (planning or already_expanded):
             raise ArtifactError("campaign project labels do not match contract")
         return WrittenPlan(altitude, project["number"], None, ())

@@ -150,6 +150,19 @@ class CampaignTests(unittest.TestCase):
         self.assertIn("project:awaiting-ready", store.get_issue(first.project)["labels"])
         self.assertNotIn("project:planning", store.get_issue(first.project)["labels"])
 
+    def test_campaign_readback_rejects_ready_project_without_stories_section(self):
+        store = FakeStore([{"number": 1, "labels": ["type:roadmap-commitment"], "body": ""}])
+        trigger = store.get_issue(1)
+        first = artifacts.write(store, trigger, "v1", campaign_output())
+        project = store.get_issue(first.project)
+        project["body"] = project["body"].replace(
+            "### Stories\n\n_No response_\n\n", "")
+        store.update_issue(first.project, project["body"])
+        store.update_labels(first.project, ["type:project", "project:awaiting-ready"])
+
+        with self.assertRaisesRegex(artifacts.ArtifactError, "labels do not match"):
+            artifacts.verify(store, trigger, "v1", contract.Altitude.CAMPAIGN)
+
 
 class ProjectTests(unittest.TestCase):
     def test_project_writes_adr_stories_dependencies_and_digest(self):
