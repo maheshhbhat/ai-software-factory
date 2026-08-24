@@ -51,6 +51,7 @@ import os
 import pathlib
 import re
 import shlex
+import stat
 import subprocess
 import sys
 import tempfile
@@ -86,6 +87,54 @@ class DeliveryError(RuntimeError):
     def __init__(self, message: str, output: str = ""):
         super().__init__(message)
         self.output = output
+
+
+def platform_diagnostics(checkout: pathlib.Path) -> dict:
+    """Return non-sensitive facts that explain local filesystem failures.
+
+    ``os.access`` reports permission-bit access.  When it says writable but the
+    real Git operation returns ``EPERM``, the useful conclusion is that an
+    external policy (for example a process sandbox) denied the operation.
+    """
+    checkout = checkout.absolute()
+    git_dir = checkout / ".git"
+    resolution_error = None
+    try:
+        if git_dir.is_file():
+            marker = git_dir.read_text(errors="replace").strip()
+            if marker.startswith("gitdir:"):
+                candidate = pathlib.Path(marker.removeprefix("gitdir:").strip())
+                git_dir = candidate if candidate.is_absolute() else checkout / candidate
+        git_dir = git_dir.resolve()
+    except OSError as exc:
+        resolution_error = f"{type(exc).__name__}: {exc}"
+
+    def describe(path: pathlib.Path) -> dict:
+        try:
+            metadata = path.stat()
+        except OSError as exc:
+            return {"path": str(path), "stat_error": f"{type(exc).__name__}: {exc}"}
+        return {
+            "path": str(path),
+            "mode": oct(stat.S_IMODE(metadata.st_mode)),
+            "uid": metadata.st_uid,
+            "gid": metadata.st_gid,
+            "writable_by_access_check": os.access(path, os.W_OK),
+        }
+
+    result = {
+        "platform": sys.platform,
+        "effective_uid": os.geteuid() if hasattr(os, "geteuid") else None,
+        "effective_gid": os.getegid() if hasattr(os, "getegid") else None,
+        "git_dir": describe(git_dir),
+        "git_worktrees_dir": describe(git_dir / "worktrees"),
+        "sandbox_marker_names": sorted(
+            name for name in os.environ
+            if "SANDBOX" in name.upper() or name.upper().startswith("CODEX_")),
+    }
+    if resolution_error:
+        result["git_dir_resolution_error"] = resolution_error
+    return result
 
 
 @dataclass(frozen=True)
@@ -554,7 +603,9 @@ def main(argv=None) -> int:
     except Exception as exc:
         obs.operational_log("ERROR", "delivery worker failed", exc=exc,
                             component="delivery-worker", operation="delivery",
-                            repo=args.repo, story=args.story)
+                            repo=args.repo, story=args.story,
+                            platform_diagnostics=platform_diagnostics(
+                                pathlib.Path(args.checkout)))
         print(f"delivery failed: {type(exc).__name__}: {exc}", file=sys.stderr)
         # The engine's own account, when one exists, travels with the failure:
         # the launcher records this stream on worker.launch.end, which is where

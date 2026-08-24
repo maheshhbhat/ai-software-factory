@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Read-only readiness doctor for the real two-Story factory UAT.
+"""Readiness doctor for the real two-Story factory UAT.
 
 This command may read GitHub, inspect local processes, and run ``poll.sh`` with
-``--dry-run``.  It never creates, edits, labels, comments on, or closes a GitHub
-artifact, never pushes, and never invokes a model for delivery or review.
+``--dry-run``.  It also creates and removes one temporary detached Git worktree
+to prove that the production worker can initialize its checkout.  It never
+creates, edits, labels, comments on, or closes a GitHub artifact, never pushes,
+and never invokes a model for delivery or review.
 """
 
 from __future__ import annotations
@@ -80,6 +82,26 @@ class Doctor:
         free = shutil.disk_usage(ROOT).free
         self.record("free disk", free >= 1024 ** 3,
                     f"{free // (1024 ** 2)} MiB available")
+
+    def worktree(self):
+        """Exercise the production worker's first mutating Git operation."""
+        with tempfile.TemporaryDirectory(prefix="factory-doctor-worktree-") as directory:
+            add = self.command(
+                ["git", "worktree", "add", "--detach", directory, "HEAD"],
+                timeout=60)
+            if add.returncode != 0:
+                detail = (add.stderr or add.stdout).strip()[-400:] or f"exit {add.returncode}"
+                self.record("worker worktree creation", False, detail)
+                return
+            remove = self.command(
+                ["git", "worktree", "remove", "--force", directory], timeout=60)
+            if remove.returncode != 0:
+                detail = (remove.stderr or remove.stdout).strip()[-400:] or f"exit {remove.returncode}"
+                self.record("worker worktree creation", False,
+                            "created, but cleanup failed: " + detail)
+                return
+            self.record("worker worktree creation", True,
+                        "temporary detached worktree created and removed")
 
     def substitutions(self):
         present = sorted(name for name, value in self.env.items() if value and
@@ -263,7 +285,7 @@ class Doctor:
                     else (result.stderr or result.stdout).strip()[-400:])
 
     def run(self) -> list[Check]:
-        self.local(); self.substitutions(); self.credentials(); self.github()
+        self.local(); self.worktree(); self.substitutions(); self.credentials(); self.github()
         self.configuration(); self.observability(); self.dry_run()
         return self.checks
 

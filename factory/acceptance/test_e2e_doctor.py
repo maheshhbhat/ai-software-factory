@@ -110,6 +110,30 @@ class GitHubChecks(unittest.TestCase):
 
 
 class LocalChecks(unittest.TestCase):
+    def test_worktree_creation_failure_blocks_readiness(self):
+        def respond(args, **_):
+            if args[:4] == ["git", "worktree", "add", "--detach"]:
+                return completed(args, code=128,
+                                 stderr="fatal: cannot create .git/worktrees: Operation not permitted")
+            self.fail(f"unexpected command: {args}")
+
+        value = doctor.Doctor("owner/repo", 400, environ={"PATH": "/bin"},
+                              runner=respond)
+        value.worktree()
+        self.assertFalse(value.checks[-1].passed)
+        self.assertIn("Operation not permitted", value.checks[-1].detail)
+
+    def test_worktree_probe_removes_successful_probe(self):
+        runner = RecordingRunner()
+        value = doctor.Doctor("owner/repo", 400, environ={"PATH": "/bin"},
+                              runner=runner)
+        value.worktree()
+        self.assertTrue(value.checks[-1].passed)
+        commands = [call[0] for call in runner.calls]
+        self.assertEqual(["git", "worktree", "add", "--detach"], commands[0][:4])
+        self.assertEqual(["git", "worktree", "remove", "--force"], commands[1][:4])
+        self.assertEqual(commands[0][4], commands[1][4])
+
     def test_substitution_overrides_block_readiness(self):
         value=doctor.Doctor("owner/repo",400,
                             environ={"FACTORY_DELIVERY_MODEL_CMD":"fake"})
