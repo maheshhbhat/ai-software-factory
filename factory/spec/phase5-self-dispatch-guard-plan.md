@@ -42,6 +42,8 @@ paths as factory implementation:
 
 - `factory/**`
 - `poll.sh`
+- `approve-plan.sh`
+- `live-e2e.sh`
 - `.github/**`
 - `AGENTS.md`
 - `CLAUDE.md`
@@ -50,9 +52,11 @@ paths as factory implementation:
 A mixed scope containing product and protected paths is protected in full. A
 Story cannot make self-modification acceptable by adding one product path.
 
-The list is deliberately narrow and repository-specific. It protects the
-factory runtime, prompts, rules and CI controls without pretending every root
-file is factory implementation.
+The list is deliberately narrow and repository-specific. The repository has
+exactly three executable root scripts: `poll.sh`, `approve-plan.sh`, and
+`live-e2e.sh`; all three are protected explicitly. The remaining patterns
+protect the factory runtime, prompts, rules and CI controls without pretending
+every root file is factory implementation.
 
 ## Enforcement
 
@@ -83,19 +87,12 @@ closed at the final boundary.
 All three enforcement points use one shared protected-path classifier. Three
 independent copies would drift.
 
-## Backlog treatment
+## Explicitly out of scope
 
-Open work is reported in plain language as one of:
-
-- factory implementation — never dispatch;
-- non-dispatchable scope record — no lifecycle label and never dispatch;
-- product or disposable product-like UAT delivery — may dispatch when normally
-  authorized; or
-- blocked historical work — visible, but not dispatchable until its normal
-  dependencies and the self-dispatch rule permit it.
-
-The implementation does not rewrite historical lifecycle labels to create a
-green test. Existing artifacts remain evidence of what happened.
+This correction does not add a backlog classification system, new lifecycle
+state, new governance framework, or historical-label migration. Existing
+artifacts remain evidence of what happened. The guard decides from the Story's
+already-required scope and the existing automated worker marker.
 
 ## UAT isolation remains separate
 
@@ -117,6 +114,8 @@ integrations.
 Tests must prove:
 
 - a ready Story scoped only to a protected path is rejected before claim;
+- `approve-plan.sh`, `live-e2e.sh`, and `poll.sh` are each rejected at the
+  dispatcher, worker invocation, and automated-worker merge boundaries;
 - a mixed product/protected scope is rejected in full;
 - a normal product scope remains eligible;
 - the disposable `runs/rung1/live_product/**` scope remains eligible;
