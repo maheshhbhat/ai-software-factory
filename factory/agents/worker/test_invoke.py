@@ -1,3 +1,4 @@
+import contextlib
 import json
 import os
 import pathlib
@@ -354,6 +355,44 @@ class FactorySelfModificationTests(unittest.TestCase):
                 ))
 
 
+class ProductCheckoutTests(unittest.TestCase):
+    def test_matching_checkout_is_reused_without_clone(self):
+        calls = []
+        def runner(cmd, **kwargs):
+            calls.append(cmd)
+            return subprocess.CompletedProcess(
+                cmd, 0, "git@github.com:owner/product.git\n", "")
+        with invoke.checkout_for_repo(
+                "owner/product", pathlib.Path("/configured"), runner=runner) as checkout:
+            self.assertEqual(pathlib.Path("/configured"), checkout)
+        self.assertFalse(any(call[:3] == ["gh", "repo", "clone"] for call in calls))
+
+    def test_mismatched_checkout_clones_requested_product_without_secret_argument(self):
+        calls = []
+        def runner(cmd, **kwargs):
+            calls.append(cmd)
+            stdout = "git@github.com:owner/factory.git\n" if cmd[:3] == [
+                "git", "remote", "get-url"] else ""
+            return subprocess.CompletedProcess(cmd, 0, stdout, "")
+        with mock.patch.dict(invoke.os.environ, {"GH_TOKEN": "secret-token"}), \
+             invoke.checkout_for_repo(
+                 "owner/product", pathlib.Path("/factory"), runner=runner) as checkout:
+            self.assertEqual("repository", checkout.name)
+        clone = next(call for call in calls if call[:3] == ["gh", "repo", "clone"])
+        self.assertEqual("owner/product", clone[3])
+        self.assertNotIn("secret-token", " ".join(clone))
+
+    def test_clone_failure_is_named(self):
+        def runner(cmd, **kwargs):
+            if cmd[:3] == ["git", "remote", "get-url"]:
+                return subprocess.CompletedProcess(cmd, 0, "git@github.com:o/factory.git\n", "")
+            return subprocess.CompletedProcess(cmd, 1, "", "clone denied")
+        with self.assertRaisesRegex(invoke.DeliveryError, "clone denied"):
+            with invoke.checkout_for_repo(
+                    "o/product", pathlib.Path("/factory"), runner=runner):
+                pass
+
+
 class EngineUsageTests(DeliveryHarness):
     """Project #322 criterion 5: what the engine spent has to be captured while
     the story runs, because it cannot be recovered afterwards."""
@@ -496,6 +535,9 @@ class EngineExplanationTests(unittest.TestCase):
         error = invoke.DeliveryError("boom", "the engine said: cannot write")
         buffer = io.StringIO()
         with mock.patch.object(invoke, "execute", side_effect=error), \
+             mock.patch.object(
+                 invoke, "checkout_for_repo",
+                 return_value=contextlib.nullcontext(pathlib.Path("."))), \
              mock.patch.dict(invoke.os.environ, {"GH_TOKEN": "t"}), \
              mock.patch.object(invoke.sys, "stderr", buffer):
             code = invoke.main(["--repo", "o/r", "--story", "1"])
