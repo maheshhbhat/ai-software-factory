@@ -174,6 +174,29 @@ class GitHubChecks(unittest.TestCase):
 
 
 class LocalChecks(unittest.TestCase):
+    def test_real_configured_worker_must_start_and_answer(self):
+        def respond(args, **_):
+            self.assertEqual(["codex", "exec"], args[:2])
+            self.assertIn("read-only", args)
+            return completed(args, stdout=(
+                '{"type":"item.completed","item":{"text":'
+                '"FACTORY_WORKER_READY"}}\n'))
+        value = doctor.Doctor(
+            "owner/repo", 400, commitment=384, target="product.js",
+            environ={"PATH": "/bin", "FACTORY_WORKER_ORDER": "codex-delivery"},
+            runner=respond)
+        value.worker_engine_start()
+        self.assertTrue(value.checks[-1].passed)
+        self.assertIn("real codex worker", value.checks[-1].detail)
+
+    def test_login_metadata_does_not_hide_worker_start_failure(self):
+        runner = RecordingRunner()
+        value = doctor.Doctor(
+            "owner/repo", 400, commitment=384, target="product.js",
+            environ={"PATH": "/bin"}, runner=runner)
+        value.worker_engine_start()
+        self.assertFalse(value.checks[-1].passed)
+
     def test_worktree_creation_failure_blocks_readiness(self):
         def respond(args, **_):
             if args[:4] == ["git", "worktree", "add", "--detach"]:

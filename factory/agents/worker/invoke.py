@@ -45,6 +45,7 @@ engine exits and refuses the delivery if anything falls outside it.
 from __future__ import annotations
 
 import argparse
+import collections
 import contextlib
 import hashlib
 import json
@@ -56,6 +57,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -376,11 +378,10 @@ def model_command(input_file: str, bounds: Bounds,
     # engine to change files, and `execute()` enforces the Story's Scope on
     # what it changed afterwards. See the module docstring.
     #
-    # `--output-format json` is what makes the engine state its own usage on
-    # stdout. Without it the engine prints prose, the usage record for every
-    # delivery reads "unavailable", and cost per story stays unmeasurable.
+    # stream-json exposes the engine lifecycle while preserving its usage.
     return ["claude", "-p", payload, "--max-budget-usd", str(bounds.max_usd),
-            "--permission-mode", "acceptEdits", "--output-format", "json",
+            "--permission-mode", "acceptEdits", "--output-format", "stream-json",
+            "--verbose",
             "--no-session-persistence"]
 
 
@@ -423,6 +424,50 @@ def run(cmd: list[str], *, cwd: pathlib.Path, timeout: int, env=None,
     return result
 
 
+def run_engine_streamed(cmd: list[str], *, cwd: pathlib.Path, timeout: int,
+                        env, story: int, project: int | None) -> subprocess.CompletedProcess:
+    """Stream bounded, redacted engine output while retaining usage evidence."""
+    process = subprocess.Popen(
+        cmd, cwd=str(cwd), env=env, stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, text=True, start_new_session=True, bufsize=1)
+    captured = {"stdout": collections.deque(maxlen=2000),
+                "stderr": collections.deque(maxlen=2000)}
+
+    def consume(name: str, stream) -> None:
+        for line in iter(stream.readline, ""):
+            captured[name].append(line)
+            obs.operational_log(
+                "INFO", "engine output", component="delivery-worker",
+                operation="engine-stream", stage="running", story=story,
+                project=project, engine=engine_name(cmd), stream=name,
+                engine_output_tail=runlog.tail(line.rstrip()))
+        stream.close()
+
+    threads = [threading.Thread(target=consume, args=(name, stream), daemon=True)
+               for name, stream in (("stdout", process.stdout),
+                                    ("stderr", process.stderr))]
+    for thread in threads:
+        thread.start()
+    try:
+        returncode = process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        process.kill()
+        process.wait()
+        for thread in threads:
+            thread.join(timeout=1)
+        stdout = "".join(captured["stdout"])
+        stderr = "".join(captured["stderr"])
+        detail = f"bounded execution exhausted after {timeout}s"
+        if stderr:
+            detail += f"; stderr tail: {runlog.tail(stderr)}"
+        raise DeliveryError(detail, stdout) from exc
+    for thread in threads:
+        thread.join(timeout=1)
+    return subprocess.CompletedProcess(
+        cmd, returncode, "".join(captured["stdout"]),
+        "".join(captured["stderr"]))
+
+
 def launch_engine(cmd: list[str], *, cwd: pathlib.Path, timeout: int, env,
                   story: int, project: int | None = None,
                   runner=subprocess.run) -> subprocess.CompletedProcess:
@@ -434,7 +479,18 @@ def launch_engine(cmd: list[str], *, cwd: pathlib.Path, timeout: int, env,
     """
     engine = engine_name(cmd)
     try:
-        result = run(cmd, cwd=cwd, timeout=timeout, env=env, runner=runner)
+        if runner is subprocess.run:
+            result = run_engine_streamed(
+                cmd, cwd=cwd, timeout=timeout, env=env,
+                story=story, project=project)
+            if result.returncode:
+                raise DeliveryError(
+                    f"command failed ({result.returncode})"
+                    f"; stderr tail: {runlog.tail(result.stderr)}"
+                    f"; stdout tail: {runlog.tail(result.stdout)}",
+                    printed(result.stdout))
+        else:
+            result = run(cmd, cwd=cwd, timeout=timeout, env=env, runner=runner)
     except DeliveryError as error:
         runlog.engine_usage(story=story, project=project, engine=engine,
                             phase="worker", launch="failed", output=error.output)
@@ -498,6 +554,25 @@ def changed_paths(worktree: pathlib.Path, base: str,
                   runner=runner).stdout.splitlines()
     paths = tracked + [line[3:] for line in pending if len(line) > 3]
     return sorted(set(path for path in paths if path))
+
+
+def repository_test_command(worktree: pathlib.Path) -> list[str]:
+    """Resolve validation from the product checkout, never from the factory."""
+    override = os.environ.get("FACTORY_DELIVERY_TEST_CMD", "").strip()
+    if override:
+        return shlex.split(override)
+    package = worktree / "package.json"
+    if package.is_file():
+        try:
+            manifest = json.loads(package.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise DeliveryError(f"invalid product package.json: {exc}") from exc
+        if ((manifest.get("scripts") or {}).get("test") or "").strip():
+            return ["npm", "test"]
+    factory_tests = worktree / "factory" / "agents" / "worker" / "test_repo.sh"
+    if factory_tests.is_file():
+        return [str(factory_tests)]
+    raise DeliveryError("repository declares no supported test command")
 
 
 def build_input(client: GitHub, story: dict, project: dict) -> dict:
@@ -593,15 +668,13 @@ def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
             if outside:
                 raise DeliveryError("worker changed paths outside Story scope: " +
                                     ", ".join(outside))
-            tests = os.environ.get(
-                "FACTORY_DELIVERY_TEST_CMD",
-                str(HERE / "test_repo.sh")).strip()
+            tests = repository_test_command(worktree)
             # Not an engine: the delivered change's own tests have nothing to
             # log in to, so they run without any credential.
             with obs.Activity("delivery-worker", "tests", "running",
                               trace_id=delivery_trace, repo=repo,
                               story=story_number, project=project_number):
-                run(shlex.split(tests), cwd=worktree, timeout=bounds.timeout,
+                run(tests, cwd=worktree, timeout=bounds.timeout,
                     env=tool_environment(), runner=runner)
             git(["add", "--", *paths], worktree, runner=runner)
             git(["commit", "-m", f"Deliver Story #{story_number}"], worktree,

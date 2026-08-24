@@ -2,10 +2,10 @@
 """Readiness doctor for the real two-Story factory UAT.
 
 This command may read GitHub, inspect local processes, and run ``poll.sh`` with
-``--dry-run``.  It also creates and removes one temporary detached Git worktree
-to prove that the production worker can initialize its checkout.  It never
-creates, edits, labels, comments on, or closes a GitHub artifact, never pushes,
-and never invokes a model for delivery or review.
+``--dry-run``.  It creates and removes one temporary detached Git worktree and
+starts the configured real worker engine with a harmless read-only prompt.
+It never creates, edits, labels, comments on, or closes a GitHub artifact and
+never pushes.
 """
 
 from __future__ import annotations
@@ -34,6 +34,7 @@ FORBIDDEN_EXACT = {
     "FACTORY_WORKER_CMD", "FACTORY_REVIEW_CMD",
 }
 FORBIDDEN_PREFIXES = ("FACTORY_WORKER_",)
+ALLOWED_WORKER_CONFIGURATION = {"FACTORY_WORKER_ORDER"}
 MUTATING_WORDS = ("mutation", "createIssue", "updateIssue", "addComment",
                   "--claim", "issue edit", "issue comment", "pr merge", "git push")
 WIP_RE = re.compile(r"\bWIP\s+(\d+)/(\d+)\b")
@@ -60,11 +61,11 @@ class Doctor:
         self.checks.append(Check(name, passed, detail))
         return passed
 
-    def command(self, args: list[str], *, timeout=30, env=None):
+    def command(self, args: list[str], *, timeout=30, env=None, cwd=ROOT):
         rendered = " ".join(args)
         if any(word in rendered for word in MUTATING_WORDS):
             raise RuntimeError(f"doctor refused mutating command: {rendered}")
-        return self.runner(args, cwd=ROOT, env=env or self.env,
+        return self.runner(args, cwd=cwd, env=env or self.env,
                            capture_output=True, text=True, timeout=timeout)
 
     def local(self):
@@ -107,6 +108,7 @@ class Doctor:
 
     def substitutions(self):
         present = sorted(name for name, value in self.env.items() if value and
+                         name not in ALLOWED_WORKER_CONFIGURATION and
                          (name in FORBIDDEN_EXACT or
                           any(name.startswith(prefix) for prefix in FORBIDDEN_PREFIXES)))
         self.record("no substitution overrides", not present,
@@ -146,6 +148,37 @@ class Doctor:
                         else (auth.stderr or auth.stdout).strip()[:200])
         else:
             self.record("reviewer authentication", False, "credential unavailable")
+
+    def worker_engine_start(self):
+        """Prove login metadata can actually start the configured worker."""
+        configured = self.env.get("FACTORY_WORKER_ORDER", "codex-delivery")
+        first = configured.split(",", 1)[0].strip()
+        engine = "claude" if first.startswith("claude") else "codex"
+        prompt = "Reply exactly FACTORY_WORKER_READY. Do not inspect or change files."
+        base = {key: self.env[key] for key in
+                ("PATH", "LANG", "LC_ALL", "SHELL", "TMPDIR")
+                if self.env.get(key)}
+        if engine == "claude":
+            # poll.sh removes the dedicated reviewer OAuth token before any
+            # worker launch. Claude delivery uses the operator keychain or its
+            # own API key, never the reviewer identity.
+            for key in ("HOME", "USER", "ANTHROPIC_API_KEY"):
+                if self.env.get(key):
+                    base[key] = self.env[key]
+            command = ["claude", "-p", prompt, "--permission-mode", "dontAsk",
+                       "--tools", "", "--max-turns", "1",
+                       "--output-format", "json", "--no-session-persistence"]
+        else:
+            command = ["codex", "exec", "--sandbox", "read-only", "--ephemeral",
+                       "--ignore-user-config", "--json", prompt]
+        with tempfile.TemporaryDirectory(prefix="factory-doctor-engine-") as directory:
+            result = self.command(command, timeout=90, env=base,
+                                  cwd=pathlib.Path(directory))
+        output = (result.stdout or "") + "\n" + (result.stderr or "")
+        ready = result.returncode == 0 and "FACTORY_WORKER_READY" in output
+        detail = (f"real {engine} worker started and answered" if ready else
+                  (output.strip()[-400:] or f"{engine} exited {result.returncode}"))
+        self.record("worker engine start", ready, detail)
 
     def github(self):
         if not self.token:
@@ -355,7 +388,8 @@ class Doctor:
         self.record("poll.sh dry run", ready, detail)
 
     def run(self) -> list[Check]:
-        self.local(); self.worktree(); self.substitutions(); self.credentials(); self.github()
+        self.local(); self.worktree(); self.substitutions(); self.credentials()
+        self.worker_engine_start(); self.github()
         self.configuration(); self.target_freshness(); self.observability(); self.dry_run()
         return self.checks
 

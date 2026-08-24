@@ -40,6 +40,26 @@ class ParsingTests(unittest.TestCase):
 
 
 class BoundaryTests(unittest.TestCase):
+    def test_engine_output_streams_redacted_before_completion(self):
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(
+                invoke.os.environ,
+                {"FACTORY_RUN_DIR": directory, "FACTORY_RUNTIME_LOG_STDERR": "0"},
+                clear=True):
+            result = invoke.run_engine_streamed(
+                [sys.executable, "-c",
+                 "print('working ghp_1234567890abcdef', flush=True)"],
+                cwd=pathlib.Path(directory), timeout=5, env={}, story=20,
+                project=19)
+            self.assertEqual(0, result.returncode)
+            records = [json.loads(line) for line in
+                       pathlib.Path(directory, "operations.jsonl")
+                       .read_text().splitlines()]
+        progress = [row for row in records
+                    if row.get("operation") == "engine-stream"]
+        self.assertEqual(1, len(progress))
+        self.assertIn("[redacted]", progress[0]["engine_output_tail"])
+        self.assertNotIn("ghp_1234567890abcdef", json.dumps(progress))
+
     def test_private_repository_401_is_a_loud_access_constraint(self):
         denied = invoke.urllib.error.HTTPError("https://api.github.test", 401,
                                                "Unauthorized", {}, None)
@@ -307,6 +327,8 @@ class DeliveryHarness(unittest.TestCase):
         self.log = os.path.join(self.dir.name, "runtime.jsonl")
         self.session = dict(OPERATOR_SESSION,
                             FACTORY_RUN_DIR=self.dir.name,
+                            FACTORY_DELIVERY_TEST_CMD=str(
+                                pathlib.Path(invoke.__file__).with_name("test_repo.sh")),
                             FACTORY_RUNTIME_LOG_STDERR="0")
 
     def deliver(self, engine_output="", engine="claude"):
@@ -393,6 +415,38 @@ class ProductCheckoutTests(unittest.TestCase):
                 pass
 
 
+class RepositoryTestCommandTests(unittest.TestCase):
+    def test_javascript_product_uses_its_declared_test_script(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pathlib.Path(directory, "package.json").write_text(
+                json.dumps({"scripts": {"test": "node --test test/*.test.js"}}))
+            with mock.patch.dict(invoke.os.environ, {}, clear=True):
+                self.assertEqual(["npm", "test"],
+                                 invoke.repository_test_command(pathlib.Path(directory)))
+
+    def test_factory_checkout_uses_its_own_test_wrapper(self):
+        with tempfile.TemporaryDirectory() as directory:
+            script = pathlib.Path(directory, "factory/agents/worker/test_repo.sh")
+            script.parent.mkdir(parents=True)
+            script.write_text("#!/bin/sh\n")
+            with mock.patch.dict(invoke.os.environ, {}, clear=True):
+                self.assertEqual([str(script)],
+                                 invoke.repository_test_command(pathlib.Path(directory)))
+
+    def test_explicit_product_command_wins(self):
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_DELIVERY_TEST_CMD": "make check"},
+                clear=True):
+            self.assertEqual(["make", "check"],
+                             invoke.repository_test_command(pathlib.Path(directory)))
+
+    def test_unknown_product_fails_closed(self):
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(
+                invoke.os.environ, {}, clear=True):
+            with self.assertRaisesRegex(invoke.DeliveryError, "no supported test"):
+                invoke.repository_test_command(pathlib.Path(directory))
+
+
 class EngineUsageTests(DeliveryHarness):
     """Project #322 criterion 5: what the engine spent has to be captured while
     the story runs, because it cannot be recovered afterwards."""
@@ -444,7 +498,8 @@ class EngineUsageTests(DeliveryHarness):
         with mock.patch.dict(invoke.os.environ, {}, clear=True), \
              mock.patch.object(invoke.pathlib.Path, "read_text", return_value="prompt"):
             command = invoke.model_command("input.json", invoke.Bounds(3.0, 10))
-        self.assertEqual("json", command[command.index("--output-format") + 1])
+        self.assertEqual("stream-json", command[command.index("--output-format") + 1])
+        self.assertIn("--verbose", command)
 
     def test_a_failed_launch_still_carries_what_it_spent(self):
         """Tokens spent by an engine that crashed were still spent."""
