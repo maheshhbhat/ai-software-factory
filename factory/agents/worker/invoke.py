@@ -441,6 +441,17 @@ def launch_engine(cmd: list[str], *, cwd: pathlib.Path, timeout: int, env,
     runlog.engine_usage(story=story, project=project, engine=engine,
                         phase="worker", launch="completed",
                         output=printed(getattr(result, "stdout", None)))
+    # Usage accounting alone cannot explain a successful engine process that
+    # leaves the worktree unchanged. Preserve only the bounded, credential-
+    # redacted tail so a later wrapper failure has the engine's own final
+    # explanation without turning the operation log into a prompt transcript.
+    obs.operational_log(
+        "INFO", "delivery engine completed",
+        component="delivery-worker", operation="engine-output",
+        story=story, project=project, engine=engine,
+        engine_output_tail=runlog.tail(
+            printed(getattr(result, "stdout", None))),
+    )
     return result
 
 
@@ -514,6 +525,11 @@ def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
     scope, error = merge_gate.parse_scope(story.get("body") or "")
     if error:
         raise DeliveryError(f"invalid Story scope: {error}")
+    protected = merge_gate.protected_factory_scope(scope)
+    if protected:
+        raise DeliveryError(
+            "FACTORY_SELF_MODIFICATION_FORBIDDEN: protected Story scope: "
+            + ", ".join(protected))
     branch = pulls[0]["head"]["ref"] if pulls else f"story/{story_number}-delivery"
     remote = git(["ls-remote", "--heads", "origin", branch], checkout,
                  runner=runner).stdout.strip()

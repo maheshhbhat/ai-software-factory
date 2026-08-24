@@ -29,7 +29,6 @@ import observability as obs  # noqa: E402
 import status as live_status  # noqa: E402
 
 DEFAULT_REPO = "maheshhbhat/ai-software-factory"
-TEST_COMMITMENT = 384
 FORBIDDEN_EXACT = {
     "FACTORY_DELIVERY_MODEL_CMD", "FACTORY_REVIEW_MODEL_CMD",
     "FACTORY_WORKER_CMD", "FACTORY_REVIEW_CMD",
@@ -37,6 +36,7 @@ FORBIDDEN_EXACT = {
 FORBIDDEN_PREFIXES = ("FACTORY_WORKER_",)
 MUTATING_WORDS = ("mutation", "createIssue", "updateIssue", "addComment",
                   "--claim", "issue edit", "issue comment", "pr merge", "git push")
+WIP_RE = re.compile(r"\bWIP\s+(\d+)/(\d+)\b")
 
 
 @dataclass(frozen=True)
@@ -47,8 +47,10 @@ class Check:
 
 
 class Doctor:
-    def __init__(self, repo: str, project: int, *, environ=None, runner=None):
+    def __init__(self, repo: str, project: int, *, commitment: int, target: str,
+                 environ=None, runner=None):
         self.repo, self.project = repo, project
+        self.commitment, self.target = commitment, target
         self.env = dict(os.environ if environ is None else environ)
         self.runner = runner or subprocess.run
         self.checks: list[Check] = []
@@ -154,6 +156,8 @@ class Doctor:
           repository(owner:$owner,name:$name){isPrivate viewerPermission
             project:issue(number:$project){number state body labels(first:20){nodes{name}}}
             commitment:issue(number:$commitment){number state body labels(first:20){nodes{name}}}
+            issues(first:100,states:OPEN){nodes{number body labels(first:20){nodes{name}}}
+              pageInfo{hasNextPage}}
             defaultBranchRef{branchProtectionRule{requiresStatusChecks requiredStatusCheckContexts}}
           }
           rateLimit{remaining resetAt}
@@ -161,7 +165,7 @@ class Doctor:
         result = self.command(
             ["gh", "api", "graphql", "-f", f"query={query}",
              "-F", f"owner={owner}", "-F", f"name={name}",
-             "-F", f"project={self.project}", "-F", f"commitment={TEST_COMMITMENT}"],
+             "-F", f"project={self.project}", "-F", f"commitment={self.commitment}"],
             env={**self.env, "GH_TOKEN": self.token})
         try:
             value = json.loads(result.stdout)["data"]
@@ -191,7 +195,9 @@ class Doctor:
         project_ok = (project.get("state") == "OPEN" and "type:project" in labels and
                       len({x for x in labels if x.startswith("project:")}) == 1 and
                       labels & {"project:awaiting-ready", "project:active"} and
-                      re.search(r"(?m)^### Roadmap commitment\s*$\n\s*#384\s*$", project.get("body") or ""))
+                      re.search(r"(?m)^### Roadmap commitment\s*$\n\s*#"
+                                + re.escape(str(self.commitment)) + r"\s*$",
+                                project.get("body") or ""))
         self.record("Project authorization", bool(project_ok),
                     f"Project #{self.project}; labels={sorted(labels)}")
         commitment = repo.get("commitment") or {}
@@ -201,7 +207,32 @@ class Doctor:
                     commitment.get("state") == "OPEN" and
                     "type:roadmap-commitment" in commitment_labels and
                     "No product or factory implementation work" in (commitment.get("body") or ""),
-                    f"Commitment #{TEST_COMMITMENT} remains open and test-only")
+                    f"Commitment #{self.commitment} remains open and test-only")
+        inventory = repo.get("issues") or {}
+        nodes = inventory.get("nodes") or []
+        truncated = bool((inventory.get("pageInfo") or {}).get("hasNextPage"))
+
+        def issue_labels(item):
+            return {row["name"] for row in
+                    (item.get("labels") or {}).get("nodes", [])}
+
+        commitment_projects = sorted(
+            item["number"] for item in nodes
+            if "type:project" in issue_labels(item) and re.search(
+                r"(?m)^### Roadmap commitment\s*$\n\s*#"
+                + re.escape(str(self.commitment)) + r"\s*$",
+                item.get("body") or ""))
+        existing_stories = sorted(
+            item["number"] for item in nodes
+            if "type:story" in issue_labels(item) and re.search(
+                r"(?m)^### Project\s*$\n\s*#"
+                + re.escape(str(self.project)) + r"\s*$",
+                item.get("body") or ""))
+        isolated = (not truncated and commitment_projects == [self.project]
+                    and not existing_stories)
+        details = (f"projects={commitment_projects}; stories={existing_stories}"
+                   + ("; open issue inventory exceeds 100" if truncated else ""))
+        self.record("isolated test commitment", isolated, details)
         protection = ((repo.get("defaultBranchRef") or {}).get("branchProtectionRule") or {})
         contexts = set(protection.get("requiredStatusCheckContexts") or [])
         rulesets = self.command(["gh", "api", f"repos/{self.repo}/rulesets"],
@@ -241,6 +272,33 @@ class Doctor:
                     "import dispatcher" not in harness and "import review_route" not in harness,
                     "harness enters through poll.sh only")
 
+    def target_freshness(self):
+        """Prove the disposable product target is absent from live main."""
+        if not self.token:
+            self.record("fresh product target", False,
+                        "GitHub credential unavailable")
+            return
+        path = pathlib.PurePosixPath(self.target)
+        valid = (bool(self.target) and not path.is_absolute()
+                 and ".." not in path.parts and path.as_posix() == self.target)
+        if not valid:
+            self.record("fresh product target", False,
+                        f"invalid repository-relative target: {self.target!r}")
+            return
+        result = self.command(
+            ["gh", "api", f"repos/{self.repo}/contents/{self.target}?ref=main"],
+            env={**self.env, "GH_TOKEN": self.token})
+        detail = (result.stderr or result.stdout).strip()
+        if result.returncode == 0:
+            self.record("fresh product target", False,
+                        f"{self.target} already exists on live main")
+        elif "404" in detail or "Not Found" in detail:
+            self.record("fresh product target", True,
+                        f"{self.target} is absent from live main")
+        else:
+            self.record("fresh product target", False,
+                        detail[:300] or f"inspection failed with exit {result.returncode}")
+
     def observability(self):
         previous = os.environ.copy()
         try:
@@ -276,17 +334,29 @@ class Doctor:
         env = {key: value for key, value in self.env.items()
                if key not in FORBIDDEN_EXACT and
                not any(key.startswith(prefix) for prefix in FORBIDDEN_PREFIXES)}
-        env.update({"GH_TOKEN": self.token, "FACTORY_COMMITMENT": str(TEST_COMMITMENT),
+        env.update({"GH_TOKEN": self.token, "FACTORY_COMMITMENT": str(self.commitment),
                     "FACTORY_REPO": self.repo})
         result = self.command(["sh", "poll.sh", "--once", "--dry-run"],
                               timeout=120, env=env)
-        self.record("poll.sh dry run", result.returncode == 0,
-                    "normal entrypoint completed without writes" if result.returncode == 0
-                    else (result.stderr or result.stdout).strip()[-400:])
+        output = (result.stdout or "") + "\n" + (result.stderr or "")
+        match = WIP_RE.search(output)
+        capacity = tuple(map(int, match.groups())) if match else None
+        ready = (result.returncode == 0 and capacity is not None
+                 and capacity[0] < capacity[1])
+        if ready:
+            detail = ("normal entrypoint completed without writes; "
+                      f"worker capacity {capacity[0]}/{capacity[1]}")
+        elif result.returncode != 0:
+            detail = output.strip()[-400:]
+        elif capacity is None:
+            detail = "normal entrypoint did not report worker capacity"
+        else:
+            detail = f"worker capacity exhausted: {capacity[0]}/{capacity[1]} claimed"
+        self.record("poll.sh dry run", ready, detail)
 
     def run(self) -> list[Check]:
         self.local(); self.worktree(); self.substitutions(); self.credentials(); self.github()
-        self.configuration(); self.observability(); self.dry_run()
+        self.configuration(); self.target_freshness(); self.observability(); self.dry_run()
         return self.checks
 
 
@@ -303,10 +373,15 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", default=DEFAULT_REPO)
     parser.add_argument("--project", required=True, type=int)
+    parser.add_argument("--commitment", required=True, type=int)
+    parser.add_argument("--target", required=True)
     args = parser.parse_args(argv)
     if args.project <= 0:
         parser.error("--project must be positive")
-    checks = Doctor(args.repo, args.project).run()
+    if args.commitment <= 0:
+        parser.error("--commitment must be positive")
+    checks = Doctor(args.repo, args.project, commitment=args.commitment,
+                    target=args.target).run()
     print(render(checks))
     return 0 if all(item.passed for item in checks) else 1
 

@@ -100,6 +100,24 @@ class TestEligibility(unittest.TestCase):
         self.assertEqual(self.reason(story(10, attempt="many")), R.ATTEMPT_INVALID)
         self.assertEqual(self.reason(story(10, depends="- #9")), R.DEPENDS_ON_MALFORMED)
 
+    def test_factory_scopes_are_never_dispatched(self):
+        scopes = (
+            "factory/runtime/**", "f*/**", "**", "poll.sh",
+            "approve-plan.sh", "live-e2e.sh", ".github/**", ".claude/**",
+            "AGENTS.md", "CLAUDE.md", "src/**\nfactory/runtime/poller.py",
+        )
+        for scope in scopes:
+            with self.subTest(scope=scope):
+                self.assertEqual(
+                    self.reason(story(10, scope=scope)),
+                    R.FACTORY_SELF_MODIFICATION_FORBIDDEN,
+                )
+
+    def test_product_and_rung_one_uat_scopes_remain_dispatchable(self):
+        for scope in ("src/**", "tests/**", "runs/rung1/live_product/**"):
+            with self.subTest(scope=scope):
+                self.assertEqual(self.reason(story(10, scope=scope)), R.ELIGIBLE)
+
 
 class TestAuthorizationChain(unittest.TestCase):
     """story → project → standing commitment, with no maintenance bypass."""

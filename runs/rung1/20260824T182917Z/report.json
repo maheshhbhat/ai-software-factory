@@ -1,0 +1,113 @@
+{
+  "black_box_uat": {
+    "entrypoint": "sh poll.sh --interval 15",
+    "passed": true,
+    "reason": "delivery reached the acceptance bell"
+  },
+  "kpis": {
+    "acceptance_catches": {
+      "count": 0,
+      "criteria": []
+    },
+    "autonomy": {
+      "reason": "the shared GitHub principal cannot independently prove absence of human code involvement",
+      "status": "unavailable"
+    },
+    "cycle_time": {
+      "end": "2026-08-24T18:55:47Z",
+      "seconds": 1732.0,
+      "start": "2026-08-24T18:26:55Z"
+    },
+    "engine_usage_cost": {
+      "by_engine": {
+        "claude": {
+          "input_tokens": 4,
+          "invocations": 1,
+          "output_tokens": 2671,
+          "reported_cost_usd": 0.0650638
+        },
+        "codex": {
+          "input_tokens": 223503,
+          "invocations": 1,
+          "output_tokens": 2874
+        }
+      },
+      "cost_per_accepted_story_usd": "unavailable",
+      "cost_status": "partial",
+      "known_reported_cost_usd": 0.0650638
+    },
+    "escaped_defects": {
+      "count": 0,
+      "observations": []
+    },
+    "human_touches": {
+      "by_classification": {
+        "decision": 3,
+        "operation": 1
+      },
+      "count": 4,
+      "records": [
+        {
+          "actor": "@maheshhbhat",
+          "bell_type": "plan-approval",
+          "classification": "decision",
+          "note": "plan-approval-receipt:#446:c4e8e4fefdbc095ebae85ec4950c859a96d318fb186c853a87bac825e896a085; plan-approval-fingerprint:c4e8e4fefdbc095ebae85ec4950c859a96d318fb186c853a87bac825e896a085; GitHub plan-approval decision consumed; time unavailable, recorded as 0",
+          "project": "#446",
+          "seconds_spent": 0,
+          "story": null,
+          "timestamp": "2026-08-24T18:26:55Z"
+        },
+        {
+          "actor": "@maheshhbhat",
+          "bell_type": "acceptance",
+          "classification": "decision",
+          "note": "acceptance-receipt:#446:7feb15dcb154b58ddc8eb754a275a45a98a20ea9c7f1d2e033d0183b4b17427f; acceptance-fingerprint:7feb15dcb154b58ddc8eb754a275a45a98a20ea9c7f1d2e033d0183b4b17427f; GitHub acceptance decision consumed; time unavailable, recorded as 0",
+          "project": "#446",
+          "seconds_spent": 0,
+          "story": null,
+          "timestamp": "2026-08-24T18:55:47Z"
+        },
+        {
+          "action": "fixture-launch",
+          "actor": "@maheshhbhat",
+          "classification": "operation",
+          "source": "runs/rung1/20260824T182917Z/run-state.json",
+          "timestamp": "2026-08-24T18:29:17Z"
+        },
+        {
+          "action": "acceptance-sequence-correction",
+          "actor": "@maheshhbhat",
+          "classification": "decision",
+          "source": "https://github.com/maheshhbhat/ai-software-factory/issues/446#issuecomment-5399707252",
+          "timestamp": "2026-08-24T18:39:45Z"
+        }
+      ],
+      "relay": 0
+    },
+    "poison_rate": {
+      "poisoned_stories": 0,
+      "rate": 0.0,
+      "stories": 1
+    },
+    "worker_attempts_retry_rate": {
+      "attempts": 1,
+      "attempts_per_story": 1.0,
+      "retries": 0,
+      "retry_rate": 0.0,
+      "stories": 1
+    }
+  },
+  "measurement_integrity": {
+    "findings": [],
+    "passed": true
+  },
+  "observation_cutoff": "2026-08-24T18:55:47Z",
+  "project": 446,
+  "report_phase": "final",
+  "run": "20260824T182917Z",
+  "schema_version": 1,
+  "sources": [
+    "https://github.com/maheshhbhat/ai-software-factory/issues/446#issuecomment-5399566564",
+    "https://github.com/maheshhbhat/ai-software-factory/issues/446#issuecomment-5399882390"
+  ]
+}

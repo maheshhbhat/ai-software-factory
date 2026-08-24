@@ -1,0 +1,127 @@
+{
+  "commitment": 445,
+  "decisions": [
+    {
+      "bell_type": "plan-approval",
+      "timestamp": "2026-08-24T18:26:55Z",
+      "url": "https://github.com/maheshhbhat/ai-software-factory/issues/446#issuecomment-5399566564"
+    }
+  ],
+  "entrypoint": "sh poll.sh --interval 15",
+  "observability": {
+    "counts": {
+      "operation": 72,
+      "process": 31,
+      "telemetry": 191
+    },
+    "invalid": [],
+    "stories": [
+      {
+        "components": [
+          "delivery-worker",
+          "independent-review",
+          "poller"
+        ],
+        "events": [
+          "delivery.pull-request.written",
+          "dispatch.received",
+          "review.outcome.published",
+          "review_link.transition",
+          "story.claimed"
+        ],
+        "heartbeat": true,
+        "story": 447,
+        "trace_ids": [
+          "b4dfb11b356aa7c127fec13a2a395667"
+        ]
+      }
+    ],
+    "valid": true
+  },
+  "observation_cutoff": "2026-08-24T18:26:55Z",
+  "passed": true,
+  "preflight": "PASS  required binaries \u2014 available\nPASS  local candidate \u2014 local uncommitted candidate present\nPASS  no competing poller \u2014 none running\nPASS  free disk \u2014 121232 MiB available\nPASS  worker worktree creation \u2014 temporary detached worktree created and removed\nPASS  no substitution overrides \u2014 none\nPASS  GitHub credential \u2014 available\nPASS  Codex authentication \u2014 Logged in using ChatGPT\nPASS  reviewer credential \u2014 dedicated credential available\nPASS  reviewer binary \u2014 2.1.241 (Claude Code)\nPASS  reviewer authentication \u2014 dedicated reviewer identity authenticated\nPASS  repository access \u2014 visibility=public; permission=ADMIN\nPASS  GitHub API capacity \u2014 4950 GraphQL points remaining\nPASS  production REST read path \u2014 issue listing succeeds\nPASS  Project authorization \u2014 Project #446; labels=['project:active', 'type:project']\nPASS  test-only commitment \u2014 Commitment #445 remains open and test-only\nPASS  isolated test commitment \u2014 projects=[446]; stories=[]\nPASS  required merge gate \u2014 required checks: merge-gate\nPASS  Codex-only worker default \u2014 poll.sh defaults to codex-delivery\nPASS  Story spend default \u2014 $5 and 60 minutes per disposable Story\nPASS  black-box harness boundary \u2014 harness enters through poll.sh only\nPASS  fresh product target \u2014 runs/rung1/live_product/project-446/app.py is absent from live main\nPASS  observability smoke \u2014 separate files, heartbeat, and status are readable\nPASS  poll.sh dry run \u2014 normal entrypoint completed without writes; worker capacity 0/2\nREADY \u2014 no E2E artifacts were created",
+  "production_substitutions": [],
+  "project": 446,
+  "project_state": "project:awaiting-acceptance",
+  "reason": "delivery reached the acceptance bell",
+  "receipts": [
+    {
+      "actor": "@maheshhbhat",
+      "bell_type": "plan-approval",
+      "classification": "decision",
+      "note": "plan-approval-receipt:#446:c4e8e4fefdbc095ebae85ec4950c859a96d318fb186c853a87bac825e896a085; plan-approval-fingerprint:c4e8e4fefdbc095ebae85ec4950c859a96d318fb186c853a87bac825e896a085; GitHub plan-approval decision consumed; time unavailable, recorded as 0",
+      "project": "#446",
+      "seconds_spent": 0,
+      "story": null,
+      "timestamp": "2026-08-24T18:26:55Z"
+    }
+  ],
+  "replay_changed": false,
+  "run": "20260824T182917Z",
+  "sources": [
+    "https://github.com/maheshhbhat/ai-software-factory/issues/446#issuecomment-5399566564"
+  ],
+  "stories": [
+    {
+      "checks": [
+        "merge-gate",
+        "merge-gate-surface"
+      ],
+      "claimed_at": "2026-08-24T18:30:28Z",
+      "closed": true,
+      "exact_approval": true,
+      "head": "3f9d6d81d6ce5b166fee425ed979dedece24417c",
+      "health": {
+        "build_sha": "72a2bafe5dc401be7bb0e489e550b0346468d6f0"
+      },
+      "merge_sha": "72a2bafe5dc401be7bb0e489e550b0346468d6f0",
+      "merged": true,
+      "merged_at": "2026-08-24T18:34:24Z",
+      "number": 447,
+      "pull": 448,
+      "pull_count": 1,
+      "review_timing": {
+        "engine_seconds": 39.097,
+        "stages": {
+          "review.clone.finished": "2026-08-24T18:33:14.409665Z",
+          "review.clone.started": "2026-08-24T18:33:13.326504Z",
+          "review.engine.finished": "2026-08-24T18:33:53.509859Z",
+          "review.engine.started": "2026-08-24T18:33:14.412994Z",
+          "review.preparing": "2026-08-24T18:33:08.370896Z",
+          "review.published": "2026-08-24T18:33:54.783062Z",
+          "review.publishing": "2026-08-24T18:33:53.591032Z"
+        },
+        "total_seconds": 46.412
+      },
+      "usage_records": [
+        {
+          "component": "delivery-worker",
+          "engine": "codex",
+          "launch": "completed",
+          "metric": "engine.usage",
+          "phase": "worker",
+          "project": 446,
+          "record_type": "telemetry",
+          "repo": "maheshhbhat/ai-software-factory",
+          "schema_version": 1,
+          "span_id": "75ce2843d423bdef",
+          "story": 447,
+          "timestamp": "2026-08-24T18:31:57.152629Z",
+          "trace_id": "b4dfb11b356aa7c127fec13a2a395667",
+          "usage": {
+            "input_tokens": 223503,
+            "output_tokens": 2874
+          },
+          "usage_reported": true
+        }
+      ],
+      "walk": [
+        "story:ready",
+        "story:claimed",
+        "story:in-review",
+        "story:merged"
+      ]
+    }
+  ]
+}

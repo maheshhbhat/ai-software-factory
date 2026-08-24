@@ -32,17 +32,32 @@ def unavailable(reason):
 def build(evidence, process, telemetry, touches):
     project = evidence.get("project")
     stories = evidence.get("stories") or []
-    numbers = {row.get("number") for row in stories}
-    if not evidence.get("passed") or not numbers or None in numbers:
+    numbers = {row.get("number") for row in stories if row.get("number") is not None}
+    numbers.update(number for number in (evidence.get("stories_created") or [])
+                   if isinstance(number, int))
+    passed = bool(evidence.get("passed"))
+    report_phase = evidence.get("report_phase", "final")
+    if report_phase not in ("pre-acceptance", "final"):
+        raise ValueError("report_phase must be pre-acceptance or final")
+    if passed and not numbers:
         raise ValueError("a successful black-box run with named Stories is required")
-    if any(not row.get("merged") for row in stories):
+    if passed and any(not row.get("merged") for row in stories):
         raise ValueError("every measured Story must be merged")
 
     integrity = []
     project_touches = [row for row in touches if row.get("project") == f"#{project}"]
-    classes = Counter(row.get("classification") for row in project_touches)
+    operator_actions = evidence.get("operator_actions") or []
+    if not isinstance(operator_actions, list) or any(
+            not isinstance(row, dict) or not row.get("classification")
+            or not row.get("action") for row in operator_actions):
+        integrity.append("operator_actions must be a list of classified named actions")
+        operator_actions = []
+    human_touches = project_touches + operator_actions
+    classes = Counter(row.get("classification") for row in human_touches)
     decisions = evidence.get("decisions") or []
-    for bell in BELLS:
+    required_bells = (BELLS if passed and report_phase == "final"
+                      else ("plan-approval",))
+    for bell in required_bells:
         observed = [row for row in decisions if row.get("bell_type") == bell]
         receipts = [row for row in project_touches if row.get("bell_type") == bell]
         if len(observed) != 1:
@@ -56,11 +71,13 @@ def build(evidence, process, telemetry, touches):
     if any(key[1] is None for key in claim_keys):
         integrity.append("every claim needs a durable event ID")
     attempts = len(claim_keys)
-    retries = max(0, attempts - len(numbers))
+    retries = max(0, attempts - len(numbers)) if numbers else 0
     poisoned = sum("story:blocked:poison" in (row.get("walk") or []) for row in stories)
 
     interventions = evidence.get("human_code_interventions", UNAVAILABLE)
-    if interventions == UNAVAILABLE:
+    if not passed:
+        autonomy = unavailable("the black-box run produced no accepted delivery to classify")
+    elif interventions == UNAVAILABLE:
         autonomy = unavailable(
             "the shared GitHub principal cannot independently prove absence of human code involvement")
     elif isinstance(interventions, list):
@@ -73,15 +90,21 @@ def build(evidence, process, telemetry, touches):
         autonomy = unavailable("human intervention evidence is malformed")
 
     observations = evidence.get("quality_observations")
-    if observations is None:
+    if not passed:
+        escaped = unavailable("the black-box run produced no accepted delivery to observe post-merge")
+    elif observations is None:
         escaped = unavailable("no explicit post-merge defect observation was frozen")
     else:
         escaped_rows = [row for row in observations if row.get("kind") == "escaped-defect"]
         escaped = {"count": len(escaped_rows), "observations": escaped_rows}
 
     acceptance = evidence.get("acceptance")
-    if not isinstance(acceptance, dict) or not isinstance(acceptance.get("criteria"), list):
-        catches = unavailable("canonical outcome-acceptance criterion results are absent")
+    if not passed:
+        catches = unavailable("the black-box run did not reach outcome acceptance")
+    elif not isinstance(acceptance, dict) or not isinstance(acceptance.get("criteria"), list):
+        catches = unavailable(
+            "outcome acceptance is pending" if report_phase == "pre-acceptance"
+            else "canonical outcome-acceptance criterion results are absent")
     else:
         invalid = [row for row in acceptance["criteria"]
                    if row.get("result") not in ("pass", "fail") or not row.get("criterion")]
@@ -111,7 +134,8 @@ def build(evidence, process, telemetry, touches):
             total_cost += cost
         else:
             complete_cost = False
-    cost_per_story = (round(total_cost / len(numbers), 8) if complete_cost else UNAVAILABLE)
+    cost_per_story = (round(total_cost / len(numbers), 8)
+                      if passed and complete_cost and numbers else UNAVAILABLE)
 
     boundaries = {}
     for bell in BELLS:
@@ -132,21 +156,25 @@ def build(evidence, process, telemetry, touches):
 
     return {
         "schema_version": 1,
+        "report_phase": report_phase,
         "project": project,
         "run": evidence.get("run"),
-        "black_box_uat": {"passed": True, "entrypoint": evidence.get("entrypoint")},
+        "black_box_uat": {"passed": passed, "entrypoint": evidence.get("entrypoint"),
+                          "reason": evidence.get("reason")},
         "measurement_integrity": {"passed": not integrity, "findings": sorted(integrity)},
         "kpis": {
-            "human_touches": {"count": len(project_touches),
+            "human_touches": {"count": len(human_touches),
                               "by_classification": dict(sorted(classes.items())),
-                              "relay": classes["relay"], "records": project_touches},
+                              "relay": classes["relay"], "records": human_touches},
             "autonomy": autonomy,
             "worker_attempts_retry_rate": {"attempts": attempts, "stories": len(numbers),
-                                           "attempts_per_story": attempts / len(numbers),
+                                           "attempts_per_story": (attempts / len(numbers)
+                                                                  if numbers else UNAVAILABLE),
                                            "retries": retries,
-                                           "retry_rate": retries / len(numbers)},
+                                           "retry_rate": (retries / len(numbers)
+                                                          if numbers else UNAVAILABLE)},
             "poison_rate": {"poisoned_stories": poisoned, "stories": len(numbers),
-                            "rate": poisoned / len(numbers)},
+                            "rate": poisoned / len(numbers) if numbers else UNAVAILABLE},
             "escaped_defects": escaped,
             "acceptance_catches": catches,
             "engine_usage_cost": {"by_engine": dict(sorted(usage_by_engine.items())),
@@ -164,6 +192,8 @@ def render(report):
     k = report["kpis"]
     def value(item, key="count"):
         return item.get(key, UNAVAILABLE) if isinstance(item, dict) else item
+    def percent(item):
+        return f"{item:.2%}" if isinstance(item, (int, float)) else str(item)
     return "\n".join([
         f"# Phase 5 Rung 1 KPI report — Project #{report['project']}", "",
         f"Black-box UAT: {'PASS' if report['black_box_uat']['passed'] else 'FAIL'}",
@@ -171,8 +201,8 @@ def render(report):
         "", "| KPI | Result |", "|---|---|",
         f"| Human touches | {k['human_touches']['count']} (relay: {k['human_touches']['relay']}) |",
         f"| Autonomy | {value(k['autonomy'], 'rate')} |",
-        f"| Worker attempts / retry rate | {k['worker_attempts_retry_rate']['attempts']} / {k['worker_attempts_retry_rate']['retry_rate']:.2%} |",
-        f"| Poison rate | {k['poison_rate']['rate']:.2%} |",
+        f"| Worker attempts / retry rate | {k['worker_attempts_retry_rate']['attempts']} / {percent(k['worker_attempts_retry_rate']['retry_rate'])} |",
+        f"| Poison rate | {percent(k['poison_rate']['rate'])} |",
         f"| Escaped defects | {value(k['escaped_defects'])} |",
         f"| Acceptance catches | {value(k['acceptance_catches'])} |",
         f"| Actual engine cost / accepted Story | {k['engine_usage_cost']['cost_per_accepted_story_usd']} |",

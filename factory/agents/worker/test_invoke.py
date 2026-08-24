@@ -235,15 +235,15 @@ $5 / 60 min
 
 ### Scope
 
-factory/agents/worker/invoke.py
+src/app.py
 """
 
 
 class FakeClient:
     """Just enough GitHub for one delivery, with no network."""
 
-    def __init__(self, story=214):
-        self.story, self.created = story, None
+    def __init__(self, story=214, story_body=STORY_BODY):
+        self.story, self.story_body, self.created = story, story_body, None
 
     def api(self, path, *, method="GET", value=None):
         assert path == "", path
@@ -251,7 +251,7 @@ class FakeClient:
 
     def issue(self, number):
         return {"number": number,
-                "body": STORY_BODY if number == self.story else "### Goal\n\nx\n"}
+                "body": self.story_body if number == self.story else "### Goal\n\nx\n"}
 
     def pages(self, path):
         if path.endswith("/timeline"):
@@ -309,7 +309,7 @@ class DeliveryHarness(unittest.TestCase):
                             FACTORY_RUNTIME_LOG_STDERR="0")
 
     def deliver(self, engine_output="", engine="claude"):
-        runner = RecordingRunner(["factory/agents/worker/invoke.py"],
+        runner = RecordingRunner(["src/app.py"],
                                  engine_output=engine_output)
         with mock.patch.dict(invoke.os.environ, self.session, clear=True), \
              mock.patch.object(invoke.pathlib.Path, "read_text",
@@ -322,6 +322,36 @@ class DeliveryHarness(unittest.TestCase):
         path=pathlib.Path(self.dir.name)/"telemetry.jsonl"
         return ([json.loads(line) for line in path.read_text().splitlines() if line.strip()]
                 if path.exists() else [])
+
+    def operation_records(self):
+        path=pathlib.Path(self.dir.name)/"operations.jsonl"
+        return ([json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+                if path.exists() else [])
+
+
+class FactorySelfModificationTests(unittest.TestCase):
+    def test_worker_refuses_protected_scope_before_engine_launch(self):
+        scopes = (
+            "factory/agents/worker/invoke.py", "f*/**", "**", "poll.sh",
+            "approve-plan.sh", "live-e2e.sh", ".github/**", ".claude/**",
+            "AGENTS.md", "CLAUDE.md",
+        )
+        for scope in scopes:
+            with self.subTest(scope=scope):
+                body = STORY_BODY.replace("src/app.py", scope)
+                runner = RecordingRunner([])
+                with self.assertRaisesRegex(
+                        invoke.DeliveryError,
+                        "FACTORY_SELF_MODIFICATION_FORBIDDEN"):
+                    invoke.execute(
+                        "owner/repo", 214, "token", pathlib.Path("."),
+                        engine="codex", runner=runner,
+                        client=FakeClient(story_body=body),
+                    )
+                self.assertFalse(any(
+                    command and command[0] in ("codex", "claude")
+                    for command, _ in runner.calls
+                ))
 
 
 class EngineUsageTests(DeliveryHarness):
@@ -358,6 +388,17 @@ class EngineUsageTests(DeliveryHarness):
         self.assertEqual("codex", usage[0]["engine"])
         self.assertEqual({"input_tokens": 11, "output_tokens": 7},
                          usage[0]["usage"])
+
+    def test_completed_engine_output_tail_is_preserved_for_diagnosis(self):
+        explanation = "I made no changes because the requested target was absent."
+        self.deliver(engine="codex", engine_output=json.dumps({
+            "type": "item.completed",
+            "item": {"type": "agent_message", "text": explanation},
+        }))
+        records = [row for row in self.operation_records()
+                   if row.get("operation") == "engine-output"]
+        self.assertEqual(1, len(records))
+        self.assertIn(explanation, records[0]["engine_output_tail"])
 
     def test_the_default_command_asks_the_engine_to_report_its_usage(self):
         """Without this the engine prints prose and every record is blank."""

@@ -73,16 +73,69 @@ class Rung1ReportTests(unittest.TestCase):
         self.assertEqual("unavailable", result["kpis"]["acceptance_catches"]["status"])
         self.assertTrue(result["measurement_integrity"]["passed"])
 
+    def test_pre_acceptance_report_is_complete_without_forging_the_decision(self):
+        evidence, process, telemetry, touches = fixture()
+        evidence["report_phase"] = "pre-acceptance"
+        evidence["decisions"] = evidence["decisions"][:1]
+        del evidence["acceptance"]
+        touches = [row for row in touches if row.get("bell_type") != "acceptance"]
+        result = report.build(evidence, process, telemetry, touches)
+        self.assertEqual(8, len(result["kpis"]))
+        self.assertTrue(result["measurement_integrity"]["passed"])
+        self.assertEqual("unavailable", result["kpis"]["acceptance_catches"]["status"])
+        self.assertEqual("outcome acceptance is pending",
+                         result["kpis"]["acceptance_catches"]["reason"])
+        self.assertEqual("unavailable", result["kpis"]["cycle_time"]["status"])
+
+    def test_operator_actions_are_counted_without_becoming_relay(self):
+        values = fixture()
+        values[0]["operator_actions"] = [{
+            "action": "fixture-launch", "actor": "@owner",
+            "classification": "operation", "timestamp": "2026-01-01T00:00:10Z"}]
+        result = report.build(*values)
+        self.assertEqual(4, result["kpis"]["human_touches"]["count"])
+        self.assertEqual(1, result["kpis"]["human_touches"]["relay"])
+        self.assertEqual(1, result["kpis"]["human_touches"]["by_classification"]["operation"])
+
+    def test_malformed_operator_actions_fail_integrity(self):
+        values = fixture()
+        values[0]["operator_actions"] = [{"actor": "@owner"}]
+        result = report.build(*values)
+        self.assertFalse(result["measurement_integrity"]["passed"])
+        self.assertIn("operator_actions must be a list of classified named actions",
+                      result["measurement_integrity"]["findings"])
+
+    def test_unknown_report_phase_fails_closed(self):
+        values = fixture()
+        values[0]["report_phase"] = "almost-final"
+        with self.assertRaisesRegex(ValueError, "report_phase"):
+            report.build(*values)
+
     def test_bad_acceptance_evidence_fails_integrity(self):
         values = fixture()
         values[0]["acceptance"]["criteria"][0]["result"] = "maybe"
         result = report.build(*values)
         self.assertFalse(result["measurement_integrity"]["passed"])
 
-    def test_failed_black_box_run_cannot_generate_success(self):
+    def test_failed_black_box_run_reports_eight_kpis_without_inventing_success(self):
         values = fixture(); values[0]["passed"] = False
-        with self.assertRaisesRegex(ValueError, "successful black-box"):
-            report.build(*values)
+        values[0]["reason"] = "worker could not create its worktree"
+        result = report.build(*values)
+        self.assertFalse(result["black_box_uat"]["passed"])
+        self.assertEqual(8, len(result["kpis"]))
+        self.assertEqual("unavailable", result["kpis"]["autonomy"]["status"])
+        self.assertEqual("unavailable", result["kpis"]["escaped_defects"]["status"])
+        self.assertEqual("unavailable", result["kpis"]["acceptance_catches"]["status"])
+        self.assertEqual("unavailable",
+                         result["kpis"]["engine_usage_cost"]["cost_per_accepted_story_usd"])
+
+    def test_failed_run_without_a_created_story_still_renders_unavailable_rates(self):
+        evidence, _process, _telemetry, touches = fixture()
+        evidence.update({"passed": False, "stories": [], "stories_created": []})
+        result = report.build(evidence, [], [], touches)
+        self.assertEqual("unavailable",
+                         result["kpis"]["worker_attempts_retry_rate"]["retry_rate"])
+        self.assertIn("unavailable", report.render(result))
 
     def test_same_frozen_inputs_write_byte_identical_reports(self):
         evidence, process, telemetry, touches = fixture()

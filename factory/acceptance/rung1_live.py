@@ -8,16 +8,19 @@ entrypoint once, freezes the decision evidence, and generates the KPI report.
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import importlib.util
 import json
 import os
 from pathlib import Path
 import re
+import signal
 import subprocess
 import sys
 import tempfile
 import threading
 import time
+import traceback
 import urllib.request
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -31,11 +34,16 @@ FORBIDDEN = base.FORBIDDEN
 PREFIXES = base.PREFIXES
 
 
+def product_path(project):
+    return f"runs/rung1/live_product/project-{project}/app.py"
+
+
 def story_body(project):
+    target = product_path(project)
     return f"""### Spec
 
 Create a standard-library HTTP `/health` endpoint under
-`runs/rung1/live_product/app.py`. It must return JSON containing the deployed
+`{target}`. It must return JSON containing the deployed
 build SHA from `BUILD_SHA`, validated as exactly 40 lowercase hexadecimal
 characters. Add deterministic tests. Change no file outside Scope.
 
@@ -69,7 +77,7 @@ $5 / 60 min
 
 ### Scope
 
-runs/rung1/live_product/**
+runs/rung1/live_product/project-{project}/**
 
 ### Acceptance notes
 
@@ -136,7 +144,167 @@ def acceptance_record(comments):
             "source": found[0].get("html_url") or found[0].get("url")}
 
 
-def exercise(repo, token, merge_sha):
+def terminal_worker_failure(run_dir, stories):
+    """Return the factory's durable terminal launch failure, if observed."""
+    path = Path(run_dir) / "process-events.jsonl"
+    if not path.exists():
+        return None
+    numbers = set(stories)
+    rows = rung1_report.read_jsonl(path)
+    failed = [row for row in rows
+              if row.get("event") == "worker.outcome"
+              and row.get("story") in numbers
+              and row.get("result") == "NO_WORKER_LAUNCHED"]
+    if not failed:
+        return None
+    row = failed[-1]
+    return (f"Story #{row.get('story')} reached worker.outcome="
+            f"{row.get('result')}: {row.get('detail') or 'every eligible worker failed'}")
+
+
+def foreign_dispatch(run_dir, project, stories):
+    """Return any poller dispatch outside this UAT's Project and Stories."""
+    path = Path(run_dir) / "process-events.jsonl"
+    if not path.exists():
+        return None
+    intended = set(stories)
+    rows = rung1_report.read_jsonl(path)
+    foreign = [row for row in rows if row.get("event") == "dispatch.received"
+               and (row.get("project") != project or
+                    row.get("story") not in intended)]
+    if not foreign:
+        return None
+    row = foreign[-1]
+    return (f"foreign dispatch observed: Project #{row.get('project')}, "
+            f"Story #{row.get('story')}; expected Project #{project}, "
+            f"Stories {sorted(intended)}")
+
+
+def progress_summary(data):
+    stories = data.get("stories") or []
+    states = []
+    for story in stories:
+        walk = story.get("walk") or []
+        states.append(f"Story #{story.get('number')}: "
+                      f"{walk[-1] if walk else 'created'}")
+    return (f"Project: {data.get('project_state') or 'unknown'}; "
+            + (", ".join(states) if states else "Story: not created"))
+
+
+def fixture_selection(output, project, story):
+    """Require the production dry-run to select this exact fixture."""
+    if "Capacity exhausted" in output:
+        return False, "worker capacity exhausted after fixture creation"
+    selected = re.search(r"(?m)^Selected \(would claim, in order\):\s*(.+)$",
+                         output or "")
+    if not selected:
+        return False, "normal dry-run did not select any Story"
+    numbers = {int(value) for value in re.findall(r"#(\d+)", selected.group(1))}
+    if numbers != {story}:
+        return False, (f"normal dry-run selected Stories {sorted(numbers)}, "
+                       f"expected only Story #{story} for Project #{project}")
+    return True, f"normal dry-run selected only Story #{story}"
+
+
+def write_report(run, evidence):
+    """Write all eight KPIs for a terminal run, including a failed UAT."""
+    process = run.run_dir / "process-events.jsonl"
+    telemetry = run.run_dir / "telemetry.jsonl"
+    touchlog = ROOT / "factory/touchlog/touchlog.jsonl"
+    read = lambda path: rung1_report.read_jsonl(path) if path.exists() else []
+    result = rung1_report.build(evidence, read(process), read(telemetry), read(touchlog))
+    (run.tmp / "report.json").write_text(
+        json.dumps(result, indent=2, sort_keys=True) + "\n")
+    (run.tmp / "report.md").write_text(rung1_report.render(result))
+    run.persist(evidence)
+    return result
+
+
+def cleanup_failed_run(run, evidence):
+    """Retire this harness's disposable artifacts after evidence is frozen.
+
+    Closing is teardown, not rescue: labels and history remain unchanged, and
+    the failed verdict cannot become green. Open worker PRs are closed first so
+    later global review scans cannot deliver stale disposable work.
+    """
+    if evidence.get("passed"):
+        return []
+    retired = []
+    pulls = run.api("/pulls?state=open&per_page=100") or []
+    for number in run.story:
+        issue = run.api(f"/issues/{number}")
+        body = issue.get("body") or ""
+        if MARKER.replace("PROJECT", str(run.args.project)) not in body:
+            raise RuntimeError(
+                f"refused to retire Story #{number}: Rung 1 marker missing")
+        for pull in pulls:
+            if f"Story: #{number}" in (pull.get("body") or ""):
+                run.api(f"/pulls/{pull['number']}", "PATCH", {"state": "closed"})
+                retired.append(f"Pull request #{pull['number']}")
+        if (issue.get("state") or "open").lower() == "open":
+            run.api(f"/issues/{number}", "PATCH",
+                    {"state": "closed", "state_reason": "not_planned"})
+            retired.append(f"Story #{number}")
+    project = run.api(f"/issues/{run.args.project}")
+    project_labels = base.labels(project)
+    project_link = base.roadmap_commitment(project.get("body") or "")
+    if ("type:project" not in project_labels
+            or not (project.get("title") or "").startswith(
+                "[Project] Phase 5 Rung 1")
+            or project_link != run.commitment):
+        raise RuntimeError(
+            f"refused to retire Project #{run.args.project}: "
+            "not a matching disposable Rung 1 Project")
+    if (project.get("state") or "open").lower() == "open":
+        run.api(f"/issues/{run.args.project}", "PATCH",
+                {"state": "closed", "state_reason": "not_planned"})
+        retired.append(f"Project #{run.args.project}")
+    commitment = run.api(f"/issues/{run.commitment}")
+    commitment_labels = base.labels(commitment)
+    if ("type:roadmap-commitment" not in commitment_labels
+            or not (commitment.get("title") or "").startswith(
+                "[Commitment] Isolate Phase 5 Rung 1")):
+        raise RuntimeError(
+            f"refused to retire Commitment #{run.commitment}: "
+            "not a disposable Rung 1 commitment")
+    if (commitment.get("state") or "open").lower() == "open":
+        run.api(f"/issues/{run.commitment}", "PATCH",
+                {"state": "closed", "state_reason": "not_planned"})
+        retired.append(f"Commitment #{run.commitment}")
+    evidence["failed_artifact_retirement"] = {
+        "status": "complete", "artifacts": retired,
+        "meaning": "closed after frozen FAIL; labels and verdict unchanged",
+    }
+    (run.tmp / "evidence.json").write_text(
+        json.dumps(evidence, indent=2, sort_keys=True) + "\n")
+    run.persist(evidence)
+    return retired
+
+
+def cleanup_accepted_run(run, evidence):
+    """Retire the one-run commitment after normal acceptance completed."""
+    if not evidence.get("passed") or (evidence.get("acceptance") or {}).get(
+            "result") != "pass":
+        return []
+    commitment = run.api(f"/issues/{evidence['commitment']}")
+    if ("type:roadmap-commitment" not in base.labels(commitment)
+            or not (commitment.get("title") or "").startswith(
+                "[Commitment] Isolate Phase 5 Rung 1")):
+        raise RuntimeError("refused to retire accepted run commitment: "
+                           "not a disposable Rung 1 commitment")
+    retired = []
+    if (commitment.get("state") or "open").lower() == "open":
+        run.api(f"/issues/{evidence['commitment']}", "PATCH",
+                {"state": "closed", "state_reason": "completed"})
+        retired.append(f"Commitment #{evidence['commitment']}")
+    evidence["accepted_artifact_retirement"] = {
+        "status": "complete", "artifacts": retired,
+        "meaning": "one-run commitment closed after normal acceptance",
+    }
+    return retired
+
+
+def exercise(repo, token, merge_sha, project):
     env = dict(os.environ)
     # Reuse the authenticated HTTPS boundary proven by the existing harness.
     import base64
@@ -147,7 +315,7 @@ def exercise(repo, token, merge_sha):
         subprocess.run(["git", "clone", "--quiet", "--branch", "main",
                         f"https://github.com/{repo}.git", temp], check=True,
                        timeout=300, env=env)
-        module = Path(temp) / "runs/rung1/live_product/app.py"
+        module = Path(temp) / product_path(project)
         spec = importlib.util.spec_from_file_location("rung1_health", module)
         app = importlib.util.module_from_spec(spec); spec.loader.exec_module(app)
         server = app.make_server("127.0.0.1", 0, merge_sha)
@@ -165,6 +333,11 @@ def exercise(repo, token, merge_sha):
 
 
 class Run(base.Run):
+    def __init__(self, args):
+        super().__init__(args)
+        self.started_at = datetime.strptime(
+            self.run, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc).isoformat()
+
     def create(self, project):
         story = self.api("/issues", "POST", {
             "title": "[Story] Rung 1: add a /health endpoint returning build SHA",
@@ -180,13 +353,36 @@ class Run(base.Run):
 
     def execute(self):
         preflight_environment(os.environ)
+        print(f"[rung1] run {self.run} — Project #{self.args.project} — "
+              "checking real dependencies", flush=True)
+        project = self.preflight()
         doctor = subprocess.run(
             [sys.executable, str(ROOT / "factory/acceptance/e2e_doctor.py"),
-             "--repo", self.args.repo, "--project", str(self.args.project)],
+             "--repo", self.args.repo, "--project", str(self.args.project),
+             "--commitment", str(self.commitment),
+             "--target", product_path(self.args.project)],
             cwd=ROOT, capture_output=True, text=True, timeout=300)
         preflight = doctor_result(doctor, self.args.external_process_guard_no_matches)
-        project = self.preflight()
-        self.create(project); self.spawn()
+        print(f"[rung1] preflight READY — Roadmap Commitment "
+              f"#{self.commitment} is isolated", flush=True)
+        self.create(project)
+        print(f"[rung1] created Story #{self.story[0]}; starting normal poll.sh path",
+              flush=True)
+        check_env = dict(os.environ)
+        check_env["FACTORY_COMMITMENT"] = str(self.commitment)
+        check_env["FACTORY_REPO"] = self.args.repo
+        check = subprocess.run(
+            ["sh", str(ROOT / "poll.sh"), "--once", "--dry-run"],
+            cwd=ROOT, env=check_env, capture_output=True, text=True, timeout=180)
+        selected, selection_detail = fixture_selection(
+            (check.stdout or "") + "\n" + (check.stderr or ""),
+            self.args.project, self.story[0])
+        if check.returncode != 0 or not selected:
+            raise RuntimeError("fixture dispatch preflight failed: "
+                               + selection_detail)
+        print(f"[rung1] dispatch preflight READY — {selection_detail}",
+              flush=True)
+        self.spawn()
         deadline = time.monotonic() + self.args.max_minutes * 60
         data = {}
         while time.monotonic() < deadline:
@@ -194,7 +390,16 @@ class Run(base.Run):
             data = self.snapshot()
             self.persist({"run": self.run, "project": self.args.project,
                           "status": "RUNNING", **data})
+            print(f"[rung1] {progress_summary(data)}", flush=True)
             if data["project_state"] == "project:awaiting-acceptance": break
+            foreign = foreign_dispatch(self.run_dir, self.args.project, self.story)
+            if foreign:
+                data["aborted"] = foreign
+                break
+            terminal = terminal_worker_failure(self.run_dir, self.story)
+            if terminal:
+                data["aborted"] = terminal
+                break
             if self.poller.poll() is not None:
                 data["aborted"] = "poller exited"; break
         else:
@@ -209,26 +414,103 @@ class Run(base.Run):
               and set(story.get("checks", [])) == {"merge-gate", "merge-gate-surface"}
               and data.get("project_state") == "project:awaiting-acceptance"
               and not data.get("replay_changed") and data.get("observability", {}).get("valid"))
-        reason = "delivery reached the acceptance bell" if ok else "delivery evidence incomplete"
+        reason = ("delivery reached the acceptance bell" if ok else
+                  data.get("aborted") or "delivery evidence incomplete")
         if ok:
             pull = self.api(f"/pulls/{story['pull']}")
             merge_sha = pull.get("merge_commit_sha")
-            health = exercise(self.args.repo, self.token, merge_sha)
+            health = exercise(self.args.repo, self.token, merge_sha,
+                              self.args.project)
             story.update({"merge_sha": merge_sha, "health": health})
+        comments = self.api(f"/issues/{self.args.project}/comments?per_page=100") or []
+        decisions = decision_rows(comments)
         evidence = {"run": self.run, "project": self.args.project,
                     "passed": ok, "reason": reason,
+                    "report_phase": "pre-acceptance" if ok else "final",
+                    "operator_actions": [{
+                        "action": "fixture-launch",
+                        "actor": "operator",
+                        "classification": "operation",
+                        "timestamp": self.started_at,
+                        "source": f"runs/rung1/{self.run}/run-state.json",
+                    }],
                     "commitment": self.commitment,
                     "entrypoint": f"sh poll.sh --interval {self.args.heartbeat}",
                     "production_substitutions": [],
-                    "preflight": preflight, **data}
+                    "preflight": preflight, "decisions": decisions,
+                    "observation_cutoff": (max(row["timestamp"] for row in decisions)
+                                           if decisions else None),
+                    "sources": [row.get("url") for row in decisions if row.get("url")],
+                    **data}
         (self.tmp / "evidence.json").write_text(json.dumps(evidence, indent=2, sort_keys=True)+"\n")
         self.persist(evidence)
+        write_report(self, evidence)
         self.api(f"/issues/{self.args.project}/comments", "POST", {"body":
             f"## Rung 1 delivery evidence\n\nRun `{self.run}`: **{'PASS' if ok else 'FAIL'}** — {reason}.\n\n"
             f"Story #{story.get('number')} / PR #{story.get('pull')}; merged SHA "
             f"`{story.get('merge_sha')}`; `/health` response `{json.dumps(story.get('health'))}`.\n\n"
-            f"Evidence: `runs/rung1/{self.run}/evidence.json`\n\nNo acceptance decision is recorded by this comment."})
+            f"Evidence: `runs/rung1/{self.run}/evidence.json`\n"
+            f"Pre-acceptance KPI report: `runs/rung1/{self.run}/report.md`\n\n"
+            "All eight KPIs are present. Acceptance-dependent values remain explicitly "
+            "unavailable until the owner decides. No acceptance decision is recorded by "
+            "this comment."})
+        if not ok:
+            cleanup_failed_run(self, evidence)
+        print(f"[rung1] {'PASS' if ok else 'FAIL'} — {reason}", flush=True)
+        print(f"[rung1] evidence: runs/rung1/{self.run}/evidence.json", flush=True)
         return 0 if ok else 1
+
+    def fail(self, error):
+        """Preserve Rung 1-specific evidence even on an interrupt or signal."""
+        self.stop()
+        stack = "".join(traceback.format_exception(type(error), error,
+                                                    error.__traceback__))
+        evidence = {"run": self.run, "project": self.args.project,
+                    "passed": False,
+                    "reason": f"{type(error).__name__}: {error}",
+                    "exception": stack, "stories_created": self.story,
+                    "entrypoint": f"sh poll.sh --interval {self.args.heartbeat}",
+                    "production_substitutions": []}
+        (self.tmp / "evidence.json").write_text(
+            json.dumps(evidence, indent=2, sort_keys=True) + "\n")
+        (self.tmp / "exception.txt").write_text(stack)
+        self.persist(evidence)
+        if self.story and self.token:
+            try:
+                evidence.update(self.snapshot())
+                comments = self.api(
+                    f"/issues/{self.args.project}/comments?per_page=100") or []
+                evidence["decisions"] = decision_rows(comments)
+                evidence["sources"] = [row.get("url") for row in evidence["decisions"]
+                                       if row.get("url")]
+            except BaseException as snapshot_error:
+                evidence["snapshot_error"] = (
+                    f"{type(snapshot_error).__name__}: {snapshot_error}")
+        try:
+            write_report(self, evidence)
+        except BaseException as report_error:
+            evidence["report_error"] = f"{type(report_error).__name__}: {report_error}"
+            (self.tmp / "evidence.json").write_text(
+                json.dumps(evidence, indent=2, sort_keys=True) + "\n")
+            self.persist(evidence)
+        try:
+            cleanup_failed_run(self, evidence)
+        except BaseException as cleanup_error:
+            evidence["failed_artifact_retirement"] = {
+                "status": "failed",
+                "error": f"{type(cleanup_error).__name__}: {cleanup_error}",
+            }
+            (self.tmp / "evidence.json").write_text(
+                json.dumps(evidence, indent=2, sort_keys=True) + "\n")
+            self.persist(evidence)
+        if self.token:
+            try:
+                self.api(f"/issues/{self.args.project}/comments", "POST", {"body":
+                    f"## Rung 1 UAT diagnostic\n\nRun `{self.run}` failed. No acceptance "
+                    f"verdict was recorded.\n\nFailure: `{type(error).__name__}: {error}`\n\n"
+                    f"Evidence: `runs/rung1/{self.run}/evidence.json`"})
+            except Exception:
+                pass
 
 
 def finalize(args):
@@ -259,7 +541,9 @@ def finalize(args):
     evidence["observation_cutoff"] = max(row["timestamp"] for row in evidence["decisions"])
     evidence["quality_observations"] = []
     evidence["human_code_interventions"] = "unavailable"
+    evidence["report_phase"] = "final"
     evidence["sources"] = [row.get("url") for row in evidence["decisions"] if row.get("url")]
+    cleanup_accepted_run(helper, evidence)
     evidence_path.write_text(json.dumps(evidence, indent=2, sort_keys=True) + "\n")
     result = rung1_report.build(
         evidence,
@@ -290,7 +574,14 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if args.command == "finalize": return finalize(args)
     run = Run(args)
+    stop_on_signal = base.termination_handler(run)
+    for name in ("SIGTERM", "SIGHUP"):
+        if hasattr(signal, name): signal.signal(getattr(signal, name), stop_on_signal)
     try: return run.execute()
+    except KeyboardInterrupt as exc:
+        run.fail(exc)
+        print("[rung1] interrupted; child poller stopped", file=sys.stderr)
+        return getattr(exc, "exit_code", 130)
     except Exception as exc:
         run.fail(exc); print(f"[rung1] FAIL: {type(exc).__name__}: {exc}", file=sys.stderr); return 2
     finally: run.stop()

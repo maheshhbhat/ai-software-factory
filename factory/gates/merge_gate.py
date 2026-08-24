@@ -68,6 +68,19 @@ GATE_LOGIC_PATTERNS = ("factory/gates/**",)
 # because blocking it would make the gate unmodifiable once required.
 GATE_RUNNER_PATTERNS = (".github/workflows/merge-gate.yml",)
 
+# An automated delivery worker must never modify the factory that authorizes,
+# launches, reviews, or merges that worker. Direct implementation PRs remain
+# possible; the automated marker is checked separately in evaluate().
+PROTECTED_FACTORY_PATTERNS = (
+    "factory/**", ".github/**", ".claude/**",
+    "poll.sh", "approve-plan.sh", "live-e2e.sh", "AGENTS.md", "CLAUDE.md",
+)
+PROTECTED_FACTORY_DIRS = ("factory", ".github", ".claude")
+PROTECTED_FACTORY_FILES = (
+    "poll.sh", "approve-plan.sh", "live-e2e.sh", "AGENTS.md", "CLAUDE.md",
+)
+WORKER_ARTIFACT_RE = re.compile(r"<!--\s*worker-artifact:\d+:[^>]+-->")
+
 STORY_LINK_RE = re.compile(r"^Story:\s*#(\d+)\s*$", re.MULTILINE)
 SCHEMA_LINE_RE = re.compile(r"^Schema-Version:\s*(\d+)\.(\d+)\.(\d+)\s*$", re.MULTILINE)
 SECTION_RE = r"^### {name}\s*$\n(.*?)(?=^### |\Z)"
@@ -91,6 +104,7 @@ class Violation:
     NO_CHANGES = "NO_CHANGES"
     INPUT_UNAVAILABLE = "INPUT_UNAVAILABLE"
     INTERNAL_ERROR = "INTERNAL_ERROR"
+    FACTORY_SELF_MODIFICATION_FORBIDDEN = "FACTORY_SELF_MODIFICATION_FORBIDDEN"
 
 
 @dataclass
@@ -224,6 +238,37 @@ def paths_out_of_scope(paths: list[str], patterns: list[str]) -> list[str]:
     return [p for p in paths if not any(match_path(pat, p) for pat in patterns)]
 
 
+def protected_factory_paths(paths: list[str]) -> list[str]:
+    """Concrete changed paths inside the factory control plane."""
+    return sorted(p for p in paths
+                  if any(match_path(pattern, p)
+                         for pattern in PROTECTED_FACTORY_PATTERNS))
+
+
+def protected_factory_scope(patterns: list[str]) -> list[str]:
+    """Scope patterns whose language can reach the protected control plane.
+
+    Directory protection is decided from the first path segment. This catches
+    literal scopes, broad scopes such as ``**`` and wildcard aliases such as
+    ``f*/**``. Root control files are checked with the frozen path matcher.
+    The result is conservative by design: ambiguous breadth fails closed.
+    """
+    protected = []
+    for pattern in patterns:
+        first = pattern.split("/", 1)[0]
+        directory_reachable = (first == "**" or any(
+            _match_segment(first, directory) for directory in PROTECTED_FACTORY_DIRS))
+        file_reachable = any(match_path(pattern, path)
+                             for path in PROTECTED_FACTORY_FILES)
+        if directory_reachable or file_reachable:
+            protected.append(pattern)
+    return sorted(set(protected))
+
+
+def is_worker_artifact(pr_body: str) -> bool:
+    return bool(WORKER_ARTIFACT_RE.search(pr_body or ""))
+
+
 def _matching(paths: list[str], patterns) -> list[str]:
     return sorted(p for p in paths if any(match_path(pat, p) for pat in patterns))
 
@@ -273,6 +318,14 @@ def evaluate(pr_body: str, changed_paths: list[str], story: dict | None,
 
     if not tests_passed:
         verdict.fail(Violation.TESTS_FAILED, "CI-computed test result was not green.")
+
+    protected = protected_factory_paths(changed_paths)
+    if is_worker_artifact(pr_body) and protected:
+        verdict.fail(
+            Violation.FACTORY_SELF_MODIFICATION_FORBIDDEN,
+            "automated worker artifact changes protected factory paths: "
+            + ", ".join(protected),
+        )
 
     story_number, link_error = parse_story_link(pr_body)
     if link_error:
