@@ -186,8 +186,9 @@ Rung 1 verdict; do not begin Rung 2.
 
 ## Deliverables and exclusions
 
-The implementation deliverables are the snapshot capture, deterministic KPI
-reporter, fixtures and tests, the two generated reports, and the final evidence
-digest. No dashboard, supervisor, webhook runtime, event bus, generalized
+The implementation deliverables are the small acceptance-bound evidence freeze
+inside the existing run bundle, deterministic KPI reporter, fixtures and tests,
+the two generated reports, and the final evidence digest. No generalized
+snapshot collector, dashboard, supervisor, webhook runtime, event bus,
 observability system, agent redesign, coverage threshold or cost ceiling is
 added.
