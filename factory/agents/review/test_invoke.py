@@ -24,8 +24,8 @@ class OutputTests(unittest.TestCase):
         self.assertIn("--safe-mode", cmd)
         self.assertIn("--no-session-persistence", cmd)
 
-    def test_default_review_timeout_is_one_minute(self):
-        self.assertEqual(60, invoke.DEFAULT_REVIEW_TIMEOUT)
+    def test_default_review_timeout_is_three_minutes(self):
+        self.assertEqual(180, invoke.DEFAULT_REVIEW_TIMEOUT)
 
     def test_outcome_is_written_and_parsed_inside_checkout(self):
         with tempfile.TemporaryDirectory() as temp:

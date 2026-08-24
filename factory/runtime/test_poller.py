@@ -387,6 +387,21 @@ class TestPollOnce(unittest.TestCase):
         self.assertEqual(seen, set())
 
 
+class ReviewerLaunchBounds(unittest.TestCase):
+    def test_outer_bound_has_cleanup_margin_and_is_configurable(self):
+        completed = poller.subprocess.CompletedProcess([], 0, "ok", "")
+        with mock.patch.object(poller.subprocess, "run", return_value=completed) as run, \
+             mock.patch.dict(os.environ, {}, clear=True):
+            poller.wake_reviewer("o/r", type("Target", (), {"pull_request": 9})())
+        self.assertEqual(210, run.call_args.kwargs["timeout"])
+
+        with mock.patch.object(poller.subprocess, "run", return_value=completed) as run, \
+             mock.patch.dict(os.environ, {"FACTORY_REVIEW_LAUNCH_TIMEOUT": "240"},
+                             clear=True):
+            poller.wake_reviewer("o/r", type("Target", (), {"pull_request": 9})())
+        self.assertEqual(240, run.call_args.kwargs["timeout"])
+
+
 class TestNoLocalAuthority(unittest.TestCase):
     """§9.12 / architecture §4: GitHub is the source of truth. Local process
     state is a convenience and must never decide what may run."""

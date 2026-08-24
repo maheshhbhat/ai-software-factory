@@ -22,7 +22,7 @@ altering the evidence it observes.
 
 Report only meaningful changes in plain language: Story lifecycle, active
 component and stage, completed component duration, review/check/merge evidence,
-the newest bounded engine-progress event, terminal verdict, and whether the
+the newest bounded engine-progress event, component failures, terminal verdict, and whether the
 harness stopped its poller. An active span is
 `STUCK` when its latest heartbeat is older than forty-five seconds. The normal
 heartbeat is every thirty seconds, so a healthy silent component remains
