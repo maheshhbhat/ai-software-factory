@@ -11,6 +11,8 @@ import sys
 import time
 from datetime import datetime, timezone
 
+STUCK_AFTER_SECONDS = 45
+
 
 def read_json(path: pathlib.Path) -> dict:
     try:
@@ -65,7 +67,7 @@ def active_operations(run: pathlib.Path) -> list[dict]:
         seen = instant(signal.get("timestamp"))
         age = (now - seen).total_seconds() if seen else float("inf")
         active.append({**row, "age":age,
-                       "health":"STUCK" if age >= 15 else "ACTIVE"})
+                       "health":"STUCK" if age >= STUCK_AFTER_SECONDS else "ACTIVE"})
     return sorted(active, key=lambda row: (row.get("story") or 0,
                                            row.get("component") or ""))
 
@@ -81,9 +83,15 @@ def snapshot(run: pathlib.Path) -> tuple[str, bool | None]:
     evidence = read_json(run / "evidence.json")
     state = evidence or read_json(run / "run-state.json")
     if not state:
-        return f"run {run.name}: waiting for state", None
-    lines = [f"run {state.get('run', run.name)} — Project #{state.get('project', '?')} — "
-             f"{state.get('project_state') or state.get('status', 'starting')}"]
+        has_observability = any((run / "observability" / name).exists()
+                                for name in ("operations.jsonl", "telemetry.jsonl"))
+        if not has_observability:
+            return f"run {run.name}: waiting for state", None
+        state = {}
+        lines = [f"run {run.name} — production observability"]
+    else:
+        lines = [f"run {state.get('run', run.name)} — Project #{state.get('project', '?')} — "
+                 f"{state.get('project_state') or state.get('status', 'starting')}"]
     stories = state.get("stories", [])
     if stories and isinstance(stories[0], int):
         lines.append("fixtures: " + ", ".join(f"Story #{number}" for number in stories))

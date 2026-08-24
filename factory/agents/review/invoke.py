@@ -23,6 +23,9 @@ sys.path.insert(0, str(ROOT / "factory" / "runtime"))
 import review_route  # noqa: E402
 import observability as obs  # noqa: E402
 import runlog  # noqa: E402
+import streaming  # noqa: E402
+
+REAL_SUBPROCESS_RUN = subprocess.run
 
 
 class ReviewError(RuntimeError):
@@ -82,11 +85,10 @@ def review_environment(review_home: pathlib.Path) -> dict[str, str]:
     env = clean_environment()
     if not env.get("CLAUDE_CODE_OAUTH_TOKEN"):
         operator_home = os.environ.get("HOME", "")
-        credentials = pathlib.Path(operator_home) / ".claude" / ".credentials.json"
+        credentials = pathlib.Path(operator_home) / ".factory-reviewer-token"
         try:
-            value = json.loads(credentials.read_text())
-            token = value["claudeAiOauth"]["accessToken"]
-        except (OSError, KeyError, TypeError, json.JSONDecodeError) as exc:
+            token = credentials.read_text().strip()
+        except OSError as exc:
             raise ReviewError("reviewer credential unavailable") from exc
         if not isinstance(token, str) or not token:
             raise ReviewError("reviewer credential unavailable")
@@ -117,7 +119,7 @@ def command(input_path: pathlib.Path, output_path: pathlib.Path) -> list[str]:
     return ["claude", "-p", payload, "--permission-mode", "acceptEdits",
             "--tools", "Write", "--allowedTools", "Write",
             "--disallowedTools", "Bash,Agent",
-            "--output-format", "json",
+            "--output-format", "stream-json", "--verbose",
             "--safe-mode", "--no-session-persistence"]
 
 
@@ -160,8 +162,15 @@ def printed(value) -> str:
 
 def run(cmd, *, cwd, timeout=DEFAULT_REVIEW_TIMEOUT, env=None):
     try:
-        result = subprocess.run(cmd, cwd=cwd, env=env or clean_environment(), timeout=timeout,
-                                capture_output=True, text=True)
+        if subprocess.run is REAL_SUBPROCESS_RUN:
+            result = streaming.run(
+                cmd, cwd=cwd, env=env or clean_environment(), timeout=timeout,
+                component="reviewer", operation="engine-stream",
+                engine=engine_name(cmd))
+        else:
+            result = subprocess.run(
+                cmd, cwd=cwd, env=env or clean_environment(), timeout=timeout,
+                capture_output=True, text=True)
     except subprocess.TimeoutExpired as exc:
         raise ReviewError(f"reviewer unavailable: timeout after {timeout}s",
                           printed(exc.stdout)) from exc

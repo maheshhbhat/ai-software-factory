@@ -16,9 +16,12 @@ import time
 import urllib.error
 
 HERE = pathlib.Path(__file__).resolve().parent
+ROOT = HERE.parents[2]
 sys.path.insert(0, str(HERE))
+sys.path.insert(0, str(HERE.parents[1] / "runtime"))
 import artifacts  # noqa: E402
 import contract  # noqa: E402
+import streaming  # noqa: E402
 
 DEFAULT_TIMEOUT = 900
 DEFAULT_MAX_USD = 5.0
@@ -141,7 +144,7 @@ def model_command(input_path: str, timeout: int, max_usd: float) -> list[str]:
     payload = (prompt + "\n\n## Invocation input\n\n"
                + json.dumps(input_value, indent=2)
                + "\n\nReturn only the contract JSON object; do not write GitHub directly.")
-    return ["claude", "-p", payload, "--output-format", "json",
+    return ["claude", "-p", payload, "--output-format", "stream-json", "--verbose",
             "--json-schema", json.dumps(contract.json_schema(altitude), separators=(",", ":")),
             "--max-budget-usd", str(max_usd), "--permission-mode", "dontAsk",
             "--no-session-persistence"]
@@ -154,14 +157,28 @@ def run_model(value: dict, timeout: int, max_usd: float,
         handle.flush()
         command = model_command(handle.name, timeout, max_usd)
         try:
-            result = runner(command, capture_output=True, text=True, timeout=timeout)
+            if runner is subprocess.run:
+                result = streaming.run(
+                    command, cwd=ROOT, env=os.environ.copy(), timeout=timeout,
+                    component="planning-agent", operation="engine-stream",
+                    artifact=(value.get("trigger") or {}).get("number"))
+            else:
+                result = runner(command, capture_output=True, text=True,
+                                timeout=timeout)
         except subprocess.TimeoutExpired as exc:
             raise InvocationError(f"planning timeout exhausted after {timeout}s") from exc
     if result.returncode != 0:
         raise InvocationError(
             f"planning model failed ({result.returncode}): {(result.stderr or '')[:300]}")
     try:
-        envelope = json.loads(result.stdout)
+        try:
+            envelope = json.loads(result.stdout)
+        except json.JSONDecodeError:
+            events = [json.loads(line) for line in result.stdout.splitlines()
+                      if line.strip()]
+            envelope = next((event for event in reversed(events)
+                             if isinstance(event, dict) and
+                             ("structured_output" in event or "result" in event)), None)
         if isinstance(envelope, dict) and isinstance(envelope.get("structured_output"), dict):
             envelope = envelope["structured_output"]
         elif isinstance(envelope, dict) and isinstance(envelope.get("result"), str):

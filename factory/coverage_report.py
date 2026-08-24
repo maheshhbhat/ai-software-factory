@@ -101,6 +101,7 @@ ACCEPTANCE = {
     "acceptance/test_reviewer_real.py",
     "acceptance/test_two_story_real.py",
     "acceptance/test_e2e_doctor.py",
+    "acceptance/test_factory_monitor.py",
 }
 LAYERS = ("unit", "integration", "acceptance")
 

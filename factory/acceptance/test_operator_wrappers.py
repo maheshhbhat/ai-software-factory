@@ -382,18 +382,16 @@ class ReviewerCredential(OperatorWrapper):
         token.write_text(value)
         token.chmod(0o600)
 
-    def test_the_token_file_reaches_the_poller_environment(self):
+    def test_the_reviewer_token_never_reaches_the_shared_poller_environment(self):
         self.mint()
         run = self.poll("--once")
         self.assertTrue(run.polled)
-        self.assertEqual("file-token",
-                         run.environment.get("CLAUDE_CODE_OAUTH_TOKEN"))
+        self.assertNotIn("CLAUDE_CODE_OAUTH_TOKEN", run.environment)
 
-    def test_an_explicit_token_always_wins(self):
+    def test_an_explicit_shared_token_is_removed_before_worker_launch(self):
         self.mint("file-token")
         run = self.poll("--once", CLAUDE_CODE_OAUTH_TOKEN="caller-token")
-        self.assertEqual("caller-token",
-                         run.environment.get("CLAUDE_CODE_OAUTH_TOKEN"))
+        self.assertNotIn("CLAUDE_CODE_OAUTH_TOKEN", run.environment)
 
     def test_no_file_and_no_token_still_polls(self):
         """Reviews fail with their own named error; the wrapper adds none."""

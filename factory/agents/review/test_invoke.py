@@ -102,17 +102,15 @@ class OutputTests(unittest.TestCase):
     def test_review_environment_exposes_only_access_token_and_fresh_home(self):
         with tempfile.TemporaryDirectory() as temp:
             operator = pathlib.Path(temp) / "operator"
-            credentials = operator / ".claude" / ".credentials.json"
-            credentials.parent.mkdir(parents=True)
-            credentials.write_text(json.dumps({"claudeAiOauth": {
-                "accessToken": "access", "refreshToken": "refresh"}}))
+            operator.mkdir()
+            credentials = operator / ".factory-reviewer-token"
+            credentials.write_text("access")
             review_home = pathlib.Path(temp) / "review-home"
             with mock.patch.dict(os.environ, {"HOME": str(operator), "PATH": "/bin",
                                               "FACTORY_WORKER_SESSION": "leak"}, clear=True):
                 env = invoke.review_environment(review_home)
             self.assertEqual("access", env["CLAUDE_CODE_OAUTH_TOKEN"])
             self.assertEqual(str(review_home), env["HOME"])
-            self.assertNotIn("refresh", json.dumps(env))
             self.assertNotIn(str(operator), json.dumps(env))
             self.assertNotIn("FACTORY_WORKER_SESSION", env)
 
@@ -189,7 +187,8 @@ class EngineUsageTests(unittest.TestCase):
     def test_the_default_command_asks_the_reviewer_to_report_its_usage(self):
         with mock.patch.object(pathlib.Path, "read_text", return_value="prompt"):
             cmd = invoke.command(pathlib.Path("input.json"), pathlib.Path("out.json"))
-        self.assertEqual("json", cmd[cmd.index("--output-format") + 1])
+        self.assertEqual("stream-json", cmd[cmd.index("--output-format") + 1])
+        self.assertIn("--verbose", cmd)
         self.assertEqual("claude", invoke.engine_name(cmd))
 
     def test_usage_capture_grants_the_reviewer_no_tool_and_no_identity(self):
