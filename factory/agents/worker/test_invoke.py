@@ -461,6 +461,22 @@ class EngineExplanationTests(unittest.TestCase):
         self.assertEqual(1, code)
         self.assertIn("the engine said: cannot write", buffer.getvalue())
 
+    def test_failure_log_has_non_sensitive_platform_diagnostics(self):
+        error = invoke.DeliveryError("cannot create worktree")
+        with tempfile.TemporaryDirectory() as directory:
+            checkout = pathlib.Path(directory)
+            (checkout / ".git" / "worktrees").mkdir(parents=True)
+            with mock.patch.object(invoke, "execute", side_effect=error), \
+                 mock.patch.dict(invoke.os.environ, {"GH_TOKEN": "secret"}), \
+                 mock.patch.object(invoke.obs, "operational_log") as log:
+                code = invoke.main(["--repo", "o/r", "--story", "1",
+                                    "--checkout", directory])
+        self.assertEqual(1, code)
+        diagnostics = log.call_args.kwargs["platform_diagnostics"]
+        self.assertTrue(diagnostics["git_dir"]["writable_by_access_check"])
+        self.assertEqual("0o755", diagnostics["git_worktrees_dir"]["mode"])
+        self.assertNotIn("secret", json.dumps(diagnostics))
+
     def test_credentials_are_redacted_from_the_explanation(self):
         """runlog.tail owns redaction; the error must go through it."""
         secret = "sk-ant-oat01-" + "a" * 40
