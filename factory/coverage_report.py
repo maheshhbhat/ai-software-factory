@@ -83,6 +83,7 @@ INTEGRATION = {
 }
 ACCEPTANCE = {
     "acceptance/test_acceptance.py",   # the 16 Phase 2 scenarios
+    "acceptance/test_rung1_report.py", # Phase 5 deterministic KPI measurement
     "acceptance/test_phase4_worker.py",
     "acceptance/test_phase4_review.py",
     "acceptance/test_phase4_sampling.py",
