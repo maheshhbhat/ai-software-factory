@@ -93,7 +93,10 @@ Produce exactly one coherent project plan:
    - attempt `0` and a per-invocation spend cap defaulting to exactly
      `$5 / 60 min`; use another bounded value only when the approved planning
      input explicitly requires it.
-3. Update the project with story references and an expected-bells count.
+3. Update the project's falsifiable acceptance checklist so it reflects the
+   complete proposed behavior and every accepted review change, then update the
+   project with story references and an expected-bells count. The checklist is
+   what the owner signs; it must not contradict or omit a material Story outcome.
 4. Post a human-readable digest that explains the ADR, risk order, story phases,
    dependencies, hazards, acceptance criteria, and unresolved choices without
    requiring the reader to reconstruct the plan issue by issue. Every digest
@@ -114,6 +117,7 @@ GitHub numbers—the writer resolves them after issue creation:
 ```json
 {
   "altitude": "project",
+  "acceptance_criteria": ["owner-signable falsifiable project criterion"],
   "adr": {
     "title": "decision title",
     "context": "facts and forces",
