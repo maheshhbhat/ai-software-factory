@@ -74,6 +74,8 @@ import runlog  # noqa: E402
 
 DEFAULT_TIMEOUT = 3600
 DEFAULT_MAX_USD = 40.0
+CAPTURE_LINES = 256
+CAPTURE_CHARS_PER_LINE = 64 * 1024
 MARKER = "worker-artifact"
 SECTION = r"^### {name}\s*$\n(.*?)(?=^### |\Z)"
 STORY_LINK = re.compile(r"(?m)^Story: #(\d+)$")
@@ -430,12 +432,12 @@ def run_engine_streamed(cmd: list[str], *, cwd: pathlib.Path, timeout: int,
     process = subprocess.Popen(
         cmd, cwd=str(cwd), env=env, stdout=subprocess.PIPE,
         stderr=subprocess.PIPE, text=True, start_new_session=True, bufsize=1)
-    captured = {"stdout": collections.deque(maxlen=2000),
-                "stderr": collections.deque(maxlen=2000)}
+    captured = {"stdout": collections.deque(maxlen=CAPTURE_LINES),
+                "stderr": collections.deque(maxlen=CAPTURE_LINES)}
 
     def consume(name: str, stream) -> None:
         for line in iter(stream.readline, ""):
-            captured[name].append(line)
+            captured[name].append(line[-CAPTURE_CHARS_PER_LINE:])
             obs.operational_log(
                 "INFO", "engine output", component="delivery-worker",
                 operation="engine-stream", stage="running", story=story,

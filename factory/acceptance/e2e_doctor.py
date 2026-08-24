@@ -153,7 +153,14 @@ class Doctor:
         """Prove login metadata can actually start the configured worker."""
         configured = self.env.get("FACTORY_WORKER_ORDER", "codex-delivery")
         first = configured.split(",", 1)[0].strip()
-        engine = "claude" if first.startswith("claude") else "codex"
+        if first == "claude-delivery":
+            engine = "claude"
+        elif first == "codex-delivery":
+            engine = "codex"
+        else:
+            self.record("worker engine start", False,
+                        f"unsupported configured worker: {first or 'empty'}")
+            return
         prompt = "Reply exactly FACTORY_WORKER_READY. Do not inspect or change files."
         base = {key: self.env[key] for key in
                 ("PATH", "LANG", "LC_ALL", "SHELL", "TMPDIR")
@@ -175,7 +182,24 @@ class Doctor:
             result = self.command(command, timeout=90, env=base,
                                   cwd=pathlib.Path(directory))
         output = (result.stdout or "") + "\n" + (result.stderr or "")
-        ready = result.returncode == 0 and "FACTORY_WORKER_READY" in output
+        events = []
+        for line in output.splitlines():
+            try:
+                value = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(value, dict):
+                events.append(value)
+        if engine == "claude":
+            answered = any(row.get("type") == "result" and
+                           row.get("result") == "FACTORY_WORKER_READY"
+                           for row in events)
+        else:
+            answered = any(row.get("type") == "item.completed" and
+                           (row.get("item") or {}).get("type") == "agent_message" and
+                           (row.get("item") or {}).get("text") == "FACTORY_WORKER_READY"
+                           for row in events)
+        ready = result.returncode == 0 and answered
         detail = (f"real {engine} worker started and answered" if ready else
                   (output.strip()[-400:] or f"{engine} exited {result.returncode}"))
         self.record("worker engine start", ready, detail)

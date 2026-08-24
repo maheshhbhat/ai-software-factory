@@ -11,18 +11,21 @@ import threading
 import observability as obs
 import runlog
 
+CAPTURE_LINES = 256
+CAPTURE_CHARS_PER_LINE = 64 * 1024
+
 
 def run(command: list[str], *, cwd, env, timeout: int, component: str,
         operation: str, **fields) -> subprocess.CompletedProcess:
     process = subprocess.Popen(
         command, cwd=str(cwd), env=env, stdout=subprocess.PIPE,
         stderr=subprocess.PIPE, text=True, start_new_session=True, bufsize=1)
-    captured = {"stdout": collections.deque(maxlen=2000),
-                "stderr": collections.deque(maxlen=2000)}
+    captured = {"stdout": collections.deque(maxlen=CAPTURE_LINES),
+                "stderr": collections.deque(maxlen=CAPTURE_LINES)}
 
     def consume(name, stream):
         for line in iter(stream.readline, ""):
-            captured[name].append(line)
+            captured[name].append(line[-CAPTURE_CHARS_PER_LINE:])
             obs.operational_log(
                 "INFO", "engine output", component=component,
                 operation=operation, stage="running", stream=name,
