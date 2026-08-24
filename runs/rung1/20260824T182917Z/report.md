@@ -5,11 +5,11 @@ Measurement integrity: PASS
 
 | KPI | Result |
 |---|---|
-| Human touches | 3 (relay: 0) |
+| Human touches | 4 (relay: 0) |
 | Autonomy | unavailable |
 | Worker attempts / retry rate | 1 / 0.00% |
 | Poison rate | 0.00% |
-| Escaped defects | unavailable |
-| Acceptance catches | unavailable |
+| Escaped defects | 0 |
+| Acceptance catches | 0 |
 | Actual engine cost / accepted Story | unavailable |
-| Cycle time | unavailable seconds |
+| Cycle time | 1732.0 seconds |

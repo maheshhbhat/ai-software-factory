@@ -1,13 +1,64 @@
 {
+  "acceptance": {
+    "criteria": [
+      {
+        "criterion": "- After creating exactly one Story, the harness invokes only the normal `poll.sh --once --dry-run` entrypoint and proves that production selection chooses exactly that Story before starting the live poller; any missing, foreign or capacity-blocked selection fails the run.",
+        "result": "pass"
+      },
+      {
+        "criterion": "- Before fixture creation, the doctor proves that the fresh test commitment contains only this Project, this Project\u2019s exact product target is absent from live `main`, and global worker capacity has a free slot; any unreadable or failed condition blocks setup.",
+        "result": "pass"
+      },
+      {
+        "criterion": "- Before outcome acceptance, the frozen run bundle and preliminary report name all eight KPIs: human touches with relay explicit, autonomy, worker attempts and retry rate, poison rate, escaped defects, acceptance catches, actual engine usage/cost where measurable, and cycle time; acceptance-dependent or otherwise unavailable values are reported as unavailable, never converted to zero.",
+        "result": "pass"
+      },
+      {
+        "criterion": "- Human intervention before this decision is fully reported: plan approval, fixture launch, and the owner-authorized acceptance-sequence correction; every delivery lifecycle transition between approval and the acceptance bell is factory-owned, relay is zero, no failed run was manually rescued into green, and replay changes no durable delivery state.",
+        "result": "pass"
+      },
+      {
+        "criterion": "- Pre-acceptance measurement integrity passes for the evidence required at this decision: every claim traces to its named durable source, the plan decision and touch receipt appear exactly once, replayed claim events are deduplicated, availability is separate from integrity, and unavailable values are not fabricated.",
+        "result": "pass"
+      },
+      {
+        "criterion": "- The harness stopped its poller before writing frozen delivery evidence. Observability streams and deterministic coverage checks remain green.",
+        "result": "pass"
+      },
+      {
+        "criterion": "- The live run enters only through `sh poll.sh --interval 15` and uses real GitHub, real Codex delivery, the real configured reviewer, real merge checks, real lifecycle routing and runtime merge; no production-path dependency is mocked, stubbed, faked or substituted.",
+        "result": "pass"
+      },
+      {
+        "criterion": "- The merged Project-specific `/health` endpoint is executed from fresh `main` and returns JSON containing the exact GitHub merge SHA; a missing merge, wrong SHA, invalid response or edit outside Story scope fails the run.",
+        "result": "pass"
+      }
+    ],
+    "result": "pass",
+    "source": "https://github.com/maheshhbhat/ai-software-factory/issues/446#issuecomment-5399882390"
+  },
+  "accepted_artifact_retirement": {
+    "artifacts": [
+      "Commitment #445"
+    ],
+    "meaning": "one-run commitment closed after normal acceptance",
+    "status": "complete"
+  },
   "commitment": 445,
   "decisions": [
     {
       "bell_type": "plan-approval",
       "timestamp": "2026-08-24T18:26:55Z",
       "url": "https://github.com/maheshhbhat/ai-software-factory/issues/446#issuecomment-5399566564"
+    },
+    {
+      "bell_type": "acceptance",
+      "timestamp": "2026-08-24T18:55:47Z",
+      "url": "https://github.com/maheshhbhat/ai-software-factory/issues/446#issuecomment-5399882390"
     }
   ],
   "entrypoint": "sh poll.sh --interval 15",
+  "human_code_interventions": "unavailable",
   "observability": {
     "counts": {
       "operation": 72,
@@ -38,7 +89,7 @@
     ],
     "valid": true
   },
-  "observation_cutoff": "2026-08-24T18:26:55Z",
+  "observation_cutoff": "2026-08-24T18:55:47Z",
   "operator_actions": [
     {
       "action": "fixture-launch",
@@ -60,8 +111,8 @@
   "production_substitutions": [],
   "project": 446,
   "project_state": "project:awaiting-acceptance",
+  "quality_observations": [],
   "reason": "delivery reached the acceptance bell",
-  "report_phase": "pre-acceptance",
   "receipts": [
     {
       "actor": "@maheshhbhat",
@@ -75,9 +126,11 @@
     }
   ],
   "replay_changed": false,
+  "report_phase": "final",
   "run": "20260824T182917Z",
   "sources": [
-    "https://github.com/maheshhbhat/ai-software-factory/issues/446#issuecomment-5399566564"
+    "https://github.com/maheshhbhat/ai-software-factory/issues/446#issuecomment-5399566564",
+    "https://github.com/maheshhbhat/ai-software-factory/issues/446#issuecomment-5399882390"
   ],
   "stories": [
     {

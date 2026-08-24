@@ -6,16 +6,17 @@
   },
   "kpis": {
     "acceptance_catches": {
-      "reason": "outcome acceptance is pending",
-      "status": "unavailable"
+      "count": 0,
+      "criteria": []
     },
     "autonomy": {
       "reason": "the shared GitHub principal cannot independently prove absence of human code involvement",
       "status": "unavailable"
     },
     "cycle_time": {
-      "reason": "canonical cycle-time boundaries are absent",
-      "status": "unavailable"
+      "end": "2026-08-24T18:55:47Z",
+      "seconds": 1732.0,
+      "start": "2026-08-24T18:26:55Z"
     },
     "engine_usage_cost": {
       "by_engine": {
@@ -36,15 +37,15 @@
       "known_reported_cost_usd": 0.0650638
     },
     "escaped_defects": {
-      "reason": "no explicit post-merge defect observation was frozen",
-      "status": "unavailable"
+      "count": 0,
+      "observations": []
     },
     "human_touches": {
       "by_classification": {
-        "decision": 2,
+        "decision": 3,
         "operation": 1
       },
-      "count": 3,
+      "count": 4,
       "records": [
         {
           "actor": "@maheshhbhat",
@@ -55,6 +56,16 @@
           "seconds_spent": 0,
           "story": null,
           "timestamp": "2026-08-24T18:26:55Z"
+        },
+        {
+          "actor": "@maheshhbhat",
+          "bell_type": "acceptance",
+          "classification": "decision",
+          "note": "acceptance-receipt:#446:7feb15dcb154b58ddc8eb754a275a45a98a20ea9c7f1d2e033d0183b4b17427f; acceptance-fingerprint:7feb15dcb154b58ddc8eb754a275a45a98a20ea9c7f1d2e033d0183b4b17427f; GitHub acceptance decision consumed; time unavailable, recorded as 0",
+          "project": "#446",
+          "seconds_spent": 0,
+          "story": null,
+          "timestamp": "2026-08-24T18:55:47Z"
         },
         {
           "action": "fixture-launch",
@@ -90,12 +101,13 @@
     "findings": [],
     "passed": true
   },
-  "observation_cutoff": "2026-08-24T18:26:55Z",
+  "observation_cutoff": "2026-08-24T18:55:47Z",
   "project": 446,
-  "report_phase": "pre-acceptance",
+  "report_phase": "final",
   "run": "20260824T182917Z",
   "schema_version": 1,
   "sources": [
-    "https://github.com/maheshhbhat/ai-software-factory/issues/446#issuecomment-5399566564"
+    "https://github.com/maheshhbhat/ai-software-factory/issues/446#issuecomment-5399566564",
+    "https://github.com/maheshhbhat/ai-software-factory/issues/446#issuecomment-5399882390"
   ]
 }
