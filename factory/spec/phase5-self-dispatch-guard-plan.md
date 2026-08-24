@@ -20,12 +20,17 @@ endpoint returning the build SHA.
 
 The runtime delivered old Story #425 through PR #430 — Story #425 bounded
 delivery and delivered intended Story #429 through PR #431 — Story #429 bounded
-delivery. The harness was stopped and froze a failing bundle. This proves two
-separate gaps:
+delivery. Both are disposable product-like UAT Stories, not factory-code
+Stories. The harness was stopped and froze a failing bundle. The run proves the
+shared test commitment is not an isolated UAT queue.
 
-- the dispatcher has no explicit invariant preventing factory implementation
-  Stories from reaching automated workers; and
-- one shared test commitment is not an isolated UAT queue.
+Separate repository inspection shows that the dispatcher and delivery worker
+have no explicit protected-path invariant preventing a normally authorized
+factory implementation Story from reaching an automated engine. Existing
+factory scope records avoid dispatch only by carrying no lifecycle label, while
+older factory implementation Stories still carry lifecycle labels. That is a
+latent self-dispatch gap; this plan does not misreport the contaminated UAT as
+proof that the gap already executed.
 
 The second gap does not excuse the first. A clean queue must still refuse
 factory self-modification.
