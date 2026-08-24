@@ -79,6 +79,40 @@ def completed_durations(run: pathlib.Path) -> list[dict]:
             and isinstance(row.get("elapsed_seconds"), (int, float))]
 
 
+def engine_progress(run: pathlib.Path) -> list[dict]:
+    """Newest bounded streamed line for each active engine identity."""
+    rows = read_jsonl(run / "observability" / "operations.jsonl")
+    latest = {}
+    for row in rows:
+        if row.get("operation") != "engine-stream" or row.get("message") != "engine output":
+            continue
+        identity = (row.get("component"), row.get("story"),
+                    row.get("pull_request"), row.get("artifact"))
+        latest[identity] = row
+    return list(latest.values())
+
+
+def progress_summary(value: str) -> str:
+    """Turn one engine JSON event into useful bounded operator text."""
+    try:
+        event = json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        return str(value or "")[-200:]
+    kind = event.get("type", "event") if isinstance(event, dict) else "event"
+    subtype = event.get("subtype") if isinstance(event, dict) else None
+    if kind == "system" and subtype == "thinking_tokens":
+        return f"thinking; estimated tokens={event.get('estimated_tokens', '?')}"
+    if kind == "assistant":
+        content = ((event.get("message") or {}).get("content") or [])
+        texts = [item.get("text", "") for item in content
+                 if isinstance(item, dict) and item.get("type") == "text"]
+        return ("assistant: " + " ".join(texts))[-200:]
+    if kind == "result":
+        cost = event.get("total_cost_usd")
+        return "result" + (f"; reported cost=${cost}" if cost is not None else "")
+    return f"{kind}" + (f"/{subtype}" if subtype else "")
+
+
 def snapshot(run: pathlib.Path) -> tuple[str, bool | None]:
     evidence = read_json(run / "evidence.json")
     state = evidence or read_json(run / "run-state.json")
@@ -121,6 +155,12 @@ def snapshot(run: pathlib.Path) -> tuple[str, bool | None]:
         lines.append(f"{row['health']}: {identity} — {row.get('component')}/"
                      f"{row.get('operation')}:{row.get('stage')} — "
                      f"last signal {row['age']:.1f}s ago")
+    for row in engine_progress(run):
+        identity = (f"Story #{row['story']}" if row.get("story") else
+                    f"PR #{row['pull_request']}" if row.get("pull_request") else
+                    f"artifact #{row['artifact']}" if row.get("artifact") else "run")
+        lines.append(f"progress: {identity} — {row.get('component')}: "
+                     f"{progress_summary(row.get('engine_output_tail', ''))}")
     durations = completed_durations(run)
     story_durations = [row for row in durations if row.get("story")]
     run_durations = [row for row in durations if not row.get("story")]
