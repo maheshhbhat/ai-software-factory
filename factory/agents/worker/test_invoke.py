@@ -105,6 +105,24 @@ class BoundaryTests(unittest.TestCase):
         self.assertIn("-p", command)
         self.assertIn("--max-budget-usd", command)
         self.assertIn("--no-session-persistence", command)
+        self.assertEqual("low", command[command.index("--effort") + 1])
+
+    def test_claude_effort_can_be_explicitly_overridden(self):
+        with mock.patch.dict(invoke.os.environ,
+                             {"FACTORY_DELIVERY_CLAUDE_EFFORT": "medium"},
+                             clear=True), \
+             mock.patch.object(invoke.pathlib.Path, "read_text", return_value="prompt"):
+            command = invoke.model_command("input.json", invoke.Bounds(3.0, 10))
+        self.assertEqual("medium", command[command.index("--effort") + 1])
+
+    def test_invalid_claude_effort_fails_before_launch(self):
+        with mock.patch.dict(invoke.os.environ,
+                             {"FACTORY_DELIVERY_CLAUDE_EFFORT": "unbounded"},
+                             clear=True), \
+             mock.patch.object(invoke.pathlib.Path, "read_text", return_value="prompt"):
+            with self.assertRaisesRegex(invoke.DeliveryError,
+                                        "FACTORY_DELIVERY_CLAUDE_EFFORT"):
+                invoke.model_command("input.json", invoke.Bounds(3.0, 10))
 
     def test_default_command_grants_write_permission(self):
         """`dontAsk` denies Edit/Write; the Story asks the engine to edit files."""
