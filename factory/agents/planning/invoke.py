@@ -176,9 +176,31 @@ def run_model(value: dict, timeout: int, max_usd: float,
         except json.JSONDecodeError:
             events = [json.loads(line) for line in result.stdout.splitlines()
                       if line.strip()]
-            envelope = next((event for event in reversed(events)
-                             if isinstance(event, dict) and
-                             ("structured_output" in event or "result" in event)), None)
+            envelope = None
+            for event in reversed(events):
+                if not isinstance(event, dict):
+                    continue
+                structured = event.get("structured_output")
+                if isinstance(structured, dict):
+                    envelope = structured
+                    break
+                message = event.get("message")
+                content = message.get("content", []) if isinstance(message, dict) else []
+                tool_payload = next((block.get("input") for block in reversed(content)
+                                     if isinstance(block, dict)
+                                     and block.get("type") == "tool_use"
+                                     and block.get("name") == "StructuredOutput"
+                                     and isinstance(block.get("input"), dict)), None)
+                if tool_payload is not None:
+                    envelope = tool_payload
+                    break
+                raw = event.get("result")
+                if isinstance(raw, str) and raw.strip():
+                    try:
+                        envelope = json.loads(raw)
+                    except json.JSONDecodeError:
+                        continue
+                    break
         if isinstance(envelope, dict) and isinstance(envelope.get("structured_output"), dict):
             envelope = envelope["structured_output"]
         elif isinstance(envelope, dict) and isinstance(envelope.get("result"), str):
