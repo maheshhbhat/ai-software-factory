@@ -42,7 +42,8 @@ Provider/model names are data. The router does not contain product-specific rule
 3. Prefer prepaid/expiring capacity when capability is sufficient (for example underused Spark capacity).
 4. Prefer remaining capacity, recent success, and lower latency.
 5. Deprioritize a model already used for the same logical task.
-6. Prefer provider diversity in the fallback chain when another eligible provider exists.
+6. Prefer provider diversity in the fallback chain when another eligible provider exists,
+   then fill remaining bounded route slots with the next eligible models.
 7. Explicit model overrides never silently gain a fallback unless the caller opts in.
 8. Experimental models such as Muse are opt-in until promoted by evidence.
 
@@ -62,8 +63,8 @@ The standalone router intentionally does **not** execute models, scrape provider
 
 ## Run tests
 
-From this directory:
+From the repository root:
 
 ```sh
-python3 -m unittest test_router.py
+python3 -m unittest discover -s factory/acceptance -p 'test_capacity_pool.py'
 ```

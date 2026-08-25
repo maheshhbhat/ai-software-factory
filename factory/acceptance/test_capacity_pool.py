@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 import unittest
 
-from router import ModelCapacity, RouteRequest, Tier, remaining_envelope, route
+from factory.capacity_pool.router import (
+    ModelCapacity, RouteRequest, Tier, remaining_envelope, route,
+)
 
 
 CAPS_CODE = frozenset({"code", "write", "tests"})
@@ -86,8 +88,18 @@ class CapacityPoolTests(unittest.TestCase):
         ]
         request = RouteRequest("coding", CAPS_CODE, Tier.BALANCED, "low", 600, 5)
         plan = route(request, registry)
-        self.assertEqual("openai", plan.steps[0].provider)
-        self.assertEqual("anthropic", plan.steps[1].provider)
+        self.assertEqual(
+            [("spark", "openai"), ("sonnet", "anthropic"), ("terra", "openai")],
+            [(step.model, step.provider) for step in plan.steps])
+
+    def test_lowest_sufficient_tier_wins_before_replay_penalty(self):
+        registry = [
+            model("terra", "openai", Tier.BALANCED, CAPS_REASON),
+            model("sol", "openai", Tier.FLAGSHIP, CAPS_REASON),
+        ]
+        request = RouteRequest("planning", CAPS_REASON, Tier.BALANCED, "medium", 600, 5,
+                               prior_models=("terra",))
+        self.assertEqual("terra", route(request, registry).primary.model)
 
     def test_prior_model_is_deprioritized(self):
         registry = [
@@ -118,6 +130,15 @@ class CapacityPoolTests(unittest.TestCase):
         registry = [model("luna", "openai", Tier.ECONOMY, {"classify"})]
         request = RouteRequest("architecture", CAPS_REASON, Tier.FLAGSHIP, "high", 600, 5)
         with self.assertRaisesRegex(LookupError, "no eligible model capacity"):
+            route(request, registry)
+
+    def test_duplicate_model_names_fail_closed(self):
+        registry = [
+            model("shared", "openai", Tier.BALANCED, CAPS_REASON),
+            model("shared", "anthropic", Tier.BALANCED, CAPS_REASON),
+        ]
+        request = RouteRequest("planning", CAPS_REASON, Tier.BALANCED, "medium", 600, 5)
+        with self.assertRaisesRegex(ValueError, "names must be unique"):
             route(request, registry)
 
 

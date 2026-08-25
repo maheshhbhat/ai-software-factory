@@ -129,8 +129,8 @@ def _score(model: ModelCapacity, request: RouteRequest) -> tuple:
     replay_penalty = 1 if model.name in request.prior_models else 0
 
     return (
-        replay_penalty,
         tier_penalty,
+        replay_penalty,
         expiring_bonus,
         same_provider_penalty,
         capacity_penalty,
@@ -146,6 +146,9 @@ def route(request: RouteRequest, registry: Iterable[ModelCapacity], *, max_steps
         raise ValueError("max_steps must be positive")
 
     models = tuple(registry)
+    names = [model.name for model in models]
+    if len(set(names)) != len(names):
+        raise ValueError("model capacity names must be unique")
     by_name = {model.name: model for model in models}
 
     if request.explicit_model:
@@ -173,23 +176,29 @@ def route(request: RouteRequest, registry: Iterable[ModelCapacity], *, max_steps
         raise LookupError("no eligible model capacity")
     candidates.sort(key=lambda item: _score(item, request))
 
-    steps: list[RouteStep] = []
+    ordered: list[ModelCapacity] = []
+    remaining = list(candidates)
     seen_providers: set[str] = set()
-    for model in candidates:
-        if len(steps) >= max_steps:
-            break
-        if steps and model.provider in seen_providers:
-            # Prefer provider diversity in fallback chain when another provider is available.
-            if any(candidate.provider not in seen_providers for candidate in candidates
-                   if candidate.name not in {step.model for step in steps}):
-                continue
+    while remaining and len(ordered) < max_steps:
+        index = 0
+        if ordered:
+            index = next(
+                (position for position, candidate in enumerate(remaining)
+                 if candidate.provider not in seen_providers),
+                0,
+            )
+        model = remaining.pop(index)
+        ordered.append(model)
+        seen_providers.add(model.provider)
+
+    steps: list[RouteStep] = []
+    for model in ordered:
         reason = "lowest sufficient tier"
         if model.prepaid_or_expiring:
             reason += "; prefers prepaid/expiring capacity"
         if model.name in request.prior_models:
             reason += "; prior-attempt replay only because no better eligible capacity ranked above it"
         steps.append(RouteStep(model.name, model.provider, model.tier, request.effort, reason))
-        seen_providers.add(model.provider)
 
     return RoutePlan(request.task_type, tuple(steps), request.total_timeout_seconds,
                      request.total_budget_units, FALLBACK_ON, STOP_ON)

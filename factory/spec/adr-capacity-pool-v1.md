@@ -43,7 +43,8 @@ Output:
 1. Lowest sufficient capability tier wins.
 2. Prepaid/expiring capacity is preferred when it can safely perform the task.
 3. Capability mismatch, exhausted capacity, unsupported effort, and unavailable providers are ineligible.
-4. Provider diversity is preferred in fallback chains.
+4. Provider diversity is preferred in fallback chains, without discarding eligible
+   same-provider models when bounded route slots remain.
 5. Prior-attempt models are deprioritized to avoid pointless replay.
 6. Explicit overrides do not silently gain fallback.
 7. Experimental providers/models are opt-in until promoted by evidence.
