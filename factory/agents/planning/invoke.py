@@ -194,11 +194,21 @@ def run_model(value: dict, timeout: int, max_usd: float,
                     break
                 message = event.get("message")
                 content = message.get("content", []) if isinstance(message, dict) else []
-                tool_payload = next((block.get("input") for block in reversed(content)
-                                     if isinstance(block, dict)
-                                     and block.get("type") == "tool_use"
-                                     and block.get("name") == "StructuredOutput"
-                                     and isinstance(block.get("input"), dict)), None)
+                tool_payload = None
+                for block in reversed(content):
+                    if (not isinstance(block, dict)
+                            or block.get("type") != "tool_use"
+                            or block.get("name") != "StructuredOutput"):
+                        continue
+                    candidate = block.get("input")
+                    if isinstance(candidate, str):
+                        try:
+                            candidate = json.loads(candidate)
+                        except json.JSONDecodeError:
+                            continue
+                    if isinstance(candidate, dict):
+                        tool_payload = candidate
+                        break
                 if tool_payload is not None:
                     envelope = tool_payload
                     break

@@ -181,6 +181,21 @@ class InvocationTests(unittest.TestCase):
                 {}, 7, 1.0, runner=lambda *a, **k: Result(stdout=stdout))
         self.assertEqual(expected, actual)
 
+    def test_stream_decodes_structured_output_tool_string_input(self):
+        expected = campaign_output()
+        events = [
+            {"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "name": "StructuredOutput",
+                 "input": json.dumps(expected)}
+            ]}},
+            {"type": "result", "result": "Structured output provided successfully"},
+        ]
+        stdout = "\n".join(json.dumps(event) for event in events)
+        with mock.patch.dict(os.environ, {"FACTORY_PLANNING_MODEL_CMD": "fake {input_file}"}):
+            actual = invoke.run_model(
+                {}, 7, 1.0, runner=lambda *a, **k: Result(stdout=stdout))
+        self.assertEqual(expected, actual)
+
     def test_campaign_state_version_ignores_comments_and_updated_at(self):
         client = Client()
         issue = client.get_issue(1)
