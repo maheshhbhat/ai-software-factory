@@ -167,6 +167,28 @@ class InvocationTests(unittest.TestCase):
         budget = calls[0][calls[0].index("--max-budget-usd") + 1]
         self.assertEqual("0.8", budget)
 
+    def test_fallback_failure_reports_terminal_codex_error(self):
+        calls = []
+        terminal = json.dumps({
+            "type": "turn.failed",
+            "error": {"message": "Invalid schema for response_format"},
+        })
+
+        def runner(command, **kwargs):
+            calls.append(command)
+            if command[0] == "claude":
+                return Result(1, stderr="You've hit your session limit")
+            return Result(1, stdout=terminal,
+                          stderr="Reading additional input from stdin")
+
+        value = {"trigger": {"labels": ["type:roadmap-commitment"]}}
+        with mock.patch.dict(os.environ, {}, clear=True), \
+             self.assertRaisesRegex(invoke.InvocationError,
+                                    "Invalid schema for response_format"):
+            invoke.run_model(value, 100, 10, runner=runner,
+                             clock=iter((0, 0)).__next__)
+        self.assertEqual(["claude", "codex"], [command[0] for command in calls])
+
     def test_default_claude_timeout_falls_back_but_bad_output_does_not(self):
         expected = campaign_output()
         calls, timeouts = [], []

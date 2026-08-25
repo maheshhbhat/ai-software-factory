@@ -36,7 +36,7 @@ PROJECT_KEYS = frozenset({
 CAMPAIGN_JSON_SCHEMA = {
     "type": "object", "additionalProperties": False,
     "properties": {
-        "altitude": {"const": "campaign"},
+        "altitude": {"type": "string", "const": "campaign"},
         "project": {"type": "object", "additionalProperties": False,
                     "properties": {
                         "title": {"type": "string"}, "goal": {"type": "string"},
@@ -54,7 +54,7 @@ CAMPAIGN_JSON_SCHEMA = {
 PROJECT_JSON_SCHEMA = {
     "type": "object", "additionalProperties": False,
     "properties": {
-        "altitude": {"const": "project"},
+        "altitude": {"type": "string", "const": "project"},
         "acceptance_criteria": {"type": "array", "items": {"type": "string"},
                                 "minItems": 1},
         "adr": {"type": "object", "additionalProperties": False,
@@ -70,7 +70,8 @@ PROJECT_JSON_SCHEMA = {
             "properties": {
                 "key": {"type": "string"}, "title": {"type": "string"},
                 "spec": {"type": "string"},
-                "phase": {"enum": ["build", "ship", "shadow", "cutover", "hardening"]},
+                "phase": {"type": "string",
+                          "enum": ["build", "ship", "shadow", "cutover", "hardening"]},
                 "depends_on": {"type": "array", "items": {"type": "string"}},
                 "hazard": {"type": "boolean"},
                 "acceptance_criteria": {"type": "array", "items": {"type": "string"},

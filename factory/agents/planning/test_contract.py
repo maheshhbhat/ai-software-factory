@@ -5,6 +5,18 @@ import contract
 
 
 class AltitudeTests(unittest.TestCase):
+    def test_codex_structured_output_discriminators_have_explicit_types(self):
+        for altitude in contract.Altitude:
+            pending = [contract.json_schema(altitude)]
+            while pending:
+                value = pending.pop()
+                if isinstance(value, dict):
+                    if "const" in value or "enum" in value:
+                        self.assertIn("type", value)
+                    pending.extend(value.values())
+                elif isinstance(value, list):
+                    pending.extend(value)
+
     def test_trigger_type_selects_altitude(self):
         self.assertEqual(contract.Altitude.CAMPAIGN,
                          contract.select_altitude({"type:roadmap-commitment"}))

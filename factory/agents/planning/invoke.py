@@ -199,6 +199,22 @@ def _codex_stdout(result, output_path: pathlib.Path) -> str:
     return result.stdout or ""
 
 
+def _codex_failure_detail(result) -> str:
+    """Return the terminal Codex error, falling back to the stderr tail."""
+    for line in reversed((result.stdout or "").splitlines()):
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict) or event.get("type") != "turn.failed":
+            continue
+        error = event.get("error")
+        message = error.get("message") if isinstance(error, dict) else None
+        if isinstance(message, str) and message.strip():
+            return message.strip()[:1000]
+    return (result.stderr or result.stdout or "")[-1000:]
+
+
 def planning_route(timeout: int, max_usd: float) -> capacity_pool.RoutePlan:
     primary_model = os.environ.get(
         "FACTORY_PLANNING_PRIMARY_MODEL", DEFAULT_PRIMARY_MODEL).strip()
@@ -351,7 +367,7 @@ def run_model(value: dict, timeout: int, max_usd: float,
             if result.returncode != 0:
                 raise InvocationError(
                     f"planning fallback failed ({result.returncode}): "
-                    f"{(result.stderr or '')[:300]}")
+                    f"{_codex_failure_detail(result)}")
             obs.operational_log(
                 "INFO", "planning capacity fallback completed",
                 component="planning-agent", operation="capacity-route",
