@@ -50,8 +50,10 @@ class Rung1ReportTests(unittest.TestCase):
         self.assertEqual(.5, kpi["poison_rate"]["rate"])
         self.assertEqual(0, kpi["escaped_defects"]["count"])
         self.assertEqual(0, kpi["acceptance_catches"]["count"])
-        self.assertEqual("partial", kpi["engine_usage_cost"]["cost_status"])
+        self.assertEqual("lower-bound", kpi["engine_usage_cost"]["cost_status"])
         self.assertEqual("unavailable", kpi["engine_usage_cost"]["cost_per_accepted_story_usd"])
+        self.assertEqual(.1, kpi["engine_usage_cost"]
+                         ["known_reported_cost_per_accepted_story_usd"])
         self.assertEqual(120, kpi["cycle_time"]["seconds"])
 
     def test_missing_receipt_fails_integrity_but_unavailable_metric_does_not(self):
@@ -72,6 +74,17 @@ class Rung1ReportTests(unittest.TestCase):
         self.assertEqual("unavailable", result["kpis"]["escaped_defects"]["status"])
         self.assertEqual("unavailable", result["kpis"]["acceptance_catches"]["status"])
         self.assertTrue(result["measurement_integrity"]["passed"])
+
+    def test_unreported_engine_event_makes_cost_a_lower_bound(self):
+        values = fixture()
+        values[2][1] = {"metric": "engine.usage", "story": 502, "engine": "codex",
+                        "usage_reported": False, "usage": "engine reported no usage"}
+        result = report.build(*values)
+        cost = result["kpis"]["engine_usage_cost"]
+        self.assertEqual("lower-bound", cost["cost_status"])
+        self.assertEqual("unavailable", cost["cost_per_accepted_story_usd"])
+        self.assertEqual(.1, cost["known_reported_cost_per_accepted_story_usd"])
+        self.assertEqual(1, cost["by_engine"]["codex"]["unreported_invocations"])
 
     def test_pre_acceptance_report_is_complete_without_forging_the_decision(self):
         evidence, process, telemetry, touches = fixture()

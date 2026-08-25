@@ -1,0 +1,15 @@
+{"component":"delivery-worker","engine":"codex","metric":"engine.usage","story":20,"timestamp":"2026-08-24T22:44:08.823196Z","usage":"engine reported no usage","usage_reported":false}
+{"component":"delivery-worker","engine":"claude","metric":"engine.usage","story":20,"timestamp":"2026-08-24T22:56:39.616537Z","usage":{"total_cost_usd":4.304800999999999},"usage_reported":true}
+{"component":"delivery-worker","engine":"claude","metric":"engine.usage","story":20,"timestamp":"2026-08-24T23:37:35.326306Z","usage":{"total_cost_usd":4.527904},"usage_reported":true}
+{"component":"independent-review","engine":"claude","metric":"engine.usage","pull_request":25,"story":20,"timestamp":"2026-08-24T23:53:34.187589Z","usage":{"total_cost_usd":0.2327358},"usage_reported":true}
+{"component":"delivery-worker","engine":"claude","metric":"engine.usage","story":21,"timestamp":"2026-08-25T00:06:29.567241Z","usage":"engine reported no usage","usage_reported":false}
+{"component":"delivery-worker","engine":"claude","metric":"engine.usage","story":21,"timestamp":"2026-08-25T01:06:38.643167Z","usage":{"total_cost_usd":5.370775999999998},"usage_reported":true}
+{"component":"delivery-worker","engine":"claude","metric":"engine.usage","story":21,"timestamp":"2026-08-25T01:28:37.749557Z","usage":{"total_cost_usd":5.2389269999999994},"usage_reported":true}
+{"component":"delivery-worker","engine":"claude","metric":"engine.usage","story":21,"timestamp":"2026-08-25T01:45:58.716763Z","usage":{"total_cost_usd":2.9740399999999996},"usage_reported":true}
+{"component":"delivery-worker","engine":"claude","metric":"engine.usage","story":21,"timestamp":"2026-08-25T09:40:27.618418Z","usage":{"total_cost_usd":4.524527},"usage_reported":true}
+{"component":"independent-review","engine":"claude","metric":"engine.usage","pull_request":26,"story":21,"timestamp":"2026-08-25T09:44:40.572337Z","usage":{"total_cost_usd":0.325414},"usage_reported":true}
+{"component":"delivery-worker","engine":"claude","metric":"engine.usage","story":22,"timestamp":"2026-08-25T09:47:08.343924Z","usage":{"total_cost_usd":1.34399},"usage_reported":true}
+{"component":"delivery-worker","engine":"claude","metric":"engine.usage","story":23,"timestamp":"2026-08-25T09:50:35.702443Z","usage":{"total_cost_usd":2.089365},"usage_reported":true}
+{"component":"independent-review","engine":"claude","metric":"engine.usage","pull_request":27,"story":22,"timestamp":"2026-08-25T09:53:24.520701Z","usage":{"total_cost_usd":0.19065000000000001},"usage_reported":true}
+{"component":"independent-review","engine":"claude","metric":"engine.usage","pull_request":28,"story":23,"timestamp":"2026-08-25T09:55:16.862361Z","usage":{"total_cost_usd":0.20999659999999998},"usage_reported":true}
+{"component":"independent-review","engine":"claude","metric":"engine.usage","pull_request":28,"story":23,"timestamp":"2026-08-25T10:21:08.810682Z","usage":{"total_cost_usd":0.1901946},"usage_reported":true}
