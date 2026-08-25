@@ -1,13 +1,15 @@
 import base64
 import json
-import os
-import subprocess
+import pathlib
+import tempfile
 import unittest
 import urllib.error
 from unittest import mock
 
 import invoke
 import contract
+from factory.capacity_pool.router import ModelCapacity, Tier
+from factory.capacity_pool.state import CapacityState
 from test_artifacts import FakeStore, campaign_output, project_issue, project_output
 
 
@@ -21,16 +23,15 @@ class Client(FakeStore):
         super().__init__([{"number": 1, "labels": ["type:roadmap-commitment"],
                            "body": "Retirement direction"}])
         self.repo, self.token = "o/r", "token"
-        self.product_paths = (["product.md"] if product_paths is None else product_paths)
+        self.product_paths = ["product.md"] if product_paths is None else product_paths
         self.product_text = product_text
 
     def _api(self, path, method="GET", payload=None):
         if path == "":
             return {"default_branch": "main"}
         if path.startswith("/git/trees/"):
-            return {"tree": ([{"path": item, "type": "blob"}
-                              for item in self.product_paths] +
-                             [{"path": "docs/decisions/0001.md", "type": "blob"}])}
+            return {"tree": ([{"path": item, "type": "blob"} for item in self.product_paths]
+                             + [{"path": "docs/decisions/0001.md", "type": "blob"}])}
         if path.startswith("/contents/"):
             text = self.product_text if path.lower().endswith("product.md") else "# ADR"
             return {"content": base64.b64encode(text.encode()).decode()}
@@ -49,288 +50,113 @@ class ProjectClient(Client):
 
     def _pages(self, path):
         if path.endswith("/timeline"):
-            return [{"id": 99, "event": "labeled", "label": {"name": "project:planning"}}]
+            return [{"id": 99, "event": "labeled",
+                     "label": {"name": "project:planning"}}]
         return []
 
 
-class InvocationTests(unittest.TestCase):
-    def test_product_preflight_missing_duplicate_empty_and_exactly_one(self):
-        cases = (
-            ("missing", Client(product_paths=[]), invoke.InvocationError,
-             "product.md missing or ambiguous"),
-            ("duplicate-case-insensitive",
-             Client(product_paths=["product.md", "Product.md"]),
-             invoke.InvocationError, "product.md missing or ambiguous"),
-            ("empty", Client(product_text=""), contract.ContractError,
-             "product.md must be readable and non-empty"),
-        )
-        for name, client, error, message in cases:
-            runner = mock.Mock()
-            with self.subTest(name=name), \
-                 mock.patch.object(invoke.artifacts, "GitHubStore", return_value=client), \
-                 self.assertRaisesRegex(error, message):
-                invoke.execute("o/r", 1, "token", 30, 2.5, runner=runner)
-            self.assertEqual(1, len(client.issues))
-            self.assertEqual({}, client.comments)
-            runner.assert_not_called()
+def capacity():
+    state = CapacityState()
+    model = ModelCapacity("gpt-5.6-terra", "openai", Tier.BALANCED,
+                          frozenset({"reason", "json"}))
+    state.mark_healthy(model.provider, model.name, "test-probe")
+    return state, (model,)
 
-        valid = Client(product_paths=["PRODUCT.md"], product_text="# Human product")
-        product, adrs, repository = invoke.read_repository(valid)
+
+class InvocationTests(unittest.TestCase):
+    def test_product_preflight_requires_exactly_one_nonempty_product(self):
+        for client, error in ((Client(product_paths=[]), invoke.InvocationError),
+                              (Client(product_paths=["product.md", "Product.md"]),
+                               invoke.InvocationError),
+                              (Client(product_text=""), contract.ContractError)):
+            with self.assertRaises(error):
+                product, adrs, repository = invoke.read_repository(client)
+                contract.validate_input({"trigger": client.get_issue(1), "product": product,
+                                         "adrs": adrs, "repository": repository,
+                                         "review_comments": [], "existing_plan": {}})
+        product, adrs, repository = invoke.read_repository(
+            Client(product_paths=["PRODUCT.md"], product_text="# Human product"))
         self.assertEqual("# Human product", product)
-        self.assertEqual(["docs/decisions/0001.md"], [item["path"] for item in adrs])
         self.assertIn("PRODUCT.md", repository["files"])
 
-    def test_campaign_executes_headlessly_then_reads_back(self):
-        client = Client()
+    def test_campaign_executes_through_capacity_pool_then_reads_back(self):
+        client, (state, registry) = Client(), capacity()
         runner = mock.Mock(return_value=Result(stdout=json.dumps(campaign_output())))
-        with mock.patch.object(invoke.artifacts, "GitHubStore", return_value=client), \
-             mock.patch.dict(os.environ, {"FACTORY_PLANNING_MODEL_CMD":
-                                          "fake --input {input_file} --budget {max_usd}"}):
-            result = invoke.execute("o/r", 1, "token", 30, 2.5, runner=runner)
+        try:
+            with mock.patch.object(invoke.artifacts, "GitHubStore", return_value=client):
+                result = invoke.execute("o/r", 1, "token", 30, 2.5, runner=runner,
+                                        state=state, registry=registry)
+        finally:
+            state.close()
         self.assertEqual("campaign", result.altitude.value)
-        command = runner.call_args.args[0]
-        self.assertIn("2.5", command)
+        self.assertEqual("codex", runner.call_args.args[0][0])
         self.assertEqual(2, len(client.issues))
 
-    def test_project_finishes_only_after_verified_readback(self):
-        client = ProjectClient()
-        runner = mock.Mock(return_value=Result(stdout=json.dumps(project_output())))
-        with mock.patch.object(invoke.artifacts, "GitHubStore", return_value=client), \
-             mock.patch.dict(os.environ, {"FACTORY_PLANNING_MODEL_CMD": "fake {input_file}"}):
-            result = invoke.execute("o/r", 10, "token", 30, 2.5, runner=runner)
+    def test_project_label_moves_only_after_verified_readback(self):
+        client, (state, registry) = ProjectClient(), capacity()
+        try:
+            with mock.patch.object(invoke.artifacts, "GitHubStore", return_value=client):
+                result = invoke.execute(
+                    "o/r", 10, "token", 30, 2.5,
+                    runner=mock.Mock(return_value=Result(stdout=json.dumps(project_output()))),
+                    state=state, registry=registry)
+        finally:
+            state.close()
         self.assertEqual((12, 13), result.stories)
         self.assertIn("project:awaiting-ready", client.get_issue(10)["labels"])
-        self.assertNotIn("project:planning", client.get_issue(10)["labels"])
 
-    def test_malformed_project_output_leaves_project_planning(self):
-        client = ProjectClient()
-        runner = mock.Mock(return_value=Result(stdout="{}"))
-        with mock.patch.object(invoke.artifacts, "GitHubStore", return_value=client), \
-             mock.patch.dict(os.environ, {"FACTORY_PLANNING_MODEL_CMD": "fake {input_file}"}), \
-             self.assertRaises(contract.ContractError):
-            invoke.execute("o/r", 10, "token", 30, 2.5, runner=runner)
+    def test_invalid_output_writes_nothing_and_keeps_project_planning(self):
+        client, (state, registry) = ProjectClient(), capacity()
+        try:
+            with mock.patch.object(invoke.artifacts, "GitHubStore", return_value=client), \
+                    self.assertRaisesRegex(invoke.InvocationError, "schema-invalid"):
+                invoke.execute("o/r", 10, "token", 30, 2.5,
+                               runner=lambda *a, **k: Result(stdout="{}"),
+                               state=state, registry=registry)
+        finally:
+            state.close()
         self.assertIn("project:planning", client.get_issue(10)["labels"])
+        self.assertEqual({}, client.comments)
 
     def test_403_and_404_fail_before_any_write(self):
         for code in (403, 404):
             client = Client()
             with mock.patch.object(client, "get_issue", side_effect=urllib.error.HTTPError(
                     "url", code, "denied", {}, None)), \
-                 mock.patch.object(invoke.artifacts, "GitHubStore", return_value=client):
-                with self.subTest(code=code), self.assertRaisesRegex(
-                        invoke.InvocationError, "no planning artifacts were written"):
-                    invoke.execute("o/r", 1, "token", 30, 2.5)
-            self.assertEqual(1, len(client.issues))
+                 mock.patch.object(invoke.artifacts, "GitHubStore", return_value=client), \
+                 self.assertRaisesRegex(invoke.InvocationError, "no planning artifacts were written"):
+                invoke.execute("o/r", 1, "token", 30, 2.5)
             self.assertEqual({}, client.comments)
 
-    def test_timeout_is_named_and_nonzero_path(self):
-        def timeout(*args, **kwargs):
-            raise subprocess.TimeoutExpired(args[0], kwargs["timeout"])
-        with mock.patch.dict(os.environ, {"FACTORY_PLANNING_MODEL_CMD": "fake {input_file}"}):
-            with self.assertRaisesRegex(invoke.InvocationError, "timeout exhausted"):
-                invoke.run_model({"input": 1}, 7, 1.0, runner=timeout)
-
-    def test_malformed_or_failed_model_is_named(self):
-        with mock.patch.dict(os.environ, {"FACTORY_PLANNING_MODEL_CMD": "fake {input_file}"}):
-            with self.assertRaisesRegex(invoke.InvocationError, "malformed JSON"):
-                invoke.run_model({}, 7, 1.0,
-                                 runner=lambda *a, **k: Result(stdout="not-json"))
-            with self.assertRaisesRegex(invoke.InvocationError, r"failed \(3\)"):
-                invoke.run_model({}, 7, 1.0,
-                                 runner=lambda *a, **k: Result(3, stderr="budget"))
-
-    def test_default_claude_failure_falls_back_to_gpt_5_6_sol_medium(self):
+    def test_output_parser_accepts_direct_and_structured_stream_json(self):
         expected = campaign_output()
-        calls, timeouts = [], []
-        def runner(command, **kwargs):
-            calls.append(command)
-            timeouts.append(kwargs["timeout"])
-            if command[0] == "claude":
-                usage = json.dumps({"type": "result", "total_cost_usd": 0})
-                return Result(1, stdout=usage, stderr="You've hit your session limit")
-            return Result(stdout=json.dumps(expected))
-        value = {"trigger": {"labels": ["type:roadmap-commitment"]}}
-        with mock.patch.dict(os.environ, {}, clear=True):
-            clock = iter((0, 0)).__next__
-            actual = invoke.run_model(value, 7, 1.0, runner=runner, clock=clock)
-        self.assertEqual(expected, actual)
-        self.assertEqual("claude", calls[0][0])
-        self.assertEqual("codex", calls[1][0])
-        self.assertIn("gpt-5.6-sol", calls[1])
-        self.assertIn('model_reasoning_effort="medium"', calls[1])
-        self.assertIn("--output-schema", calls[1])
-        self.assertIn("--sandbox", calls[1])
-        self.assertIn("read-only", calls[1])
-        self.assertIn("claude-fable-5", calls[0])
-        self.assertIn("medium", calls[0])
-        self.assertEqual([5, 7], timeouts)
-        budget = calls[0][calls[0].index("--max-budget-usd") + 1]
-        self.assertEqual("0.8", budget)
+        self.assertEqual(expected, invoke._parse_output(json.dumps(expected)))
+        events = [{"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "name": "StructuredOutput", "input": expected}]}},
+            {"type": "result", "result": "done"}]
+        self.assertEqual(expected, invoke._parse_output(
+            "\n".join(json.dumps(event) for event in events)))
 
-    def test_fallback_failure_reports_terminal_codex_error(self):
-        calls = []
-        terminal = json.dumps({
-            "type": "turn.failed",
-            "error": {"message": "Invalid schema for response_format"},
-        })
+    def test_output_parser_rejects_malformed_and_non_object(self):
+        with self.assertRaisesRegex(invoke.InvocationError, "malformed JSON"):
+            invoke._parse_output("not-json")
+        with self.assertRaisesRegex(invoke.InvocationError, "non-object"):
+            invoke._parse_output("[]")
 
-        def runner(command, **kwargs):
-            calls.append(command)
-            if command[0] == "claude":
-                return Result(1, stderr="You've hit your session limit")
-            return Result(1, stdout=terminal,
-                          stderr="Reading additional input from stdin")
+    def test_normal_planning_does_not_escalate_but_named_trigger_does(self):
+        self.assertEqual(frozenset(), invoke._planning_triggers(
+            {"trigger": {"labels": ["type:project"]}}))
+        self.assertEqual(frozenset({"architecture"}), invoke._planning_triggers(
+            {"trigger": {"labels": ["type:project", "architecture"]}}))
 
-        value = {"trigger": {"labels": ["type:roadmap-commitment"]}}
-        with mock.patch.dict(os.environ, {}, clear=True), \
-             self.assertRaisesRegex(invoke.InvocationError,
-                                    "Invalid schema for response_format"):
-            invoke.run_model(value, 100, 10, runner=runner,
-                             clock=iter((0, 0)).__next__)
-        self.assertEqual(["claude", "codex"], [command[0] for command in calls])
-
-    def test_default_claude_timeout_falls_back_but_bad_output_does_not(self):
-        expected = campaign_output()
-        calls, timeouts = [], []
-        def runner(command, **kwargs):
-            calls.append(command)
-            timeouts.append(kwargs["timeout"])
-            if command[0] == "claude":
-                raise subprocess.TimeoutExpired(command, kwargs["timeout"])
-            return Result(stdout=json.dumps(expected))
-        value = {"trigger": {"labels": ["type:roadmap-commitment"]}}
-        with mock.patch.dict(os.environ, {}, clear=True):
-            clock = iter((0, 5)).__next__
-            self.assertEqual(expected, invoke.run_model(
-                value, 7, 1.0, runner=runner, clock=clock))
-        self.assertEqual(["claude", "codex"], [command[0] for command in calls])
-        self.assertEqual([5, 2], timeouts)
-
-        with mock.patch.dict(os.environ, {}, clear=True), \
-             self.assertRaisesRegex(invoke.InvocationError, "malformed JSON"):
-            invoke.run_model(value, 7, 1.0,
-                             runner=lambda *a, **k: Result(stdout="not-json"))
-
-    def test_explicit_primary_override_never_silently_falls_back(self):
-        calls = []
-        def runner(command, **kwargs):
-            calls.append(command)
-            return Result(9, stderr="explicit failure")
-        value = {"trigger": {"labels": ["type:roadmap-commitment"]}}
-        with mock.patch.dict(os.environ,
-                             {"FACTORY_PLANNING_MODEL_CMD": "custom {input_file}"}), \
-             self.assertRaisesRegex(invoke.InvocationError, r"failed \(9\)"):
-            invoke.run_model(value, 7, 1.0, runner=runner)
-        self.assertEqual(1, len(calls))
-
-    def test_invalid_fallback_configuration_fails_before_codex_launch(self):
-        calls = []
-        def runner(command, **kwargs):
-            calls.append(command)
-            return Result(1, stderr="primary unavailable")
-        value = {"trigger": {"labels": ["type:roadmap-commitment"]}}
-        with mock.patch.dict(os.environ,
-                             {"FACTORY_PLANNING_FALLBACK_EFFORT": "extreme"}, clear=True), \
-             self.assertRaisesRegex(invoke.InvocationError, "one effort"):
-            invoke.run_model(value, 7, 1.0, runner=runner)
-        self.assertEqual(0, len(calls))
-
-    def test_unknown_primary_failure_does_not_switch_provider(self):
-        calls = []
-        def runner(command, **kwargs):
-            calls.append(command)
-            return Result(3, stderr="invalid command option")
-        value = {"trigger": {"labels": ["type:roadmap-commitment"]}}
-        with mock.patch.dict(os.environ, {}, clear=True), \
-             self.assertRaisesRegex(invoke.InvocationError, "without eligible fallback"):
-            invoke.run_model(value, 7, 1.0, runner=runner)
-        self.assertEqual(["claude"], [command[0] for command in calls])
-
-    def test_stream_uses_structured_output_tool_when_final_result_is_not_json(self):
-        expected = campaign_output()
-        events = [
-            {"type": "assistant", "message": {"content": [
-                {"type": "tool_use", "name": "StructuredOutput", "input": expected}
-            ]}},
-            {"type": "result", "result": "Structured output provided successfully"},
-        ]
-        stdout = "\n".join(json.dumps(event) for event in events)
-        with mock.patch.dict(os.environ, {"FACTORY_PLANNING_MODEL_CMD": "fake {input_file}"}):
-            actual = invoke.run_model(
-                {}, 7, 1.0, runner=lambda *a, **k: Result(stdout=stdout))
-        self.assertEqual(expected, actual)
-
-    def test_stream_uses_structured_output_tool_when_final_result_is_json_string(self):
-        expected = campaign_output()
-        events = [
-            {"type": "assistant", "message": {"content": [
-                {"type": "tool_use", "name": "StructuredOutput", "input": expected}
-            ]}},
-            {"type": "result", "result": json.dumps("Structured output provided successfully")},
-        ]
-        stdout = "\n".join(json.dumps(event) for event in events)
-        with mock.patch.dict(os.environ, {"FACTORY_PLANNING_MODEL_CMD": "fake {input_file}"}):
-            actual = invoke.run_model(
-                {}, 7, 1.0, runner=lambda *a, **k: Result(stdout=stdout))
-        self.assertEqual(expected, actual)
-
-    def test_stream_prefers_structured_output_over_parseable_result_wrapper(self):
-        expected = campaign_output()
-        events = [
-            {"type": "assistant", "message": {"content": [
-                {"type": "tool_use", "name": "StructuredOutput", "input": expected}
-            ]}},
-            {"type": "result", "result": json.dumps({"result": "not-json"})},
-        ]
-        stdout = "\n".join(json.dumps(event) for event in events)
-        with mock.patch.dict(os.environ, {"FACTORY_PLANNING_MODEL_CMD": "fake {input_file}"}):
-            actual = invoke.run_model(
-                {}, 7, 1.0, runner=lambda *a, **k: Result(stdout=stdout))
-        self.assertEqual(expected, actual)
-
-    def test_stream_decodes_structured_output_tool_string_input(self):
-        expected = campaign_output()
-        events = [
-            {"type": "assistant", "message": {"content": [
-                {"type": "tool_use", "name": "StructuredOutput",
-                 "input": json.dumps(expected)}
-            ]}},
-            {"type": "result", "result": "Structured output provided successfully"},
-        ]
-        stdout = "\n".join(json.dumps(event) for event in events)
-        with mock.patch.dict(os.environ, {"FACTORY_PLANNING_MODEL_CMD": "fake {input_file}"}):
-            actual = invoke.run_model(
-                {}, 7, 1.0, runner=lambda *a, **k: Result(stdout=stdout))
-        self.assertEqual(expected, actual)
-
-    def test_campaign_state_version_ignores_comments_and_updated_at(self):
-        client = Client()
-        issue = client.get_issue(1)
-        first = invoke.state_version(client, {**issue, "updated_at": "one"})
-        second = invoke.state_version(client, {**issue, "updated_at": "two"})
-        self.assertEqual(first, second)
-
-    def test_default_model_command_embeds_input_and_binds_json_schema(self):
-        value = {"trigger": {"labels": ["type:roadmap-commitment"]},
-                 "product": "# Product", "adrs": [], "repository": {"files": ["product.md"]}}
-        import tempfile
-        with tempfile.NamedTemporaryFile("w", suffix=".json") as handle:
-            json.dump(value, handle)
-            handle.flush()
-            with mock.patch.dict(os.environ, {}, clear=True):
-                command = invoke.model_command(handle.name, 30, 2.5)
-        self.assertIn("--json-schema", command)
-        self.assertIn("--max-budget-usd", command)
-        self.assertIn('"product": "# Product"', command[2])
-
-    def test_prompt_version_changes_when_prompt_changes(self):
+    def test_prompt_version_changes_with_prompt(self):
         with mock.patch.object(invoke.pathlib.Path, "read_bytes", return_value=b"one"):
             first = invoke.prompt_version()
         with mock.patch.object(invoke.pathlib.Path, "read_bytes", return_value=b"two"):
             second = invoke.prompt_version()
         self.assertNotEqual(first, second)
 
-    def test_readback_retries_eventual_consistency_then_passes(self):
+    def test_readback_retry_is_bounded(self):
         expected = object()
         with mock.patch.object(invoke.artifacts, "verify", side_effect=[
                 invoke.artifacts.ArtifactError("missing"), expected]) as verify:

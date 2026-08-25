@@ -54,14 +54,14 @@ class CapacityExecutorTests(unittest.TestCase):
         self.assertEqual(["medium", "medium"], [call["effort"] for call in calls])
         self.assertEqual(3, result.consumed_budget_units)
 
-    def test_unreported_usage_consumes_reservation_and_blocks_fallback(self):
+    def test_unreported_usage_consumes_only_bounded_attempt_reservation(self):
         executor = CapacityExecutor({
             "openai": ProviderAdapter("openai", lambda **_: AttemptResult("quota")),
             "anthropic": ProviderAdapter("anthropic", lambda **_: AttemptResult("success")),
         }, self.state)
         result = executor.execute(task_key="plan-2", request=self.request(2),
                                   registry=self.registry(), payload={})
-        self.assertEqual("budget-exhausted", result.outcome)
+        self.assertEqual("success", result.outcome)
         self.assertEqual(2, result.consumed_budget_units)
 
     def test_no_eligible_capacity_is_terminal_result(self):

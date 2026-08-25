@@ -104,6 +104,7 @@ ACCEPTANCE = {
     "acceptance/test_e2e_doctor.py",
     "acceptance/test_factory_monitor.py",
     "acceptance/test_capacity_architecture.py",  # live production-boundary inventory gate
+    "acceptance/test_planning_capacity_pool.py",
 }
 CAPACITY_POOL_UNIT = {
     "acceptance/test_capacity_pool.py",

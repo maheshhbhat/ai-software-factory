@@ -41,14 +41,19 @@ class CapacityExecutor:
                 plan, elapsed_seconds=elapsed, consumed_budget_units=consumed)
             if remaining_time <= 0 or remaining_budget <= 0:
                 return self._finish("budget-exhausted", "", records, consumed)
+            attempts_left = len(plan.steps) - index
+            attempt_time = (remaining_time if attempts_left == 1 else
+                            max(1, remaining_time // attempts_left))
+            attempt_budget = (remaining_budget if attempts_left == 1 else
+                              remaining_budget / attempts_left)
             adapter = self.adapters.get(step.provider)
             if adapter is None:
                 attempt = AttemptResult("unavailable", diagnostic="provider adapter missing")
             else:
                 try:
                     lease = self.state.reserve(
-                        task_key, step.provider, step.model, remaining_budget,
-                        ttl_seconds=remaining_time)
+                        task_key, step.provider, step.model, attempt_budget,
+                        ttl_seconds=attempt_time)
                 except DuplicateTask:
                     return self._finish("duplicate-execution", "", records, consumed)
                 except CapacityUnavailable as exc:
@@ -59,7 +64,7 @@ class CapacityExecutor:
                     if lease is not None:
                         attempt = adapter.run(
                             model=step.model, effort=step.effort,
-                            timeout_seconds=remaining_time, budget_units=remaining_budget,
+                            timeout_seconds=attempt_time, budget_units=attempt_budget,
                             payload=payload)
                 except Exception as exc:  # adapter bugs and unknown exits fail closed
                     attempt = AttemptResult("unknown-failure", diagnostic=str(exc)[:500])

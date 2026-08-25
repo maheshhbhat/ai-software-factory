@@ -34,6 +34,16 @@ class CapacityPolicyTests(unittest.TestCase):
         self.assertIsNone(spark.model_id)
         self.assertFalse(spark.capacity().available)
 
+    def test_unverified_placeholders_require_config_and_healthy_probe(self):
+        class Health:
+            def __call__(self, provider, model):
+                return {"state": "healthy" if model == "verified-sonnet" else "unknown"}
+        registry = policy.resolved_registry(
+            {"FACTORY_CAPACITY_ANTHROPIC_BALANCED_MODEL": "verified-sonnet"},
+            health=Health())
+        sonnet = next(item for item in registry if item.name == "verified-sonnet")
+        self.assertTrue(sonnet.available)
+
 
 if __name__ == "__main__":
     unittest.main()

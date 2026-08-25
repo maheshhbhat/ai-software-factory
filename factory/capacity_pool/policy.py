@@ -8,6 +8,7 @@ disabled data.  They cannot accidentally become executable routes.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 
 from .router import ModelCapacity, RouteRequest, Tier
 
@@ -109,3 +110,34 @@ POLICIES = {
 def active_registry(**availability) -> tuple[ModelCapacity, ...]:
     return tuple(entry.capacity(available=availability.get(entry.name, True))
                  for entry in REGISTRY)
+
+
+MODEL_ID_ENV = {
+    "codex-spark": "FACTORY_CAPACITY_OPENAI_SPARK_MODEL",
+    "anthropic-economy": "FACTORY_CAPACITY_ANTHROPIC_ECONOMY_MODEL",
+    "anthropic-balanced": "FACTORY_CAPACITY_ANTHROPIC_BALANCED_MODEL",
+}
+
+
+def resolved_registry(environ=None, *, health=None) -> tuple[ModelCapacity, ...]:
+    """Resolve reviewed placeholders without inventing provider identifiers.
+
+    `health(provider, model)` returns a persisted state row.  Unknown or stale
+    capacity is excluded until the doctor records a successful adapter probe.
+    """
+    environ = os.environ if environ is None else environ
+    values = []
+    for entry in REGISTRY:
+        model_id = entry.model_id or environ.get(MODEL_ID_ENV.get(entry.name, ""), "").strip()
+        enabled = entry.enabled or bool(model_id)
+        healthy = True
+        if health is not None and model_id:
+            healthy = health(entry.provider, model_id).get("state") == "healthy"
+        values.append(ModelCapacity(
+            model_id or entry.name, entry.provider, entry.tier, entry.capabilities,
+            available=enabled and bool(model_id) and healthy,
+            prepaid_or_expiring=entry.prepaid_or_expiring,
+            experimental=entry.experimental,
+            supports_effort=entry.efforts,
+        ))
+    return tuple(values)

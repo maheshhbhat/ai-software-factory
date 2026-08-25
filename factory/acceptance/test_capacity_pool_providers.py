@@ -4,15 +4,17 @@ import unittest
 from pathlib import Path
 
 from factory.capacity_pool.providers.cli import (
-    claude_command, cli_adapter, codex_command,
+    InvocationPayload, claude_command, cli_adapter, codex_command, provider_environment,
 )
 
 
 class CapacityProviderTests(unittest.TestCase):
     def test_command_syntax_is_confined_and_model_effort_are_explicit(self):
         self.assertEqual("claude", claude_command(
-            model="fable", effort="medium", payload="p", budget_units=2)[0])
-        codex = codex_command(model="terra", effort="medium", payload="p")
+            model="fable", effort="medium", payload=InvocationPayload("p"),
+            budget_units=2)[0])
+        codex = codex_command(model="terra", effort="medium",
+                              payload=InvocationPayload("p"))
         self.assertEqual("codex", codex[0])
         self.assertIn("terra", codex)
         self.assertIn('model_reasoning_effort="medium"', codex)
@@ -34,6 +36,15 @@ class CapacityProviderTests(unittest.TestCase):
                              budget_units=1, payload="p")
         self.assertEqual("timeout", result.outcome)
         self.assertIsNone(result.consumed_budget_units)
+
+    def test_provider_environments_do_not_share_credentials(self):
+        source = {"PATH": "/bin", "HOME": "/operator", "OPENAI_API_KEY": "openai",
+                  "ANTHROPIC_API_KEY": "anthropic", "GITHUB_TOKEN": "github"}
+        openai = provider_environment("openai", source)
+        anthropic = provider_environment("anthropic", source)
+        self.assertEqual({"PATH", "OPENAI_API_KEY"}, set(openai))
+        self.assertEqual({"PATH", "HOME", "ANTHROPIC_API_KEY"}, set(anthropic))
+        self.assertNotIn("GITHUB_TOKEN", openai | anthropic)
 
 
 if __name__ == "__main__":

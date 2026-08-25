@@ -204,46 +204,43 @@ class GitHubChecks(unittest.TestCase):
 
 
 class LocalChecks(unittest.TestCase):
-    def test_real_configured_worker_must_start_and_answer(self):
+    def test_every_configured_capacity_is_probed_independently(self):
+        calls = []
         def respond(args, **_):
-            self.assertEqual(["codex", "exec"], args[:2])
-            self.assertIn("read-only", args)
-            return completed(args, stdout=(
-                '{"type":"item.completed","item":{"type":"agent_message","text":'
-                '"FACTORY_WORKER_READY"}}\n'))
+            calls.append(args)
+            return completed(args, stdout="CAPACITY_OK")
         value = doctor.Doctor(
             "owner/repo", 400, commitment=384, target="product.js",
-            environ={"PATH": "/bin", "FACTORY_WORKER_ORDER": "codex-delivery"},
+            environ={"PATH": "/bin"},
             runner=respond)
         value.worker_engine_start()
-        self.assertTrue(value.checks[-1].passed)
-        self.assertIn("real codex worker", value.checks[-1].detail)
+        probes = [row for row in value.checks if row.name.startswith("capacity probe")]
+        self.assertEqual(4, len(probes))
+        self.assertTrue(all(row.passed for row in probes))
+        self.assertEqual(4, len(calls))
 
-    def test_login_metadata_does_not_hide_worker_start_failure(self):
+    def test_one_provider_success_does_not_hide_another_failure(self):
+        count = 0
+        def respond(args, **_):
+            nonlocal count
+            count += 1
+            return completed(args, stdout="CAPACITY_OK" if count == 1 else "wrong")
         runner = RecordingRunner()
         value = doctor.Doctor(
             "owner/repo", 400, commitment=384, target="product.js",
-            environ={"PATH": "/bin"}, runner=runner)
+            environ={"PATH": "/bin"}, runner=respond)
         value.worker_engine_start()
-        self.assertFalse(value.checks[-1].passed)
+        probes = [row for row in value.checks if row.name.startswith("capacity probe")]
+        self.assertTrue(probes[0].passed)
+        self.assertTrue(any(not row.passed for row in probes[1:]))
 
-    def test_echoing_the_probe_prompt_is_not_a_successful_engine_answer(self):
-        prompt_echo = completed([], stdout=json.dumps({
-            "type": "started", "prompt": "Reply exactly FACTORY_WORKER_READY"}))
+    def test_echoing_probe_prompt_is_not_success(self):
+        prompt_echo = completed([], stdout="Reply exactly CAPACITY_OK")
         value = doctor.Doctor(
             "owner/repo", 400, commitment=384, target="product.js",
             environ={"PATH": "/bin"}, runner=lambda args, **kwargs: prompt_echo)
         value.worker_engine_start()
         self.assertFalse(value.checks[-1].passed)
-
-    def test_unknown_worker_is_not_silently_probed_as_codex(self):
-        value = doctor.Doctor(
-            "owner/repo", 400, commitment=384, target="product.js",
-            environ={"PATH": "/bin", "FACTORY_WORKER_ORDER": "mystery"},
-            runner=RecordingRunner())
-        value.worker_engine_start()
-        self.assertFalse(value.checks[-1].passed)
-        self.assertIn("unsupported", value.checks[-1].detail)
 
     def test_worktree_creation_failure_blocks_readiness(self):
         def respond(args, **_):
