@@ -197,10 +197,12 @@ def run_model(value: dict, timeout: int, max_usd: float,
                 raw = event.get("result")
                 if isinstance(raw, str) and raw.strip():
                     try:
-                        envelope = json.loads(raw)
+                        parsed = json.loads(raw)
                     except json.JSONDecodeError:
                         continue
-                    break
+                    if isinstance(parsed, dict):
+                        envelope = parsed
+                        break
         if isinstance(envelope, dict) and isinstance(envelope.get("structured_output"), dict):
             envelope = envelope["structured_output"]
         elif isinstance(envelope, dict) and isinstance(envelope.get("result"), str):
