@@ -53,6 +53,13 @@ def marker(key: str, kind: str) -> str:
     return f"<!-- {MARKER}:{key}:{kind} -->"
 
 
+def label_names(item: dict) -> set[str]:
+    """Normalize both GitHub API label objects and store-level label strings."""
+    return {label.get("name") if isinstance(label, dict) else label
+            for label in item.get("labels", [])
+            if (label.get("name") if isinstance(label, dict) else label)}
+
+
 def _find(items: list[dict], token: str) -> dict | None:
     found = [item for item in items if token in (item.get("body") or "")]
     if len(found) > 1:
@@ -144,7 +151,7 @@ def write_campaign(store: Store, trigger: dict, key: str, output: dict) -> Writt
     # directly to awaiting-ready before any Stories existed.  This is safe to
     # replay: a Project whose Stories section has since been populated is never
     # moved backwards.
-    labels = set(created.get("labels") or [])
+    labels = label_names(created)
     if ("project:awaiting-ready" in labels
             and section_lines(created.get("body") or "", "Stories") == ["_No response_"]):
         labels.remove("project:awaiting-ready")
