@@ -352,6 +352,22 @@ class TestPollOnce(unittest.TestCase):
                                     "planning failed: exact cause"):
             poller.wake_planner("o/r", 70)
 
+    def test_planning_outer_timeout_covers_model_envelope_and_rejects_overlap(self):
+        result = mock.Mock(returncode=0, stderr="", stdout="")
+        with mock.patch.object(poller.subprocess, "run", return_value=result) as run, \
+             mock.patch.dict(os.environ, {"FACTORY_PLANNING_TIMEOUT": "100"}):
+            poller.wake_planner("o/r", 70)
+        self.assertEqual(220, run.call_args.kwargs["timeout"])
+
+        with mock.patch.object(poller.subprocess, "run") as run, \
+             mock.patch.dict(os.environ, {
+                 "FACTORY_PLANNING_TIMEOUT": "100",
+                 "FACTORY_PLANNING_OUTER_TIMEOUT": "100",
+             }), self.assertRaisesRegex(
+                 poller.WorkerLaunchFailed, "outer timeout must exceed"):
+            poller.wake_planner("o/r", 70)
+        run.assert_not_called()
+
     def test_planning_failure_does_not_block_story_dispatch(self):
         with mock.patch.object(poller, "run_planning_route", return_value=[70]), \
              mock.patch.object(poller, "wake_planner", side_effect=RuntimeError("boom")), \

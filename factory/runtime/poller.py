@@ -491,8 +491,14 @@ def wake_planner(repo: str, artifact: int) -> None:
     command = ([part.replace("{repo}", repo).replace("{artifact}", str(artifact))
                 for part in shlex.split(template)] if template
                else [wrapper, repo, str(artifact)])
+    model_timeout = int(os.environ.get("FACTORY_PLANNING_TIMEOUT", "900"))
+    outer_timeout = int(os.environ.get(
+        "FACTORY_PLANNING_OUTER_TIMEOUT", str(model_timeout + 120)))
+    if outer_timeout <= model_timeout:
+        raise WorkerLaunchFailed(
+            "planning outer timeout must exceed the logical model timeout")
     result = subprocess.run(command, capture_output=True, text=True,
-                            timeout=int(os.environ.get("FACTORY_PLANNING_TIMEOUT", "900")))
+                            timeout=outer_timeout)
     if result.returncode != 0:
         detail = (result.stderr or result.stdout).strip()
         raise WorkerLaunchFailed(
