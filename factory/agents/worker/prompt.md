@@ -13,6 +13,11 @@ Rules:
 - Do not edit a hazard path unless the Story is hazard-flagged and its declared
   scope includes the path.
 - Do not weaken or delete tests to make a failure disappear.
+- When the delivery engine is Claude, do not invoke Bash or any shell command.
+  Its headless permission mode cannot approve those commands. Do not spend the
+  bounded Story budget retrying them or creating a scratch probe. Write the
+  implementation and tests with the available file tools; the wrapper runs the
+  repository's real test command after the engine returns.
 - On a retry, directly address the attached review findings and preserve the
   existing branch and pull request.
 - Run no persistent service and create no session state. Finish after the
