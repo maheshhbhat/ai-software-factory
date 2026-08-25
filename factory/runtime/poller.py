@@ -494,9 +494,10 @@ def wake_planner(repo: str, artifact: int) -> None:
     result = subprocess.run(command, capture_output=True, text=True,
                             timeout=int(os.environ.get("FACTORY_PLANNING_TIMEOUT", "900")))
     if result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip()
         raise WorkerLaunchFailed(
             f"planning artifact #{artifact} failed ({result.returncode}): "
-            f"{(result.stderr or result.stdout)[:400]}")
+            f"{detail[-400:]}")
     if result.stdout:
         print(f"[planning] #{artifact}: {result.stdout.strip()}", flush=True)
 
