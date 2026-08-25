@@ -427,10 +427,28 @@ def refresh_behind_branches(repo: str, pulls: list[dict], issues: dict[int, dict
     return refreshed
 
 
+def hydrate_review_pulls(repo: str, pulls: list[dict], token: str) -> list[dict]:
+    """Read detail records for open factory-linked PR list entries.
+
+    GitHub's pull-request list response omits ``mergeable_state``.  The detail
+    endpoint computes it, so stale-branch routing must consume that record.
+    Unrelated pull requests retain their list record and cost no extra request.
+    """
+    hydrated = []
+    for pull in pulls:
+        linked = review_route.LINK.findall(
+            (pull.get("body") or "").replace("\r\n", "\n"))
+        if pull.get("state") == "open" and not pull.get("draft") and linked:
+            pull = dispatcher._api(
+                f"https://api.github.com/repos/{repo}/pulls/{pull['number']}", token)
+        hydrated.append(pull)
+    return hydrated
+
+
 def run_phase4_reviews(repo: str, apply: bool = True) -> list[review_route.ReviewTarget]:
     token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or ""
     issues = dispatcher.fetch_issues(repo, token)
-    pulls = dispatcher.fetch_pull_requests(repo, token)
+    pulls = hydrate_review_pulls(repo, dispatcher.fetch_pull_requests(repo, token), token)
     comments = {number: dispatcher._api(
         f"https://api.github.com/repos/{repo}/issues/{number}/comments?per_page=100", token)
                 for number in issues}
