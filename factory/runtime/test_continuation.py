@@ -30,7 +30,7 @@ def project(number=100, state=ct.AWAITING_READY, criteria=CRITERIA):
             f"### Stories\n\n#1\n\n### Roadmap commitment\n\n#54\n")
     value = {"number": number, "state": "OPEN",
             "labels": [{"name": "type:project"}, {"name": state}], "body": body}
-    if state == ct.AWAITING_ACCEPTANCE:
+    if state in (ct.AWAITING_READY, ct.AWAITING_ACCEPTANCE):
         value["_bell_at"] = "2026-08-22T01:00:00Z"
     return value
 
@@ -296,6 +296,8 @@ class TestStandingRefusalWritesNothing(unittest.TestCase):
     def pass_over(self, issues, comments, apply_outcome):
         with mock.patch.object(ct, "fetch_projects", return_value=issues), \
              mock.patch.object(ct, "fetch_comments", side_effect=lambda r, n, t: comments.get(n, [])), \
+             mock.patch.object(ct, "fetch_bell_at",
+                               return_value="2026-08-22T01:00:00Z"), \
              mock.patch.object(ct, "apply_outcome", side_effect=apply_outcome) as applied:
             advanced = ct.run("owner/repo", "token")
         return advanced, applied
@@ -374,6 +376,28 @@ class TestAmbiguity(unittest.TestCase):
     def test_repeated_identical_decisions_are_not_a_conflict(self):
         outcome = ct.evaluate_project(project(), [approval(), approval()])
         self.assertEqual(outcome.action, ct.ACTIVE)
+
+    def test_prior_bell_changes_request_does_not_conflict_with_current_approval(self):
+        earlier = approval(decision="changes-requested")
+        earlier["created_at"] = "2026-08-22T00:59:00Z"
+        outcome = ct.evaluate_project(project(), [earlier, approval()])
+        self.assertEqual(outcome.action, ct.ACTIVE)
+
+    def test_conflicting_plan_decisions_within_current_bell_still_fail_closed(self):
+        outcome = ct.evaluate_project(
+            project(), [approval(), approval(decision="changes-requested")])
+        self.assertIsNone(outcome.action)
+        self.assertEqual(outcome.reason, R.CONFLICTING_DECISIONS)
+
+    def test_missing_or_malformed_plan_bell_time_fails_closed(self):
+        missing = project()
+        del missing["_bell_at"]
+        self.assertEqual(ct.evaluate_project(missing, [approval()]).reason,
+                         R.BELL_TIME_UNAVAILABLE)
+        malformed = project()
+        malformed["_bell_at"] = "not-a-time"
+        self.assertEqual(ct.evaluate_project(malformed, [approval()]).reason,
+                         R.BELL_TIME_UNAVAILABLE)
 
     def test_malformed_decision_line_fails_closed(self):
         outcome = ct.evaluate_project(project(), [comment("## Plan approval\n\nlgtm\n")])

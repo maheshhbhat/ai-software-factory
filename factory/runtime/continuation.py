@@ -288,11 +288,11 @@ def evaluate_project(project: dict, comments: list[dict], standing=()) -> Outcom
                            f"{len(approval_shaped)} decision-shaped comment(s), none owner-authored")
         return Outcome(number, None, Reason.NO_DECISION)
 
-    if state == AWAITING_ACCEPTANCE:
+    if state in (AWAITING_READY, AWAITING_ACCEPTANCE):
         bell_at = timestamp(project.get("_bell_at"))
         if bell_at is None:
             return Outcome(number, None, Reason.BELL_TIME_UNAVAILABLE,
-                           "latest awaiting-acceptance transition time is unavailable")
+                           f"latest {state} transition time is unavailable")
         current = []
         for decision in decisions:
             created_at = timestamp(decision.get("created_at") or decision.get("createdAt"))
@@ -304,7 +304,7 @@ def evaluate_project(project: dict, comments: list[dict], standing=()) -> Outcom
         decisions = [decision for _, decision in sorted(current, key=lambda item: item[0])]
         if not decisions:
             return Outcome(number, None, Reason.NO_DECISION,
-                           "no owner acceptance decision belongs to the current bell")
+                           "no owner decision belongs to the current bell")
 
     verdicts = []
     for comment in decisions:
@@ -699,9 +699,9 @@ def run(repo: str, token: str, apply: bool = True) -> list[Outcome]:
     if not projects:
         return []
     for number, project in projects.items():
-        if lifecycle_of(project) == AWAITING_ACCEPTANCE:
-            project["_bell_at"] = fetch_bell_at(
-                repo, number, token, AWAITING_ACCEPTANCE)
+        state = lifecycle_of(project)
+        if state in (AWAITING_READY, AWAITING_ACCEPTANCE):
+            project["_bell_at"] = fetch_bell_at(repo, number, token, state)
     comments = {n: fetch_comments(repo, n, token) for n in projects}
     advanced = []
     for outcome in evaluate_all(projects, comments, standing):
