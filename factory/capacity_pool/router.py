@@ -89,8 +89,13 @@ class RoutePlan:
         return self.steps[0]
 
 
-FALLBACK_ON = frozenset({"unavailable", "quota", "rate-limit", "timeout", "auth"})
-STOP_ON = frozenset({"malformed-output", "schema-invalid", "unsafe-output", "scope-violation"})
+FALLBACK_ON = frozenset({
+    "missing-executable", "unavailable", "quota", "rate-limit", "timeout", "auth",
+})
+STOP_ON = frozenset({
+    "malformed-output", "schema-invalid", "unsafe-output", "scope-violation",
+    "failed-tests", "ambiguous-mutation", "unknown-failure",
+})
 
 
 def _eligible(model: ModelCapacity, request: RouteRequest) -> bool:
@@ -100,7 +105,9 @@ def _eligible(model: ModelCapacity, request: RouteRequest) -> bool:
         return False
     if model.experimental and not request.allow_experimental:
         return False
-    if model.tier < request.minimum_tier:
+    # A failure may select a peer, never silently raise the requested tier.
+    # Escalation is a new request whose policy explicitly names the higher tier.
+    if model.tier != request.minimum_tier:
         return False
     if not request.required_capabilities.issubset(model.capabilities):
         return False

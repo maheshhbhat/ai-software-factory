@@ -103,6 +103,14 @@ ACCEPTANCE = {
     "acceptance/test_two_story_real.py",
     "acceptance/test_e2e_doctor.py",
     "acceptance/test_factory_monitor.py",
+    "acceptance/test_capacity_architecture.py",  # live production-boundary inventory gate
+}
+CAPACITY_POOL_UNIT = {
+    "acceptance/test_capacity_pool.py",
+    "acceptance/test_capacity_pool_executor.py",
+    "acceptance/test_capacity_pool_policy.py",
+    "acceptance/test_capacity_pool_providers.py",
+    "acceptance/test_capacity_pool_state.py",
 }
 LAYERS = ("unit", "integration", "acceptance")
 
@@ -226,6 +234,17 @@ def classify() -> dict[str, list[str]]:
         stale = sorted(declared_planning - planning)
         raise SystemExit(
             "planning tests must be explicitly classified; "
+            f"unclassified={missing or 'none'}, stale={stale or 'none'}")
+
+    capacity = {path for path in found if path.startswith("acceptance/test_capacity")}
+    declared_capacity = CAPACITY_POOL_UNIT | {
+        path for path in ACCEPTANCE if path.startswith("acceptance/test_capacity")
+    }
+    if capacity != declared_capacity:
+        missing = sorted(capacity - declared_capacity)
+        stale = sorted(declared_capacity - capacity)
+        raise SystemExit(
+            "Capacity Pool tests must be explicitly classified; "
             f"unclassified={missing or 'none'}, stale={stale or 'none'}")
 
     phase4 = {path for path in found if ("phase4" in path or path.startswith("agents/worker/")

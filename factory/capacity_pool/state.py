@@ -1,0 +1,209 @@
+#!/usr/bin/env python3
+"""Transactional health, reservation, and lease state for Capacity Pool."""
+
+from __future__ import annotations
+
+import hashlib
+import sqlite3
+import time
+import uuid
+from dataclasses import dataclass
+
+
+HEALTH_STATES = frozenset({
+    "unknown", "healthy", "degraded", "rate-limited", "quota-exhausted",
+    "unavailable", "cooldown", "probe",
+})
+
+
+@dataclass(frozen=True)
+class Lease:
+    lease_id: str
+    task_key: str
+    provider: str
+    model: str
+    reserved_budget: float
+    expires_at: float
+
+
+class CapacityStateError(RuntimeError):
+    pass
+
+
+class DuplicateTask(CapacityStateError):
+    pass
+
+
+class CapacityUnavailable(CapacityStateError):
+    pass
+
+
+class CapacityState:
+    def __init__(self, path="file:capacity-pool?mode=memory&cache=shared", *, uri=True,
+                 clock=time.time, telemetry=lambda **fields: None):
+        self.path, self.uri, self.clock, self.emit = str(path), uri, clock, telemetry
+        self.connection = sqlite3.connect(self.path, uri=uri, isolation_level=None,
+                                          timeout=5)
+        self.connection.row_factory = sqlite3.Row
+        self._initialize()
+
+    def _initialize(self):
+        self.connection.executescript("""
+        PRAGMA journal_mode=WAL;
+        CREATE TABLE IF NOT EXISTS health (
+          provider TEXT NOT NULL, model TEXT NOT NULL, state TEXT NOT NULL,
+          reason TEXT NOT NULL, observed_at REAL NOT NULL, cooldown_until REAL,
+          probe_failures INTEGER NOT NULL DEFAULT 0,
+          quality_failures INTEGER NOT NULL DEFAULT 0,
+          PRIMARY KEY(provider, model)
+        );
+        CREATE TABLE IF NOT EXISTS leases (
+          lease_id TEXT PRIMARY KEY, task_key TEXT NOT NULL,
+          provider TEXT NOT NULL, model TEXT NOT NULL,
+          reserved_budget REAL NOT NULL, expires_at REAL NOT NULL,
+          status TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS transitions (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, provider TEXT NOT NULL,
+          model TEXT NOT NULL, previous_state TEXT, new_state TEXT NOT NULL,
+          reason TEXT NOT NULL, observed_at REAL NOT NULL
+        );
+        """)
+
+    def close(self):
+        self.connection.close()
+
+    def health(self, provider: str, model: str) -> dict:
+        row = self.connection.execute(
+            "SELECT * FROM health WHERE provider=? AND model=?", (provider, model)).fetchone()
+        return dict(row) if row else {"provider": provider, "model": model,
+                                      "state": "unknown", "reason": "no-observation",
+                                      "observed_at": 0.0,
+                                      "cooldown_until": None, "probe_failures": 0,
+                                      "quality_failures": 0}
+
+    def _transition(self, provider, model, new_state, reason, *, cooldown_until=None,
+                    probe_failures=None, quality_failures=None):
+        if new_state not in HEALTH_STATES:
+            raise ValueError(f"invalid health state: {new_state}")
+        now, previous = self.clock(), self.health(provider, model)
+        failures = (previous["probe_failures"] if probe_failures is None
+                    else probe_failures)
+        quality = (previous["quality_failures"] if quality_failures is None
+                   else quality_failures)
+        with self.connection:
+            self.connection.execute(
+                "INSERT INTO health(provider,model,state,reason,observed_at,cooldown_until,probe_failures,quality_failures) "
+                "VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(provider,model) DO UPDATE SET "
+                "state=excluded.state,reason=excluded.reason,observed_at=excluded.observed_at,"
+                "cooldown_until=excluded.cooldown_until,probe_failures=excluded.probe_failures,"
+                "quality_failures=excluded.quality_failures",
+                (provider, model, new_state, reason, now, cooldown_until, failures, quality))
+            self.connection.execute(
+                "INSERT INTO transitions(provider,model,previous_state,new_state,reason,observed_at) "
+                "VALUES(?,?,?,?,?,?)",
+                (provider, model, previous["state"], new_state, reason, now))
+        self.emit(metric="capacity.health.transition", provider=provider, model=model,
+                  previous_state=previous["state"], new_state=new_state,
+                  reason=reason, observed_at=now, cooldown_until=cooldown_until)
+        return self.health(provider, model)
+
+    def mark_healthy(self, provider, model, reason="validated-observation"):
+        return self._transition(provider, model, "healthy", reason, probe_failures=0,
+                                quality_failures=0)
+
+    def mark_quality_failure(self, provider, model, reason, *, threshold=2):
+        if threshold <= 0:
+            raise ValueError("quality threshold must be positive")
+        current = self.health(provider, model)
+        failures = current["quality_failures"] + 1
+        state = "degraded" if failures >= threshold else current["state"]
+        return self._transition(provider, model, state, reason,
+                                quality_failures=failures)
+
+    def mark_failure(self, provider, model, reason, *, retry_after=None,
+                     base_cooldown=30, maximum_cooldown=900):
+        failure_state = (reason if reason in {"rate-limited", "quota-exhausted"}
+                         else "unavailable")
+        self._transition(provider, model, failure_state, reason)
+        delay = retry_after if retry_after is not None else base_cooldown
+        delay = min(maximum_cooldown, max(1, delay))
+        return self._transition(provider, model, "cooldown", reason,
+                                cooldown_until=self.clock() + delay)
+
+    def begin_probe(self, provider, model):
+        current = self.health(provider, model)
+        if current["state"] != "cooldown" or self.clock() < (current["cooldown_until"] or 0):
+            raise RuntimeError("capacity is not eligible for probe")
+        return self._transition(provider, model, "probe", "cooldown-expired")
+
+    def finish_probe(self, provider, model, success: bool, *, base_cooldown=30,
+                     maximum_cooldown=900):
+        current = self.health(provider, model)
+        if current["state"] != "probe":
+            raise RuntimeError("capacity has no active probe")
+        if success:
+            return self._transition(provider, model, "healthy", "probe-success",
+                                    probe_failures=0, quality_failures=0)
+        failures = current["probe_failures"] + 1
+        raw = base_cooldown * (2 ** min(failures - 1, 8))
+        digest = int(hashlib.sha256(f"{provider}:{model}".encode()).hexdigest()[:4], 16)
+        jitter = digest % max(1, base_cooldown // 4 + 1)
+        return self._transition(provider, model, "cooldown", "probe-failed",
+                                cooldown_until=self.clock() + min(maximum_cooldown, raw + jitter),
+                                probe_failures=failures)
+
+    def reserve(self, task_key, provider, model, budget_units, *, ttl_seconds,
+                capacity_limit=None, max_health_age_seconds=None):
+        if budget_units <= 0 or ttl_seconds <= 0:
+            raise ValueError("lease bounds must be positive")
+        now, lease_id = self.clock(), uuid.uuid4().hex
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            self.connection.execute(
+                "UPDATE leases SET status='expired' WHERE status='active' AND expires_at<=?", (now,))
+            existing = self.connection.execute(
+                "SELECT 1 FROM leases WHERE task_key=? AND status='active'", (task_key,)).fetchone()
+            if existing:
+                raise DuplicateTask("duplicate active logical task")
+            current = self.health(provider, model)
+            if current["state"] != "healthy":
+                raise CapacityUnavailable(f"capacity is not healthy: {current['state']}")
+            provider_health = self.health(provider, "*")
+            if provider_health["state"] not in {"unknown", "healthy"}:
+                raise CapacityUnavailable(
+                    f"provider capacity is not healthy: {provider_health['state']}")
+            if (max_health_age_seconds is not None and
+                    now - current["observed_at"] > max_health_age_seconds):
+                raise CapacityUnavailable("capacity health observation is stale")
+            if capacity_limit is not None:
+                reserved = self.connection.execute(
+                    "SELECT COALESCE(SUM(reserved_budget),0) FROM leases "
+                    "WHERE provider=? AND model=? AND status='active'",
+                    (provider, model)).fetchone()[0]
+                if float(reserved) + budget_units > capacity_limit:
+                    raise CapacityUnavailable("capacity reservation would oversubscribe model")
+            self.connection.execute(
+                "INSERT INTO leases VALUES(?,?,?,?,?,?,?)",
+                (lease_id, task_key, provider, model, budget_units,
+                 now + ttl_seconds, "active"))
+            self.connection.execute("COMMIT")
+        except Exception:
+            self.connection.execute("ROLLBACK")
+            raise
+        return Lease(lease_id, task_key, provider, model, budget_units,
+                     now + ttl_seconds)
+
+    def reconcile(self, lease_id, *, consumed_budget_units):
+        if consumed_budget_units < 0:
+            raise ValueError("consumption cannot be negative")
+        row = self.connection.execute(
+            "SELECT * FROM leases WHERE lease_id=? AND status='active'", (lease_id,)).fetchone()
+        if not row:
+            raise RuntimeError("lease is not active")
+        self.connection.execute("UPDATE leases SET status='complete' WHERE lease_id=?", (lease_id,))
+        return min(float(row["reserved_budget"]), consumed_budget_units)
+
+    def transitions(self):
+        return [dict(row) for row in self.connection.execute(
+            "SELECT * FROM transitions ORDER BY id")]
