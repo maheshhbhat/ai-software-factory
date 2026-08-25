@@ -19,7 +19,7 @@ This component is developed directly/external to the autonomous factory. The fac
 - experimental-model opt-in
 - providers temporarily avoided by health/capacity policy
 
-## v1 model-capacity registry
+## Checked-in model-capacity registry
 
 Each capacity source declares:
 
@@ -33,7 +33,7 @@ Each capacity source declares:
 - latency rank
 - recent success signal
 
-Provider/model names are data. The router does not contain product-specific rules for Claude, Codex, Muse, or any future engine.
+Provider/model names are data. Unverified installed model identifiers remain disabled until a bounded adapter probe verifies them. The initial policy includes disabled Codex Spark capacity, balanced Terra, economy Luna, flagship Sol, and independently authenticated Anthropic capacity classes.
 
 ## Deterministic routing policy
 
@@ -57,14 +57,18 @@ Malformed output, schema-invalid output, unsafe output, and scope violations are
 
 The total timeout/budget belongs to the logical task, not each provider call. `remaining_envelope()` returns only the unconsumed remainder; a fallback never receives a fresh full budget.
 
-## Deferred from v1
+## Shared execution and lifecycle boundary
 
-The standalone router intentionally does **not** execute models, scrape provider quota pages, predict quality with ML, mutate factory agent code, or persist telemetry. Adapters, live usage collection, execution leases/duplicate suppression, partial-work resume, and Planning/Worker/Review integration come after the deterministic policy passes its scenario suite.
+`executor.py` is the sole intended model execution boundary. `providers/` is the only package allowed to construct provider CLI commands. `state.py` stores health, cooldown/probe recovery, reservations, and leases transactionally in SQLite. Unreported usage consumes the reserved budget; provider failure cannot raise tier or effort; malformed or unsafe output stops rather than switching providers.
+
+`inventory.json` records the current direct-invocation debt. The architecture acceptance test rejects a new production bypass immediately. Planning, Delivery, Review, bridge, doctor, and live-harness debt is removed by their separately gated migration Stories.
+
+Partial write-capable work/resume, live quota scraping, ML quality prediction, and automatic effort escalation remain deferred. No agent has been migrated by the shared-boundary increment alone.
 
 ## Run tests
 
 From the repository root:
 
 ```sh
-python3 -m unittest discover -s factory/acceptance -p 'test_capacity_pool.py'
+python3 -m unittest discover -s factory/acceptance -p 'test_capacity*.py'
 ```
