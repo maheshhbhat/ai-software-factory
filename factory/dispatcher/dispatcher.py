@@ -795,7 +795,7 @@ def dispatch_line(number: int, project: int | None) -> str:
     (§9.12).
     """
     order = os.environ.get(
-        "FACTORY_WORKER_ORDER", "claude-delivery,codex-delivery")
+        "FACTORY_WORKER_ORDER", "capacity-delivery")
     agents = [item.strip() for item in order.split(",") if item.strip()]
     if not agents or not AGENT_ID_RE.fullmatch(agents[0]):
         raise ValueError("FACTORY_WORKER_ORDER has no valid first Agent-ID")

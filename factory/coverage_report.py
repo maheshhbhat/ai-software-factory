@@ -112,6 +112,7 @@ CAPACITY_POOL_UNIT = {
     "acceptance/test_capacity_pool_policy.py",
     "acceptance/test_capacity_pool_providers.py",
     "acceptance/test_capacity_pool_state.py",
+    "acceptance/test_capacity_pool_delivery.py",
 }
 LAYERS = ("unit", "integration", "acceptance")
 

@@ -91,7 +91,7 @@ class PollRun:
         """True when the wrapper actually reached `poller.py`."""
         return self.argv is not None
 
-    def launch(self, worker: str = "claude-delivery") -> str:
+    def launch(self, worker: str = "capacity-delivery") -> str:
         key = "FACTORY_WORKER_" + worker.upper().replace("-", "_") + "_LAUNCH"
         return self.environment.get(key, "")
 
@@ -175,24 +175,24 @@ class OperatorWrapper(unittest.TestCase):
         self.assertNotEqual([], specs, "configured_workers() saw an empty list")
         self.assertIn("delivery", set().union(*(s.capabilities for s in specs)))
 
-    def test_only_codex_resolves_by_default(self):
+    def test_only_capacity_boundary_resolves_by_default(self):
         run = self.poll("--once")
         specs = self._configured_workers(run.environment)
-        self.assertEqual(["codex-delivery"], [spec.name for spec in specs])
+        self.assertEqual(["capacity-delivery"], [spec.name for spec in specs])
 
-    def test_each_default_worker_selects_the_engine_it_names(self):
+    def test_default_worker_contains_no_provider_selection(self):
         run = self.poll("--once")
-        self.assertIn("--engine claude", run.launch("claude-delivery"))
-        self.assertIn("--engine codex", run.launch("codex-delivery"))
-        self.assertNotEqual(run.launch("claude-delivery"),
-                            run.launch("codex-delivery"))
+        launch = run.launch("capacity-delivery")
+        self.assertNotIn("--engine", launch)
+        self.assertNotIn("claude", launch)
+        self.assertNotIn("codex", launch)
 
-    def test_plain_poll_dispatches_to_codex(self):
+    def test_plain_poll_dispatches_to_capacity_boundary(self):
         run = self.poll("--once")
         spec = self._configured_workers(run.environment)[0]
         command = workers.launch_command(spec, story=367, project=314)
-        self.assertEqual("codex-delivery", spec.name)
-        self.assertEqual("codex", command[command.index("--engine") + 1])
+        self.assertEqual("capacity-delivery", spec.name)
+        self.assertNotIn("--engine", command)
 
     def test_refuses_to_poll_when_no_worker_resolves(self):
         """The defect that poisoned #299 and #300: claim work, launch nothing."""
@@ -221,7 +221,7 @@ class OperatorWrapper(unittest.TestCase):
     def test_every_declaration_stays_overridable(self):
         """Defaults, not decisions: the caller's environment still wins."""
         mine = "python3 factory/agents/worker/invoke.py --repo me/mine --story {story}"
-        run = self.poll("--once", FACTORY_WORKER_CLAUDE_DELIVERY_LAUNCH=mine,
+        run = self.poll("--once", FACTORY_WORKER_CAPACITY_DELIVERY_LAUNCH=mine,
                         FACTORY_REPO="me/mine", FACTORY_COMMITMENT="99")
         self.assertEqual(mine, run.launch())
         self.assertEqual(["factory/runtime/poller.py", "--repo", "me/mine",

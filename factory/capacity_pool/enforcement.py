@@ -12,9 +12,9 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 INVENTORY = pathlib.Path(__file__).with_name("inventory.json")
 PROVIDER_ROOT = pathlib.Path("factory/capacity_pool/providers")
 PROVIDER_NAMES = frozenset({"claude", "codex"})
-SHELL_MARKERS = re.compile(r"FACTORY_WORKER_ORDER|--engine\s+(?:claude|codex)")
+SHELL_MARKERS = re.compile(r"--engine\s+(?:claude|codex)")
 PYTHON_MARKERS = re.compile(
-    r"FACTORY_WORKER_ORDER|FACTORY_[A-Z_]+MODEL_CMD|--engine"
+    r"FACTORY_[A-Z_]+MODEL_CMD|--engine\s+(?:claude|codex)"
 )
 
 

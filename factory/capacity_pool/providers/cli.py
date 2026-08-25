@@ -22,6 +22,7 @@ class InvocationPayload:
     output_schema: dict | None = None
     schema_path: pathlib.Path | None = None
     output_path: pathlib.Path | None = None
+    access: str = "read-only"
 
 
 def classify_failure(text: str, returncode: int) -> str:
@@ -58,8 +59,9 @@ def provider_environment(provider: str, environ=None) -> dict[str, str]:
 
 def claude_command(*, model: str, effort: str, payload: InvocationPayload,
                    budget_units: float) -> list[str]:
+    permission = "acceptEdits" if payload.access == "workspace-write" else "dontAsk"
     command = ["claude", "-p", payload.text, "--model", model, "--effort", effort,
-            "--max-budget-usd", str(budget_units), "--permission-mode", "dontAsk",
+            "--max-budget-usd", str(budget_units), "--permission-mode", permission,
             "--output-format", "stream-json", "--verbose", "--no-session-persistence"]
     if payload.output_schema is not None:
         command += ["--json-schema", json.dumps(
@@ -69,7 +71,7 @@ def claude_command(*, model: str, effort: str, payload: InvocationPayload,
 
 def codex_command(*, model: str, effort: str, payload: InvocationPayload) -> list[str]:
     command = ["codex", "exec", "--model", model, "--config",
-            f'model_reasoning_effort="{effort}"', "--sandbox", "read-only",
+            f'model_reasoning_effort="{effort}"', "--sandbox", payload.access,
             "--ephemeral", "--ignore-user-config", "--ignore-rules"]
     if payload.schema_path is not None:
         command += ["--output-schema", str(payload.schema_path)]
@@ -79,7 +81,7 @@ def codex_command(*, model: str, effort: str, payload: InvocationPayload) -> lis
 
 
 def cli_adapter(provider: str, *, cwd: pathlib.Path, environment: dict[str, str],
-                runner=subprocess.run) -> ProviderAdapter:
+                runner=subprocess.run, mutation_state=lambda: "none") -> ProviderAdapter:
     if provider not in {"anthropic", "openai"}:
         raise ValueError(f"unsupported provider adapter: {provider}")
 
@@ -96,7 +98,8 @@ def cli_adapter(provider: str, *, cwd: pathlib.Path, environment: dict[str, str]
             return AttemptResult("missing-executable", consumed_budget_units=0,
                                  diagnostic=str(exc)[:500])
         except subprocess.TimeoutExpired as exc:
-            return AttemptResult("timeout", diagnostic=str(exc)[:500])
+            return AttemptResult("timeout", mutation_state=mutation_state(),
+                                 diagnostic=str(exc)[:500])
         if result.returncode:
             diagnostic = ((result.stderr or "") + "\n" + (result.stdout or ""))[-500:]
             reported = None
@@ -109,7 +112,8 @@ def cli_adapter(provider: str, *, cwd: pathlib.Path, environment: dict[str, str]
                 if isinstance(value, (int, float)) and value >= 0:
                     reported = float(value)
             return AttemptResult(classify_failure(diagnostic, result.returncode),
-                                 consumed_budget_units=reported, diagnostic=diagnostic)
+                                 consumed_budget_units=reported,
+                                 mutation_state=mutation_state(), diagnostic=diagnostic)
         output = result.stdout or ""
         if value.output_path is not None and value.output_path.exists():
             written = value.output_path.read_text(encoding="utf-8")

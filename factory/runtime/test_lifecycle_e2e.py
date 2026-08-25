@@ -324,7 +324,7 @@ class TestSuccessfulStoryReachesATerminalState(LifecycleCase):
         recorded = [c for c in self.hub.comments[STORY]
                     if c["body"].startswith(completion.COMPLETION_HEADING)]
         self.assertEqual(1, len(recorded))
-        self.assertIn("claude-delivery", recorded[0]["body"])
+        self.assertIn("capacity-delivery", recorded[0]["body"])
 
     def test_a_later_poll_does_not_relaunch_a_completed_story(self):
         self.poll(worker_that(self.hub, posts=True))

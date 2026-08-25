@@ -61,31 +61,23 @@ export FACTORY_PHASE4_REVIEWS
 # shell would also hand the reviewer identity to a Claude delivery worker.
 unset CLAUDE_CODE_OAUTH_TOKEN
 
-# Active delivery engines. Codex is the sole production selection for now;
-# Claude remains declared below so an operator can restore or test it with an
-# explicit FACTORY_WORKER_ORDER override without editing this wrapper.
+# One delivery boundary. Capacity Pool owns provider and model selection inside
+# the worker; the dispatcher never sees those identities.
 if [ -z "$FACTORY_WORKER_ORDER" ]; then
-  FACTORY_WORKER_ORDER="codex-delivery"
+  FACTORY_WORKER_ORDER="capacity-delivery"
 fi
 export FACTORY_WORKER_ORDER
 
 # `invoke.py` reads the Story from the substrate itself, including the
 # `### Spend cap` that bounds it. It is not given `--project`, which it does not
 # accept and would exit 2 on.
-if [ -z "$FACTORY_WORKER_CLAUDE_DELIVERY_LAUNCH" ]; then
-  FACTORY_WORKER_CLAUDE_DELIVERY_LAUNCH="python3 factory/agents/worker/invoke.py --engine claude --repo $FACTORY_REPO --story {story}"
+if [ -z "$FACTORY_WORKER_CAPACITY_DELIVERY_LAUNCH" ]; then
+  FACTORY_WORKER_CAPACITY_DELIVERY_LAUNCH="python3 factory/agents/worker/invoke.py --repo $FACTORY_REPO --story {story}"
 fi
-if [ -z "$FACTORY_WORKER_CODEX_DELIVERY_LAUNCH" ]; then
-  FACTORY_WORKER_CODEX_DELIVERY_LAUNCH="python3 factory/agents/worker/invoke.py --engine codex --repo $FACTORY_REPO --story {story}"
+if [ -z "$FACTORY_WORKER_CAPACITY_DELIVERY_CAPABILITIES" ]; then
+  FACTORY_WORKER_CAPACITY_DELIVERY_CAPABILITIES="delivery"
 fi
-if [ -z "$FACTORY_WORKER_CLAUDE_DELIVERY_CAPABILITIES" ]; then
-  FACTORY_WORKER_CLAUDE_DELIVERY_CAPABILITIES="delivery"
-fi
-if [ -z "$FACTORY_WORKER_CODEX_DELIVERY_CAPABILITIES" ]; then
-  FACTORY_WORKER_CODEX_DELIVERY_CAPABILITIES="delivery"
-fi
-export FACTORY_WORKER_CLAUDE_DELIVERY_LAUNCH FACTORY_WORKER_CLAUDE_DELIVERY_CAPABILITIES
-export FACTORY_WORKER_CODEX_DELIVERY_LAUNCH FACTORY_WORKER_CODEX_DELIVERY_CAPABILITIES
+export FACTORY_WORKER_CAPACITY_DELIVERY_LAUNCH FACTORY_WORKER_CAPACITY_DELIVERY_CAPABILITIES
 
 # Resolve the order the same way `workers.configured_workers()` does, so what
 # this wrapper checks is what the dispatcher will find. A name carrying no

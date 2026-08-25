@@ -9,6 +9,14 @@ from factory.capacity_pool.providers.cli import (
 
 
 class CapacityProviderTests(unittest.TestCase):
+    def test_workspace_write_maps_to_each_provider_sandbox(self):
+        payload = InvocationPayload("deliver", access="workspace-write")
+        claude = claude_command(
+            model="a", effort="medium", payload=payload, budget_units=1)
+        codex = codex_command(model="o", effort="medium", payload=payload)
+        self.assertEqual("acceptEdits", claude[claude.index("--permission-mode") + 1])
+        self.assertEqual("workspace-write", codex[codex.index("--sandbox") + 1])
+
     def test_command_syntax_is_confined_and_model_effort_are_explicit(self):
         self.assertEqual("claude", claude_command(
             model="fable", effort="medium", payload=InvocationPayload("p"),
