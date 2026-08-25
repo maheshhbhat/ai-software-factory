@@ -29,6 +29,48 @@ def unavailable(reason):
     return {"status": UNAVAILABLE, "reason": reason}
 
 
+def engine_usage_cost(telemetry, numbers, accepted_story_count):
+    """Report only exact cost, or a lower bound when any invocation is silent."""
+    rows = [row for row in telemetry if row.get("metric") == "engine.usage"
+            and row.get("story") in numbers]
+    usage_by_engine = defaultdict(
+        lambda: {"invocations": 0, "reported_invocations": 0,
+                 "unreported_invocations": 0})
+    total_cost = 0.0
+    complete = bool(rows)
+    for row in rows:
+        name = row.get("engine") or "unknown"
+        total = usage_by_engine[name]
+        total["invocations"] += 1
+        if row.get("usage_reported") is not True:
+            total["unreported_invocations"] += 1
+            complete = False
+            continue
+        total["reported_invocations"] += 1
+        block = row.get("usage") if isinstance(row.get("usage"), dict) else {}
+        for field in ("input_tokens", "output_tokens", "total_tokens"):
+            if isinstance(block.get(field), (int, float)):
+                total[field] = total.get(field, 0) + block[field]
+        cost = block.get("total_cost_usd")
+        if isinstance(cost, (int, float)):
+            total["reported_cost_usd"] = round(
+                total.get("reported_cost_usd", 0) + cost, 8)
+            total_cost += cost
+        else:
+            complete = False
+    exact_per_story = (round(total_cost / accepted_story_count, 8)
+                       if complete and accepted_story_count else UNAVAILABLE)
+    return {
+        "by_engine": dict(sorted(usage_by_engine.items())),
+        "known_reported_cost_usd": round(total_cost, 8),
+        "cost_status": "complete" if complete else "lower-bound",
+        "cost_per_accepted_story_usd": exact_per_story,
+        "known_reported_cost_per_accepted_story_usd": (
+            round(total_cost / accepted_story_count, 8)
+            if accepted_story_count and rows else UNAVAILABLE),
+    }
+
+
 def build(evidence, process, telemetry, touches):
     project = evidence.get("project")
     stories = evidence.get("stories") or []
@@ -115,27 +157,8 @@ def build(evidence, process, telemetry, touches):
             failed = [row for row in acceptance["criteria"] if row["result"] == "fail"]
             catches = {"count": len(failed), "criteria": failed}
 
-    usage_rows = [row for row in telemetry if row.get("metric") == "engine.usage"
-                  and row.get("story") in numbers and row.get("usage_reported")]
-    usage_by_engine = defaultdict(lambda: {"invocations": 0})
-    total_cost = 0.0
-    complete_cost = bool(usage_rows)
-    for row in usage_rows:
-        name = row.get("engine") or "unknown"
-        total = usage_by_engine[name]
-        total["invocations"] += 1
-        block = row.get("usage") if isinstance(row.get("usage"), dict) else {}
-        for field in ("input_tokens", "output_tokens", "total_tokens"):
-            if isinstance(block.get(field), (int, float)):
-                total[field] = total.get(field, 0) + block[field]
-        cost = block.get("total_cost_usd")
-        if isinstance(cost, (int, float)):
-            total["reported_cost_usd"] = round(total.get("reported_cost_usd", 0) + cost, 8)
-            total_cost += cost
-        else:
-            complete_cost = False
-    cost_per_story = (round(total_cost / len(numbers), 8)
-                      if passed and complete_cost and numbers else UNAVAILABLE)
+    usage_cost = engine_usage_cost(
+        telemetry, numbers, len(numbers) if passed else 0)
 
     boundaries = {}
     for bell in BELLS:
@@ -177,10 +200,7 @@ def build(evidence, process, telemetry, touches):
                             "rate": poisoned / len(numbers) if numbers else UNAVAILABLE},
             "escaped_defects": escaped,
             "acceptance_catches": catches,
-            "engine_usage_cost": {"by_engine": dict(sorted(usage_by_engine.items())),
-                                  "known_reported_cost_usd": round(total_cost, 8),
-                                  "cost_status": "complete" if complete_cost else "partial",
-                                  "cost_per_accepted_story_usd": cost_per_story},
+            "engine_usage_cost": usage_cost,
             "cycle_time": cycle,
         },
         "observation_cutoff": evidence.get("observation_cutoff"),

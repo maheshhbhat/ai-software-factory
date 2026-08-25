@@ -1,0 +1,209 @@
+{
+  "commitment": 17,
+  "kpis": {
+    "acceptance_catches": {
+      "count": 0,
+      "criteria": []
+    },
+    "autonomy": {
+      "autonomous_stories": 2,
+      "autonomous_story_numbers": [
+        22,
+        23
+      ],
+      "definition": "merged without human recovery or human code intervention",
+      "non_autonomous_story_numbers": [
+        20,
+        21
+      ],
+      "rate": 0.5,
+      "stories": 4
+    },
+    "cycle_time": {
+      "end": "2026-08-25T12:14:21Z",
+      "seconds": 50950.0,
+      "start": "2026-08-24T22:05:11Z"
+    },
+    "engine_usage_cost": {
+      "by_engine": {
+        "claude": {
+          "invocations": 14,
+          "reported_cost_usd": 31.523321,
+          "reported_invocations": 13,
+          "unreported_invocations": 1
+        },
+        "codex": {
+          "invocations": 1,
+          "reported_invocations": 0,
+          "unreported_invocations": 1
+        }
+      },
+      "cost_per_accepted_story_usd": "unavailable",
+      "cost_status": "lower-bound",
+      "known_reported_cost_per_accepted_story_usd": 7.88083025,
+      "known_reported_cost_usd": 31.523321
+    },
+    "escaped_defects": {
+      "count": 0,
+      "observations": []
+    },
+    "human_touches": {
+      "by_classification": {
+        "decision": 4,
+        "rescue": 2
+      },
+      "canonical_bells": 6,
+      "operator_actions": [
+        {
+          "action": "claim-recovery",
+          "classification": "operation",
+          "story": 20,
+          "timestamp": "2026-08-24T22:43:50Z"
+        },
+        {
+          "action": "claim-recovery",
+          "classification": "operation",
+          "story": 20,
+          "timestamp": "2026-08-24T22:44:09Z"
+        },
+        {
+          "action": "claim-recovery",
+          "classification": "operation",
+          "story": 20,
+          "timestamp": "2026-08-24T22:56:40Z"
+        },
+        {
+          "action": "claim-recovery",
+          "classification": "operation",
+          "story": 21,
+          "timestamp": "2026-08-25T01:06:39Z"
+        },
+        {
+          "action": "claim-recovery",
+          "classification": "operation",
+          "story": 21,
+          "timestamp": "2026-08-25T01:28:38Z"
+        },
+        {
+          "action": "claim-recovery",
+          "classification": "operation",
+          "story": 21,
+          "timestamp": "2026-08-25T01:45:59Z"
+        }
+      ],
+      "records": [
+        {
+          "actor": "@maheshhbhat",
+          "bell_type": "poison-rescue",
+          "classification": "rescue",
+          "note": "Owner approved first poison rescue in session; duration unavailable, recorded as 0; decision-comment:5408356123; poison-rescue:income-portfolio-analyzer#21:first",
+          "project": "maheshhbhat/income-portfolio-analyzer#18",
+          "seconds_spent": 0,
+          "story": "maheshhbhat/income-portfolio-analyzer#21",
+          "timestamp": "2026-08-25T09:29:50.778374Z"
+        },
+        {
+          "actor": "@maheshhbhat",
+          "bell_type": "poison-rescue",
+          "classification": "rescue",
+          "note": "Story #20 poison rescue approved by Mahesh; duration unmeasured; decision-comment:5402857268",
+          "project": "maheshhbhat/income-portfolio-analyzer#18",
+          "seconds_spent": 0,
+          "story": "maheshhbhat/income-portfolio-analyzer#20",
+          "timestamp": "2026-08-24T23:27:36Z"
+        },
+        {
+          "actor": "@maheshhbhat",
+          "bell_type": "acceptance",
+          "classification": "decision",
+          "note": "Project #18 accepted by Mahesh; duration unmeasured; acceptance-comment:5410216580",
+          "project": "maheshhbhat/income-portfolio-analyzer#18",
+          "seconds_spent": 0,
+          "story": null,
+          "timestamp": "2026-08-25T12:14:21Z"
+        },
+        {
+          "actor": "@maheshhbhat",
+          "bell_type": "plan-approval",
+          "classification": "decision",
+          "note": "Project #18 approved by Mahesh; duration unmeasured; decision-comment:5402014149",
+          "project": "maheshhbhat/income-portfolio-analyzer#18",
+          "seconds_spent": 0,
+          "story": null,
+          "timestamp": "2026-08-24T22:05:11Z"
+        },
+        {
+          "actor": "@maheshhbhat",
+          "bell_type": "plan-approval",
+          "classification": "decision",
+          "note": "Project #18 changes requested by Mahesh; duration unmeasured; decision-comment:5401648787",
+          "project": "maheshhbhat/income-portfolio-analyzer#18",
+          "seconds_spent": 0,
+          "story": null,
+          "timestamp": "2026-08-24T21:33:10Z"
+        },
+        {
+          "actor": "@maheshhbhat",
+          "bell_type": "plan-approval",
+          "classification": "decision",
+          "note": "Project #18 continued changes requested by Mahesh; duration unmeasured; decision-comment:5401841774",
+          "project": "maheshhbhat/income-portfolio-analyzer#18",
+          "seconds_spent": 0,
+          "story": null,
+          "timestamp": "2026-08-24T21:50:46Z"
+        }
+      ],
+      "relay": 0
+    },
+    "poison_rate": {
+      "poisoned_stories": 2,
+      "rate": 0.5,
+      "stories": 4,
+      "story_numbers": [
+        20,
+        21
+      ]
+    },
+    "worker_attempts_retry_rate": {
+      "attempts": 11,
+      "attempts_by_story": {
+        "20": 4,
+        "21": 5,
+        "22": 1,
+        "23": 1
+      },
+      "attempts_per_story": 2.75,
+      "retries": 7,
+      "retry_share_of_attempts": 0.6363636363636364,
+      "stories": 4
+    }
+  },
+  "measurement_integrity": {
+    "findings": [],
+    "passed": true
+  },
+  "product_outcome": "accepted",
+  "project": 18,
+  "report_phase": "final",
+  "repository": "maheshhbhat/income-portfolio-analyzer",
+  "rung": 2,
+  "rung_verdict": "FAIL",
+  "schema_version": 1,
+  "sources": [
+    "GitHub Project #18 and Stories #20-#23 timelines",
+    "Product PRs #25-#28 checks and merge records",
+    "Phase 5 Rung 2 observability bundles preserved during the run",
+    "factory/touchlog/touchlog.jsonl",
+    "real Chrome click-and-render verification on product main"
+  ],
+  "threshold_results": {
+    "autonomy": false,
+    "escaped_defects": true,
+    "relay": true
+  },
+  "thresholds": {
+    "autonomy_minimum": 0.75,
+    "escaped_defects_maximum": 0,
+    "relay_maximum": 0
+  }
+}
