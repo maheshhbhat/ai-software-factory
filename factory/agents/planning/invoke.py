@@ -25,6 +25,8 @@ import streaming  # noqa: E402
 
 DEFAULT_TIMEOUT = 900
 DEFAULT_MAX_USD = 5.0
+DEFAULT_FALLBACK_MODEL = "gpt-5.6-sol"
+DEFAULT_FALLBACK_EFFORT = "medium"
 
 
 class InvocationError(RuntimeError):
@@ -150,26 +152,90 @@ def model_command(input_path: str, timeout: int, max_usd: float) -> list[str]:
             "--no-session-persistence"]
 
 
+def fallback_model_command(input_path: str, schema_path: str,
+                           output_path: str) -> list[str]:
+    """Build the independent Codex fallback without inheriting user tuning."""
+    prompt = HERE.joinpath("prompt.md").read_text()
+    input_value = json.loads(pathlib.Path(input_path).read_text())
+    payload = (prompt + "\n\n## Invocation input\n\n"
+               + json.dumps(input_value, indent=2)
+               + "\n\nReturn only the contract JSON object; do not write GitHub directly.")
+    model = os.environ.get(
+        "FACTORY_PLANNING_FALLBACK_MODEL", DEFAULT_FALLBACK_MODEL).strip()
+    effort = os.environ.get(
+        "FACTORY_PLANNING_FALLBACK_EFFORT", DEFAULT_FALLBACK_EFFORT).strip()
+    if not model or effort not in {"none", "low", "medium", "high", "xhigh", "max"}:
+        raise InvocationError("invalid planning fallback model or effort configuration")
+    return [
+        "codex", "exec", "--model", model,
+        "--config", f'model_reasoning_effort="{effort}"',
+        "--sandbox", "read-only", "--ephemeral", "--ignore-user-config",
+        "--ignore-rules", "--output-schema", schema_path,
+        "--output-last-message", output_path, "--json", payload,
+    ]
+
+
+def _run(command: list[str], value: dict, timeout: int, runner) -> subprocess.CompletedProcess:
+    if runner is subprocess.run:
+        return streaming.run(
+            command, cwd=ROOT, env=os.environ.copy(), timeout=timeout,
+            component="planning-agent", operation="engine-stream",
+            artifact=(value.get("trigger") or {}).get("number"))
+    return runner(command, capture_output=True, text=True, timeout=timeout)
+
+
+def _codex_stdout(result, output_path: pathlib.Path) -> str:
+    """Prefer Codex's schema-bound final file; keep direct stdout testable."""
+    if output_path.exists() and output_path.stat().st_size:
+        return output_path.read_text(encoding="utf-8")
+    return result.stdout or ""
+
+
 def run_model(value: dict, timeout: int, max_usd: float,
               runner=subprocess.run) -> dict:
-    with tempfile.NamedTemporaryFile("w", suffix=".json", encoding="utf-8") as handle:
+    with tempfile.NamedTemporaryFile("w", suffix=".json", encoding="utf-8") as handle, \
+            tempfile.NamedTemporaryFile("w", suffix=".schema.json", encoding="utf-8") as schema, \
+            tempfile.NamedTemporaryFile("w", suffix=".result.json", encoding="utf-8") as output:
         json.dump(value, handle)
         handle.flush()
+        custom_primary = bool(os.environ.get("FACTORY_PLANNING_MODEL_CMD", "").strip())
+        if custom_primary:
+            json.dump({}, schema)
+        else:
+            altitude = contract.select_altitude(
+                set((value.get("trigger") or {}).get("labels", [])))
+            json.dump(contract.json_schema(altitude), schema)
+        schema.flush()
+        output_path = pathlib.Path(output.name)
         command = model_command(handle.name, timeout, max_usd)
         try:
-            if runner is subprocess.run:
-                result = streaming.run(
-                    command, cwd=ROOT, env=os.environ.copy(), timeout=timeout,
-                    component="planning-agent", operation="engine-stream",
-                    artifact=(value.get("trigger") or {}).get("number"))
-            else:
-                result = runner(command, capture_output=True, text=True,
-                                timeout=timeout)
+            result = _run(command, value, timeout, runner)
         except subprocess.TimeoutExpired as exc:
-            raise InvocationError(f"planning timeout exhausted after {timeout}s") from exc
-    if result.returncode != 0:
-        raise InvocationError(
-            f"planning model failed ({result.returncode}): {(result.stderr or '')[:300]}")
+            if custom_primary:
+                raise InvocationError(f"planning timeout exhausted after {timeout}s") from exc
+            result = None
+        except FileNotFoundError:
+            if custom_primary:
+                raise
+            result = None
+        if result is None or result.returncode != 0:
+            if custom_primary:
+                detail = "" if result is None else (result.stderr or "")[:300]
+                code = "unavailable" if result is None else result.returncode
+                raise InvocationError(f"planning model failed ({code}): {detail}")
+            fallback = fallback_model_command(handle.name, schema.name, output.name)
+            try:
+                result = _run(fallback, value, timeout, runner)
+            except subprocess.TimeoutExpired as exc:
+                raise InvocationError(
+                    f"planning fallback timeout exhausted after {timeout}s") from exc
+            except FileNotFoundError as exc:
+                raise InvocationError("planning fallback executable is unavailable") from exc
+            if result.returncode != 0:
+                raise InvocationError(
+                    f"planning fallback failed ({result.returncode}): "
+                    f"{(result.stderr or '')[:300]}")
+            result.stdout = _codex_stdout(result, output_path)
     try:
         try:
             parsed_stdout = json.loads(result.stdout)

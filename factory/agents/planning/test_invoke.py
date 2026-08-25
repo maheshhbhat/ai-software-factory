@@ -139,6 +139,68 @@ class InvocationTests(unittest.TestCase):
                 invoke.run_model({}, 7, 1.0,
                                  runner=lambda *a, **k: Result(3, stderr="budget"))
 
+    def test_default_claude_failure_falls_back_to_gpt_5_6_sol_medium(self):
+        expected = campaign_output()
+        calls = []
+        def runner(command, **kwargs):
+            calls.append(command)
+            if command[0] == "claude":
+                return Result(1, stderr="You've hit your session limit")
+            return Result(stdout=json.dumps(expected))
+        value = {"trigger": {"labels": ["type:roadmap-commitment"]}}
+        with mock.patch.dict(os.environ, {}, clear=True):
+            actual = invoke.run_model(value, 7, 1.0, runner=runner)
+        self.assertEqual(expected, actual)
+        self.assertEqual("claude", calls[0][0])
+        self.assertEqual("codex", calls[1][0])
+        self.assertIn("gpt-5.6-sol", calls[1])
+        self.assertIn('model_reasoning_effort="medium"', calls[1])
+        self.assertIn("--output-schema", calls[1])
+        self.assertIn("--sandbox", calls[1])
+        self.assertIn("read-only", calls[1])
+
+    def test_default_claude_timeout_falls_back_but_bad_output_does_not(self):
+        expected = campaign_output()
+        calls = []
+        def runner(command, **kwargs):
+            calls.append(command)
+            if command[0] == "claude":
+                raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+            return Result(stdout=json.dumps(expected))
+        value = {"trigger": {"labels": ["type:roadmap-commitment"]}}
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(expected, invoke.run_model(value, 7, 1.0, runner=runner))
+        self.assertEqual(["claude", "codex"], [command[0] for command in calls])
+
+        with mock.patch.dict(os.environ, {}, clear=True), \
+             self.assertRaisesRegex(invoke.InvocationError, "malformed JSON"):
+            invoke.run_model(value, 7, 1.0,
+                             runner=lambda *a, **k: Result(stdout="not-json"))
+
+    def test_explicit_primary_override_never_silently_falls_back(self):
+        calls = []
+        def runner(command, **kwargs):
+            calls.append(command)
+            return Result(9, stderr="explicit failure")
+        value = {"trigger": {"labels": ["type:roadmap-commitment"]}}
+        with mock.patch.dict(os.environ,
+                             {"FACTORY_PLANNING_MODEL_CMD": "custom {input_file}"}), \
+             self.assertRaisesRegex(invoke.InvocationError, r"failed \(9\)"):
+            invoke.run_model(value, 7, 1.0, runner=runner)
+        self.assertEqual(1, len(calls))
+
+    def test_invalid_fallback_configuration_fails_before_codex_launch(self):
+        calls = []
+        def runner(command, **kwargs):
+            calls.append(command)
+            return Result(1, stderr="primary unavailable")
+        value = {"trigger": {"labels": ["type:roadmap-commitment"]}}
+        with mock.patch.dict(os.environ,
+                             {"FACTORY_PLANNING_FALLBACK_EFFORT": "extreme"}, clear=True), \
+             self.assertRaisesRegex(invoke.InvocationError, "invalid planning fallback"):
+            invoke.run_model(value, 7, 1.0, runner=runner)
+        self.assertEqual(1, len(calls))
+
     def test_stream_uses_structured_output_tool_when_final_result_is_not_json(self):
         expected = campaign_output()
         events = [
