@@ -373,12 +373,17 @@ def model_command(input_file: str, bounds: Bounds,
                 "--ignore-user-config", "--json", payload]
     if engine != "claude":
         raise DeliveryError(f"unsupported delivery engine: {engine}")
+    effort = os.environ.get("FACTORY_DELIVERY_CLAUDE_EFFORT", "low").strip().lower()
+    if effort not in {"low", "medium", "high", "xhigh", "max"}:
+        raise DeliveryError(
+            "FACTORY_DELIVERY_CLAUDE_EFFORT must be low, medium, high, xhigh, or max")
     # acceptEdits grants Edit/Write; dontAsk denies them. The Story asks the
     # engine to change files, and `execute()` enforces the Story's Scope on
     # what it changed afterwards. See the module docstring.
     #
     # stream-json exposes the engine lifecycle while preserving its usage.
     return ["claude", "-p", payload, "--max-budget-usd", str(bounds.max_usd),
+            "--effort", effort,
             "--permission-mode", "acceptEdits", "--output-format", "stream-json",
             "--verbose",
             "--no-session-persistence"]
