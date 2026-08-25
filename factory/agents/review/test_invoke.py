@@ -111,6 +111,16 @@ class OutputTests(unittest.TestCase):
             self.assertNotIn(str(operator), json.dumps(env))
             self.assertNotIn("FACTORY_WORKER_SESSION", env)
 
+    def test_openai_reviewer_uses_auth_home_but_not_operator_home(self):
+        with tempfile.TemporaryDirectory() as temp, mock.patch.dict(
+                os.environ, {"HOME": "/operator", "PATH": "/bin",
+                             "GH_TOKEN": "github"}, clear=True):
+            env = invoke.reviewer_provider_environment(
+                "openai", pathlib.Path(temp) / "review-home")
+        self.assertEqual("/operator/.codex", env["CODEX_HOME"])
+        self.assertNotIn("HOME", env)
+        self.assertNotIn("GH_TOKEN", env)
+
     def test_failed_attempt_discards_private_output_before_fallback(self):
         with tempfile.TemporaryDirectory() as temp:
             root = pathlib.Path(temp)

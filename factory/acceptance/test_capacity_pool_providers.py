@@ -66,7 +66,7 @@ class CapacityProviderTests(unittest.TestCase):
                   "ANTHROPIC_API_KEY": "anthropic", "GITHUB_TOKEN": "github"}
         openai = provider_environment("openai", source)
         anthropic = provider_environment("anthropic", source)
-        self.assertEqual({"PATH", "OPENAI_API_KEY"}, set(openai))
+        self.assertEqual({"PATH", "HOME", "OPENAI_API_KEY"}, set(openai))
         self.assertEqual({"PATH", "HOME", "ANTHROPIC_API_KEY"}, set(anthropic))
         self.assertNotIn("GITHUB_TOKEN", openai | anthropic)
 

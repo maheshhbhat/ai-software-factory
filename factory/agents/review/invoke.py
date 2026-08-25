@@ -143,6 +143,8 @@ def reviewer_provider_environment(provider: str,
     configured = source.get("FACTORY_REVIEW_CODEX_HOME", "").strip()
     if configured:
         source["CODEX_HOME"] = configured
+    elif source.get("HOME"):
+        source["CODEX_HOME"] = str(pathlib.Path(source["HOME"]) / ".codex")
     source.pop("HOME", None)
     source.pop("GH_TOKEN", None)
     source.pop("GITHUB_TOKEN", None)
