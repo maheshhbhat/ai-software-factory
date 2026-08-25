@@ -130,6 +130,7 @@ class TestParsing(unittest.TestCase):
         with mock.patch.object(poller.dispatcher, "fetch_issues", return_value={10: story}), \
              mock.patch.object(poller.dispatcher, "fetch_pull_requests", return_value=[pull]), \
              mock.patch.object(poller.dispatcher, "_api", return_value=[]), \
+             mock.patch.object(poller, "hydrate_review_pulls", return_value=[pull]), \
              mock.patch.object(poller, "refresh_behind_branches", return_value={9}), \
              mock.patch.object(poller, "wake_reviewer") as wake:
             self.assertEqual([], poller.run_phase4_reviews("o/r"))
@@ -141,6 +142,24 @@ class TestParsing(unittest.TestCase):
         with mock.patch.object(poller.subprocess, "run") as run:
             self.assertEqual(set(), poller.refresh_behind_branches("o/r", [pull], {}))
         run.assert_not_called()
+
+    def test_list_pull_is_hydrated_before_behind_classification(self):
+        summary = {"number": 9, "state": "open", "draft": False,
+                   "body": "Story: #10\n", "head": {"sha": "a" * 40}}
+        detail = {**summary, "mergeable_state": "behind"}
+        with mock.patch.object(poller.dispatcher, "_api", return_value=detail) as api:
+            pulls = poller.hydrate_review_pulls("o/r", [summary], "token")
+        self.assertEqual([detail], pulls)
+        api.assert_called_once_with(
+            "https://api.github.com/repos/o/r/pulls/9", "token")
+
+    def test_unrelated_list_pull_is_not_hydrated(self):
+        summary = {"number": 9, "state": "open", "draft": False,
+                   "body": "ordinary pull"}
+        with mock.patch.object(poller.dispatcher, "_api") as api:
+            self.assertEqual([summary], poller.hydrate_review_pulls(
+                "o/r", [summary], "token"))
+        api.assert_not_called()
 
     def test_canonical_line_is_parsed(self):
         self.assertEqual(poller.parse_dispatches(REPORT),
