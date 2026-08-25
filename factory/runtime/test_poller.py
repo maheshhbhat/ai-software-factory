@@ -344,6 +344,14 @@ class TestPollOnce(unittest.TestCase):
             poller.poll_once("o/r", 54, set())
         wake.assert_called_once_with("o/r", 70)
 
+    def test_planning_failure_reports_actionable_stderr_tail(self):
+        result = mock.Mock(returncode=1, stderr="startup noise\nplanning failed: exact cause",
+                           stdout="")
+        with mock.patch.object(poller.subprocess, "run", return_value=result), \
+             self.assertRaisesRegex(poller.WorkerLaunchFailed,
+                                    "planning failed: exact cause"):
+            poller.wake_planner("o/r", 70)
+
     def test_planning_failure_does_not_block_story_dispatch(self):
         with mock.patch.object(poller, "run_planning_route", return_value=[70]), \
              mock.patch.object(poller, "wake_planner", side_effect=RuntimeError("boom")), \
