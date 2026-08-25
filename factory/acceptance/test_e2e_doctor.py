@@ -85,6 +85,7 @@ class SafetyTests(unittest.TestCase):
 class GitHubChecks(unittest.TestCase):
     def test_authorization_branch_protection_and_capacity_are_checked(self):
         payload={"data":{"repository":{"isPrivate":True,"viewerPermission":"ADMIN",
+          "autoMergeAllowed":True,
           "project":{"number":400,"state":"OPEN","body":"### Roadmap commitment\n\n#384\n",
                      "labels":{"nodes":[{"name":"type:project"},{"name":"project:awaiting-ready"}]}},
           "commitment":{"number":384,"state":"OPEN",
@@ -115,6 +116,7 @@ class GitHubChecks(unittest.TestCase):
 
     def test_real_rest_failure_blocks_even_when_graphql_capacity_is_healthy(self):
         payload={"data":{"repository":{"isPrivate":False,"viewerPermission":"ADMIN",
+          "autoMergeAllowed":True,
           "project":{"number":400,"state":"OPEN","body":"### Roadmap commitment\n\n#384\n",
                      "labels":{"nodes":[{"name":"type:project"},{"name":"project:active"}]}},
           "commitment":{"number":384,"state":"OPEN",
@@ -142,6 +144,7 @@ class GitHubChecks(unittest.TestCase):
 
     def test_existing_project_or_story_blocks_commitment_isolation(self):
         payload={"data":{"repository":{"isPrivate":False,"viewerPermission":"ADMIN",
+          "autoMergeAllowed":True,
           "project":{"number":400,"state":"OPEN","body":"### Roadmap commitment\n\n#384\n",
                      "labels":{"nodes":[{"name":"type:project"},{"name":"project:active"}]}},
           "commitment":{"number":384,"state":"OPEN",

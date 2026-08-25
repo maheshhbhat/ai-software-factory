@@ -109,6 +109,39 @@ class TestParsing(unittest.TestCase):
         self.assertFalse(poller.route_merge("o/r", pull, [stale], apply=False))
         self.assertTrue(poller.route_merge("o/r", pull, [exact], apply=False))
 
+    def test_behind_story_branch_is_refreshed_before_fresh_review(self):
+        pull = {"number": 9, "state": "open", "draft": False,
+                "mergeable_state": "behind", "body": "Story: #10\n",
+                "head": {"sha": "a" * 40}}
+        story = {"number": 10, "labels": [{"name": "story:in-review"}]}
+        completed = __import__("subprocess").CompletedProcess([], 0, "updated", "")
+        with mock.patch.object(poller.subprocess, "run", return_value=completed) as run:
+            refreshed = poller.refresh_behind_branches("o/r", [pull], {10: story})
+        self.assertEqual({9}, refreshed)
+        run.assert_called_once_with(
+            ["gh", "pr", "update-branch", "9", "--repo", "o/r"],
+            capture_output=True, text=True)
+
+    def test_refreshed_old_head_is_not_sent_to_reviewer(self):
+        pull = {"number": 9, "state": "open", "draft": False,
+                "mergeable_state": "behind", "body": "Story: #10\n",
+                "head": {"sha": "a" * 40}}
+        story = {"number": 10, "labels": [{"name": "story:in-review"}]}
+        with mock.patch.object(poller.dispatcher, "fetch_issues", return_value={10: story}), \
+             mock.patch.object(poller.dispatcher, "fetch_pull_requests", return_value=[pull]), \
+             mock.patch.object(poller.dispatcher, "_api", return_value=[]), \
+             mock.patch.object(poller, "refresh_behind_branches", return_value={9}), \
+             mock.patch.object(poller, "wake_reviewer") as wake:
+            self.assertEqual([], poller.run_phase4_reviews("o/r"))
+        wake.assert_not_called()
+
+    def test_unrelated_behind_pull_is_not_refreshed(self):
+        pull = {"number": 9, "state": "open", "draft": False,
+                "mergeable_state": "behind", "body": "ordinary pull"}
+        with mock.patch.object(poller.subprocess, "run") as run:
+            self.assertEqual(set(), poller.refresh_behind_branches("o/r", [pull], {}))
+        run.assert_not_called()
+
     def test_canonical_line_is_parsed(self):
         self.assertEqual(poller.parse_dispatches(REPORT),
                          [{"story": 64, "project": 55, "agent": "claude-delivery"}])
