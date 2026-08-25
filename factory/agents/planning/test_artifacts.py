@@ -108,6 +108,22 @@ The UI depends on the model."""}
 
 
 class CampaignTests(unittest.TestCase):
+    def test_campaign_accepts_production_shaped_create_issue_labels(self):
+        class ProductionShapeStore(FakeStore):
+            def create_issue(self, title, body, labels):
+                item = super().create_issue(title, body, labels)
+                item["labels"] = [{"name": label} for label in item["labels"]]
+                return item
+
+        store = ProductionShapeStore([
+            {"number": 1, "labels": ["type:roadmap-commitment"], "body": ""}
+        ])
+
+        written = artifacts.write(store, store.get_issue(1), "v1", campaign_output())
+
+        self.assertEqual(2, written.project)
+        self.assertIn("project:planning", store.get_issue(2)["labels"])
+
     def test_campaign_writes_proposal_and_project_only(self):
         store = FakeStore([{"number": 1, "labels": ["type:roadmap-commitment"], "body": ""}])
         trigger = store.get_issue(1)
