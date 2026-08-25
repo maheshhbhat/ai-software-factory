@@ -23,6 +23,10 @@ class InvocationPayload:
     schema_path: pathlib.Path | None = None
     output_path: pathlib.Path | None = None
     access: str = "read-only"
+    allowed_tools: tuple[str, ...] = ()
+    disallowed_tools: tuple[str, ...] = ()
+    network_access: bool = False
+    skip_git_repo_check: bool = False
 
 
 def classify_failure(text: str, returncode: int) -> str:
@@ -66,6 +70,11 @@ def claude_command(*, model: str, effort: str, payload: InvocationPayload,
     if payload.output_schema is not None:
         command += ["--json-schema", json.dumps(
             payload.output_schema, separators=(",", ":"))]
+    if payload.allowed_tools:
+        tools = ",".join(payload.allowed_tools)
+        command += ["--tools", tools, "--allowedTools", tools]
+    if payload.disallowed_tools:
+        command += ["--disallowedTools", ",".join(payload.disallowed_tools)]
     return command
 
 
@@ -73,6 +82,10 @@ def codex_command(*, model: str, effort: str, payload: InvocationPayload) -> lis
     command = ["codex", "exec", "--model", model, "--config",
             f'model_reasoning_effort="{effort}"', "--sandbox", payload.access,
             "--ephemeral", "--ignore-user-config", "--ignore-rules"]
+    if payload.network_access:
+        command += ["--config", "sandbox_workspace_write.network_access=true"]
+    if payload.skip_git_repo_check:
+        command += ["--skip-git-repo-check"]
     if payload.schema_path is not None:
         command += ["--output-schema", str(payload.schema_path)]
     if payload.output_path is not None:

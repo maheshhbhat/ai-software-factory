@@ -7,8 +7,6 @@ import base64
 import json
 import os
 import pathlib
-import pwd
-import re
 import subprocess
 import sys
 import tempfile
@@ -42,15 +40,6 @@ def token():
 
 def labels(issue):
     return {x.get("name") for x in issue.get("labels", [])}
-
-def model_environment():
-    """Claude subscription auth only; the wrapper has already removed GitHub tokens."""
-    env = dict(os.environ)
-    account = pwd.getpwuid(os.getuid())
-    env.update({"HOME": account.pw_dir, "USER": account.pw_name,
-                "LOGNAME": account.pw_name})
-    env.pop("GH_TOKEN", None); env.pop("GITHUB_TOKEN", None)
-    return env
 
 def story_body():
     return f"""### Spec
@@ -124,60 +113,15 @@ def poll_environment(secret, runtime_log):
     env.update({
         "GH_TOKEN": secret,
         "FACTORY_RUNTIME_LOG": str(runtime_log),
+        "FACTORY_RUN_DIR": str(runtime_log.parent),
         "FACTORY_RUNTIME_LOG_STDERR": "0",
-        "FACTORY_WORKER_ORDER": "claude-delivery",
-        "FACTORY_WORKER_CLAUDE_DELIVERY_CAPABILITIES": "delivery",
-        "FACTORY_WORKER_CLAUDE_DELIVERY_LAUNCH":
+        "FACTORY_WORKER_ORDER": "capacity-delivery",
+        "FACTORY_WORKER_CAPACITY_DELIVERY_CAPABILITIES": "delivery",
+        "FACTORY_WORKER_CAPACITY_DELIVERY_LAUNCH":
             f"{sys.executable} {pathlib.Path(__file__).resolve()} launch-worker {{story}}",
-        "FACTORY_DELIVERY_MODEL_CMD":
-            f"{sys.executable} {pathlib.Path(__file__).resolve()} worker-model "
-            "{input_file}",
         "FACTORY_PHASE4_REVIEWS": "1",
-        "FACTORY_REVIEW_MODEL_CMD":
-            f"{sys.executable} {pathlib.Path(__file__).resolve()} review-model "
-            "{input_file} {output_file}",
     })
     return env
-
-def worker_model(input_file):
-    value = json.loads(pathlib.Path(input_file).read_text())
-    prompt = ("Implement the supplied Story exactly in the current worktree. The Story "
-              "intentionally requires a defective first Attempt and correction after review; "
-              "obey that staged requirement. Edit only declared Scope. Do not use Bash, git, "
-              "or GitHub. Finish after writing files. Invocation JSON:\n" +
-              json.dumps(value, sort_keys=True))
-    result = subprocess.run(
-        ["claude", "-p", prompt, "--permission-mode", "acceptEdits",
-         "--allowedTools", "Read,Write,Edit,Glob,Grep", "--disallowedTools", "Bash",
-         "--no-session-persistence"], cwd=pathlib.Path.cwd(), timeout=1200,
-        env=model_environment())
-    if result.returncode == 0:
-        created = pathlib.Path.cwd() / "runs/phase4/live_product/app.py"
-        story = (value.get("story") or {}).get("body", "")
-        attempt = re.search(r"(?ms)^### Attempt\s*$\n\s*(\d+)", story)
-        if created.exists() and attempt and attempt.group(1) == "1":
-            created.write_text('''"""Deliberately defective first review head."""
-import json
-import os
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-
-def build_sha(environment=None):
-    return "defective"
-
-def handler(_sha):
-    class HealthHandler(BaseHTTPRequestHandler):
-        def do_GET(self):
-            if self.path != "/health":
-                self.send_error(404); return
-            payload = json.dumps({"build_sha": "defective"}).encode()
-            self.send_response(200); self.end_headers(); self.wfile.write(payload)
-        def log_message(self, *_args): pass
-    return HealthHandler
-''')
-        if created.exists():
-            subprocess.run(["git", "add", "-N", "--", str(created)],
-                           cwd=pathlib.Path.cwd(), check=True)
-    return result.returncode
 
 def launch_worker(story):
     log = ROOT / "runs" / "phase4" / f"worker-{story}.log"
@@ -189,24 +133,6 @@ def launch_worker(story):
     handle.close()
     return 0
 
-def review_model(input_file, output_file):
-    value = json.loads(pathlib.Path(input_file).read_text())
-    head = value["head"]
-    diff = json.dumps(value["diff"])
-    prompt = ("Act as a strict code reviewer. Return exactly one compact JSON object and no "
-              "markdown. If the diff returns or embeds the literal defective as build_sha, "
-              "return {\"verdict\":\"findings\",\"findings\":[\"/health must return the "
-              "validated BUILD_SHA, not the literal defective\"]}. Otherwise, approve only "
-              "if it validates BUILD_SHA as 40 lowercase hex and /health returns it, using "
-              "{\"verdict\":\"approval\",\"summary\":\"...\"}. Diff: " + diff)
-    result = command(["claude", "-p", prompt, "--permission-mode", "dontAsk",
-                      "--safe-mode", "--no-session-persistence"], timeout=600,
-                     env=dict(os.environ))
-    raw = result.stdout.strip().removeprefix("```json").removesuffix("```").strip()
-    outcome = json.loads(raw)
-    outcome["head"] = head
-    pathlib.Path(output_file).write_text(json.dumps(outcome, sort_keys=True))
-    return 0
 
 def checks_pass(pull_number, timeout=300):
     deadline = time.time() + timeout
@@ -315,13 +241,25 @@ def run_live(output):
     if health != {"build_sha": merge_sha}:
         raise RuntimeError(f"health SHA mismatch: {health} != {merge_sha}")
     timeline = client.pages(f"/issues/{story_number}/timeline")
+    telemetry_path = output / "telemetry.jsonl"
+    capacity_attempts = []
+    if telemetry_path.exists():
+        capacity_attempts = [
+            value for value in
+            (json.loads(line) for line in telemetry_path.read_text().splitlines()
+             if line.strip())
+            if value.get("metric") == "capacity.route.attempt"
+            and value.get("story") == story_number]
     trace = {"repo": REPO, "project": PROJECT, "story": story_number,
              "pull_request": pull["number"], "heads": heads, "merge_sha": merge_sha,
              "first_review": first_verdict, "health": health, "sampling": sample,
              "operations": operations,
              "timeline": [{"event": x.get("event"), "label": (x.get("label") or {}).get("name"),
                             "created_at": x.get("created_at")} for x in timeline],
-             "engine": "claude", "credential_boundary": "shared GitHub principal",
+             "engine": (capacity_attempts[-1].get("model")
+                        if capacity_attempts else "capacity-pool"),
+             "capacity_attempts": capacity_attempts,
+             "credential_boundary": "shared GitHub principal",
              "provider_cost": "unavailable; not fabricated"}
     (output / "trace.json").write_text(json.dumps(trace, indent=2, sort_keys=True) + "\n")
     lifecycle = lifecycle_walk(trace["timeline"])
@@ -355,17 +293,8 @@ def main(argv=None):
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="command", required=True)
     live = sub.add_parser("run"); live.add_argument("--output", default="runs/phase4")
-    model = sub.add_parser("review-model"); model.add_argument("input"); model.add_argument("output")
-    worker = sub.add_parser("worker-model"); worker.add_argument("input")
     launch = sub.add_parser("launch-worker"); launch.add_argument("story", type=int)
     args = parser.parse_args(argv)
-    if args.command == "review-model": return review_model(args.input, args.output)
-    if args.command == "worker-model":
-        try:
-            return worker_model(args.input)
-        except Exception as exc:
-            print(f"worker-model failed: {type(exc).__name__}: {exc}", file=sys.stderr)
-            return 1
     if args.command == "launch-worker": return launch_worker(args.story)
     print(json.dumps(run_live(ROOT / args.output), sort_keys=True)); return 0
 

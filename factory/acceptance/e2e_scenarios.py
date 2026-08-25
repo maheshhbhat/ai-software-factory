@@ -36,7 +36,7 @@ def primary_worker_launch_key() -> str:
     """Environment key for the first configured worker declaration."""
     order = [name.strip() for name in
              os.environ.get("FACTORY_WORKER_ORDER",
-                            "claude-delivery,codex-delivery").split(",")
+                            "capacity-delivery").split(",")
              if name.strip()]
     primary = order[0]
     return f"FACTORY_WORKER_{primary.upper().replace('-', '_')}_LAUNCH"

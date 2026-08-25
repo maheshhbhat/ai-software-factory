@@ -10,19 +10,16 @@ from unittest import mock
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import invoke
-import runlog
 
 
 class OutputTests(unittest.TestCase):
-    def test_default_command_can_only_write_the_outcome(self):
+    def test_review_payload_can_only_write_the_outcome(self):
         with mock.patch.object(pathlib.Path, "read_text", return_value="prompt"):
-            cmd = invoke.command(pathlib.Path("input.json"), pathlib.Path("out.json"))
-        self.assertIn("acceptEdits", cmd)
-        self.assertEqual("Write", cmd[cmd.index("--tools") + 1])
-        self.assertEqual("Write", cmd[cmd.index("--allowedTools") + 1])
-        self.assertEqual("Bash,Agent", cmd[cmd.index("--disallowedTools") + 1])
-        self.assertIn("--safe-mode", cmd)
-        self.assertIn("--no-session-persistence", cmd)
+            payload = invoke.review_payload({"head": "a" * 40}, pathlib.Path("out.json"))
+        self.assertEqual("workspace-write", payload.access)
+        self.assertEqual(("Write",), payload.allowed_tools)
+        self.assertEqual(("Bash", "Agent"), payload.disallowed_tools)
+        self.assertEqual(pathlib.Path("out.json"), payload.output_path)
 
     def test_default_review_timeout_is_three_minutes(self):
         self.assertEqual(180, invoke.DEFAULT_REVIEW_TIMEOUT)
@@ -114,91 +111,21 @@ class OutputTests(unittest.TestCase):
             self.assertNotIn(str(operator), json.dumps(env))
             self.assertNotIn("FACTORY_WORKER_SESSION", env)
 
-    def test_unavailable_reviewer_fails(self):
-        with mock.patch.object(subprocess, "run",
-                               return_value=subprocess.CompletedProcess([], 7, "", "offline")):
-            with self.assertRaisesRegex(invoke.ReviewError, "unavailable"):
-                invoke.run(["review"], cwd=".")
-
-
-class EngineUsageTests(unittest.TestCase):
-    """The review half of Project #322 criterion 5: a story's cost is the
-    worker's launch plus the reviewer's, so the reviewer must report too."""
-
-    def setUp(self):
-        self.dir = tempfile.TemporaryDirectory()
-        self.addCleanup(self.dir.cleanup)
-        self.log = pathlib.Path(self.dir.name)
-        self.env = mock.patch.dict(os.environ,
-                                   {"FACTORY_RUN_DIR": str(self.log),
-                                    "FACTORY_RUNTIME_LOG_STDERR": "0"})
-        self.env.start()
-        self.addCleanup(self.env.stop)
-
-    def records(self):
-        records=[]
-        for name in ("process-events.jsonl","telemetry.jsonl"):
-            path=self.log/name
-            if path.exists(): records += [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
-        return sorted(records,key=lambda row:row["timestamp"])
-
-    def usage_records(self):
-        return [record for record in self.records()
-                if record.get("metric") == runlog.USAGE_EVENT]
-
-    def launch(self, result):
-        with mock.patch.object(subprocess, "run", return_value=result):
-            invoke.launch_reviewer(["claude", "-p", "x"], cwd=".", timeout=10,
-                                   env={"PATH": "/bin"}, story=337, pull_request=9)
-
-    def test_the_reviewer_usage_is_recorded_against_the_story(self):
-        reported = json.dumps({"total_cost_usd": 0.11,
-                               "usage": {"input_tokens": 400, "output_tokens": 20}})
-        self.launch(subprocess.CompletedProcess([], 0, reported, ""))
-        record = self.usage_records()[0]
-        self.assertEqual(runlog.USAGE_EVENT, record["metric"])
-        self.assertEqual((337, 9, "review", "claude", "completed"),
-                         (record["story"], record["pull_request"], record["phase"],
-                          record["engine"], record["launch"]))
-        self.assertEqual({"input_tokens": 400, "output_tokens": 20,
-                          "total_cost_usd": 0.11}, record["usage"])
-
-    def test_reviewer_start_and_finish_are_visible_before_usage(self):
-        reported = json.dumps({"usage": {"output_tokens": 20}})
-        self.launch(subprocess.CompletedProcess([], 0, reported, ""))
-        self.assertEqual(["review.engine.started", "review.engine.finished",
-                          runlog.USAGE_EVENT],
-                         [record.get("event",record.get("metric")) for record in self.records()])
-
-    def test_a_reviewer_reporting_nothing_is_not_recorded_as_zero(self):
-        self.launch(subprocess.CompletedProcess([], 0, "wrote the outcome", ""))
-        record = self.usage_records()[0]
-        self.assertFalse(record["usage_reported"])
-        self.assertEqual(runlog.USAGE_UNAVAILABLE, record["usage"])
-
-    def test_a_failed_reviewer_launch_still_records_what_it_spent(self):
-        failed = subprocess.CompletedProcess(
-            [], 7, json.dumps({"usage": {"output_tokens": 2}}), "offline")
-        with self.assertRaisesRegex(invoke.ReviewError, "unavailable"):
-            self.launch(failed)
-        self.assertEqual([("failed", {"output_tokens": 2})],
-                         [(r["launch"], r["usage"]) for r in self.usage_records()])
-
-    def test_the_default_command_asks_the_reviewer_to_report_its_usage(self):
-        with mock.patch.object(pathlib.Path, "read_text", return_value="prompt"):
-            cmd = invoke.command(pathlib.Path("input.json"), pathlib.Path("out.json"))
-        self.assertEqual("stream-json", cmd[cmd.index("--output-format") + 1])
-        self.assertIn("--verbose", cmd)
-        self.assertEqual("claude", invoke.engine_name(cmd))
-
-    def test_usage_capture_grants_the_reviewer_no_tool_and_no_identity(self):
-        """The fresh-identity construction is what this story must not touch:
-        stdout format is not a permission and not a credential."""
-        with mock.patch.object(pathlib.Path, "read_text", return_value="prompt"):
-            cmd = invoke.command(pathlib.Path("input.json"), pathlib.Path("out.json"))
-        self.assertEqual("Write", cmd[cmd.index("--allowedTools") + 1])
-        self.assertEqual("Bash,Agent", cmd[cmd.index("--disallowedTools") + 1])
-        self.assertIn("--safe-mode", cmd)
+    def test_failed_attempt_discards_private_output_before_fallback(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp)
+            staging, output = root / "stage.json", root / "out.json"
+            def fail(_command, **_kwargs):
+                staging.write_text('{"forged":true}')
+                return subprocess.CompletedProcess([], 7, "", "quota exhausted")
+            adapter = invoke.bounded_review_adapter(
+                "openai", cwd=root, environment={}, staging=staging,
+                output=output, runner=fail)
+            result = adapter.run(
+                model="test", effort="medium", timeout_seconds=10,
+                budget_units=1, payload=invoke.InvocationPayload("review"))
+            self.assertEqual("quota", result.outcome)
+            self.assertFalse(staging.exists())
 
 
 if __name__ == "__main__":

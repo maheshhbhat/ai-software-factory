@@ -28,33 +28,30 @@ class LiveWorkerConfiguration(unittest.TestCase):
 
     def test_refuses_an_incomplete_bridge_declaration(self):
         error = self.error_for(
-            FACTORY_WORKER_ORDER="claude-delivery",
-            FACTORY_WORKER_CLAUDE_DELIVERY_LAUNCH="python3 factory/runtime/bridge.py")
+            FACTORY_WORKER_ORDER="capacity-delivery",
+            FACTORY_WORKER_CAPACITY_DELIVERY_LAUNCH="python3 factory/runtime/bridge.py")
         self.assertIn("placeholders", error)
 
-    def test_refuses_the_wrong_engine(self):
+    def test_refuses_a_provider_specific_worker(self):
         error = self.error_for(
             FACTORY_WORKER_ORDER="claude-delivery",
             FACTORY_WORKER_CLAUDE_DELIVERY_LAUNCH=(
-                "python3 factory/runtime/bridge.py --engine codex "
+                "python3 factory/runtime/bridge.py "
                 "--story {story} --project {project}"))
-        self.assertIn("expected 'claude'", error)
+        self.assertIn("bypasses the capacity-delivery boundary", error)
 
-    def test_accepts_both_real_bridge_declarations(self):
+    def test_accepts_the_capacity_pool_bridge_declaration(self):
         error = self.error_for(
-            FACTORY_WORKER_ORDER="claude-delivery,codex-delivery",
-            FACTORY_WORKER_CLAUDE_DELIVERY_LAUNCH=(
-                "python3 factory/runtime/bridge.py --engine claude "
-                "--story {story} --project {project}"),
-            FACTORY_WORKER_CODEX_DELIVERY_LAUNCH=(
-                "python3 factory/runtime/bridge.py --engine codex "
+            FACTORY_WORKER_ORDER="capacity-delivery",
+            FACTORY_WORKER_CAPACITY_DELIVERY_LAUNCH=(
+                "python3 factory/runtime/bridge.py "
                 "--story {story} --project {project}"))
         self.assertEqual("", error)
 
     def test_failover_scenario_breaks_the_configured_primary(self):
         with mock.patch.dict(os.environ, {
-                "FACTORY_WORKER_ORDER": "claude-delivery,fallback-delivery"}, clear=True):
-            self.assertEqual("FACTORY_WORKER_CLAUDE_DELIVERY_LAUNCH",
+                "FACTORY_WORKER_ORDER": "capacity-delivery"}, clear=True):
+            self.assertEqual("FACTORY_WORKER_CAPACITY_DELIVERY_LAUNCH",
                              e2e_scenarios.primary_worker_launch_key())
 
 

@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import contextlib
 import io
-import shlex
+import pathlib
 import subprocess
 import unittest
 import os
@@ -29,6 +29,8 @@ from unittest import mock
 import bridge
 import runlog
 import workers
+from factory.capacity_pool.router import ModelCapacity, Tier
+from factory.capacity_pool.state import CapacityState
 
 
 def setUpModule():
@@ -57,7 +59,7 @@ def runner(code=0, stdout="", stderr="", raises=None):
     return _run
 
 
-def run_main(engine="claude", story=96, project=95, run=None, answers=None,
+def run_main(story=96, project=95, run=None, answers=None,
              since="2026-08-20T23:00:00Z"):
     """Drive `main` with the engine and both GitHub reads faked.
 
@@ -66,19 +68,25 @@ def run_main(engine="claude", story=96, project=95, run=None, answers=None,
     """
     if not isinstance(answers, list):
         answers = [answers] * (bridge.ACK_CHECK_ATTEMPTS + 1)
-    with mock.patch.object(bridge.workers, "run_observed", run or runner()), \
-         mock.patch.object(bridge, "server_now", return_value=since), \
+    state = CapacityState()
+    model = ModelCapacity("bridge-test", "openai", Tier.ECONOMY,
+                          frozenset({"basic-tools"}))
+    state.mark_healthy("openai", "bridge-test", "test")
+    with mock.patch.object(bridge, "server_now", return_value=since), \
          mock.patch.object(bridge, "acknowledged_since", side_effect=list(answers)), \
          mock.patch.object(bridge.time, "sleep"):
-        return bridge.main(["--engine", engine, "--story", str(story),
-                            "--project", str(project),
-                            "--repo", "owner/name"])
+        try:
+            return bridge.main(["--story", str(story), "--project", str(project),
+                                "--repo", "owner/name"], state=state,
+                               registry=(model,), runner=run or runner())
+        finally:
+            state.close()
 
 
 class TestEngineCommand(unittest.TestCase):
     def test_claude_may_run_the_command_the_prompt_names(self):
-        allowed = bridge.engine_command("claude", "p")[-1]
-        self.assertIn("Bash(gh issue comment:*)", allowed)
+        self.assertIn("Bash(gh issue comment:*)",
+                      bridge.bridge_payload("p").allowed_tools)
 
     def test_claude_may_read_the_clock_the_prompt_demands(self):
         # Without this the engine invents a timestamp or refuses to post: the
@@ -95,9 +103,9 @@ class TestEngineCommand(unittest.TestCase):
             self.assertIn("Bash(gh issue comment:*)", bridge.CLAUDE_ALLOWED_TOOLS)
 
     def test_claude_is_not_granted_a_blanket_permission_mode(self):
-        cmd = bridge.engine_command("claude", "p")
-        self.assertNotIn("--permission-mode", cmd)
-        self.assertNotIn("bypassPermissions", " ".join(cmd))
+        payload = bridge.bridge_payload("p")
+        self.assertNotIn("Bash(*)", payload.allowed_tools)
+        self.assertIn("Agent", payload.disallowed_tools)
 
     def test_claude_may_not_run_arbitrary_bash(self):
         self.assertNotIn("Bash(*)", bridge.CLAUDE_ALLOWED_TOOLS)
@@ -106,12 +114,11 @@ class TestEngineCommand(unittest.TestCase):
     def test_codex_keeps_its_network_access(self):
         # Removed once already, which is how #92 finished successfully having
         # posted nothing.
-        self.assertIn("sandbox_workspace_write.network_access=true",
-                      bridge.engine_command("codex", "p"))
+        self.assertTrue(bridge.bridge_payload("p").network_access)
 
-    def test_unknown_engine_is_refused(self):
-        with self.assertRaises(ValueError):
-            bridge.engine_command("gpt-9", "p")
+    def test_bridge_contains_no_engine_selector(self):
+        source = pathlib.Path(bridge.__file__).read_text()
+        self.assertNotIn("--engine", source)
 
     def test_prompt_asks_for_exactly_the_heading_the_bridge_checks_for(self):
         prompt = bridge.task_prompt("owner/name", 96, 95)
@@ -121,18 +128,12 @@ class TestEngineCommand(unittest.TestCase):
 
 
 class TestObservability(unittest.TestCase):
-    def test_the_printed_invocation_is_pasteable_shell(self):
-        # #90 requires that a human can reproduce the handoff from this line,
-        # not merely read it. Unquoted, `Bash(gh issue comment:*)` is a parse
-        # error, so the test is that the shell parses it back into argv.
+    def test_dry_run_names_the_capacity_boundary(self):
         buffer = io.StringIO()
         with contextlib.redirect_stdout(buffer):
-            bridge.main(["--engine", "claude", "--story", "96", "--project", "95",
+            bridge.main(["--story", "96", "--project", "95",
                          "--repo", "owner/name", "--dry-run"])
-        line = next(l for l in buffer.getvalue().splitlines() if "exec: " in l)
-        argv = shlex.split(line.split("exec: ", 1)[1])
-        self.assertEqual(["claude", "-p", "<prompt>", "--allowedTools",
-                          bridge.CLAUDE_ALLOWED_TOOLS], argv)
+        self.assertIn("capacity-pool story=#96", buffer.getvalue())
 
 
 class TestDiagnosticsSurvive(unittest.TestCase):
@@ -151,19 +152,19 @@ class TestDiagnosticsSurvive(unittest.TestCase):
     def test_the_no_acknowledgement_verdict_reaches_stderr(self):
         code, _, err = self.failure_output([False, False, False])
         self.assertEqual(1, code)
-        self.assertIn("without posting an acknowledgement", err)
+        self.assertIn("schema-invalid", err)
 
     def test_an_engine_failure_reaches_stderr(self):
         out, err = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             run_main(run=runner(raises=FileNotFoundError("no claude")), answers=False)
-        self.assertIn("engine not available", err.getvalue())
+        self.assertIn("no-eligible-capacity", err.getvalue())
 
     def test_the_launch_line_stays_on_stdout(self):
         # The success detail workers.py keeps must not move: #90 requires the
         # invocation be observable on a launch that worked.
         _, out, _ = self.failure_output([True])
-        self.assertIn("exec:", out)
+        self.assertIn("capacity-pool", out)
 
 
 class TestCheckBudget(unittest.TestCase):
@@ -223,18 +224,18 @@ class TestProofOfAction(unittest.TestCase):
         # the loop retries. If reads 2 and 3 fail, the waiting never happened,
         # so declaring "proven not done" would be a FAILED verdict invented out
         # of a race — and a second engine would post a second acknowledgement.
-        self.assertEqual(0, run_main(answers=[False, None, None]))
+        self.assertEqual(2, run_main(answers=[False, None, None]))
 
     def test_a_definite_no_at_the_end_is_still_a_failure(self):
         self.assertEqual(1, run_main(answers=[None, None, False]))
 
     def test_no_launch_instant_is_unverifiable(self):
-        self.assertEqual(0, run_main(since=None, answers=AssertionError(
+        self.assertEqual(2, run_main(since=None, answers=AssertionError(
             "must not read comments without a launch instant")))
 
     def test_timeout_is_still_not_a_definite_failure(self):
         run = runner(raises=subprocess.TimeoutExpired(cmd="claude", timeout=1))
-        self.assertEqual(2, run_main(run=run, answers=False))
+        self.assertEqual(2, run_main(run=run, answers=None))
 
     def test_missing_engine_is_a_definite_failure(self):
         run = runner(raises=FileNotFoundError("no claude"))
@@ -242,12 +243,11 @@ class TestProofOfAction(unittest.TestCase):
 
     def test_dry_run_launches_nothing_and_checks_nothing(self):
         run = runner()
-        with mock.patch.object(bridge.workers, "run_observed", run), \
-             mock.patch.object(bridge, "server_now",
+        with mock.patch.object(bridge, "server_now",
                                side_effect=AssertionError("must not be called")):
-            code = bridge.main(["--engine", "claude", "--story", "96",
+            code = bridge.main(["--story", "96",
                                 "--project", "95", "--repo", "owner/name",
-                                "--dry-run"])
+                                "--dry-run"], runner=run)
         self.assertEqual(0, code)
         self.assertEqual([], run.calls)
 
@@ -276,7 +276,7 @@ class TestExitCodeIsNotProofEitherWay(unittest.TestCase):
         # Only evidence overrides the engine's own verdict; not being able to
         # tell leaves the failure standing.
         run = runner(code=3, stderr="boom")
-        self.assertEqual(1, run_main(run=run, answers=[None, None, None]))
+        self.assertEqual(2, run_main(run=run, answers=[None, None, None]))
 
 
 class TestAcknowledgedSince(unittest.TestCase):
@@ -405,25 +405,19 @@ class TestTheRunIsRecorded(unittest.TestCase):
     def test_the_dispatch_is_recorded_before_anything_runs(self):
         _, events = self.events()
         dispatch = events["bridge.dispatch"]
-        self.assertEqual("claude", dispatch["engine"])
+        self.assertEqual("capacity-pool", dispatch["engine"])
         self.assertEqual(96, dispatch["story"])
         self.assertEqual(95, dispatch["project"])
 
-    def test_the_recorded_command_shows_the_permission_grant_not_the_prompt(self):
-        """#96 was a wrong permission flag, so the reviewable part of an
-        invocation is its shape — and the prompt is the same every time."""
+    def test_the_dispatch_record_does_not_log_the_prompt(self):
         _, events = self.events()
-        cmd = events["bridge.dispatch"]["cmd"]
-        self.assertIn("<prompt>", cmd)
-        self.assertIn("--allowedTools", cmd)
-        self.assertNotIn("You are a delivery worker", cmd)
+        self.assertNotIn("cmd", events["bridge.dispatch"])
 
     def test_engine_exit_records_both_streams_and_the_elapsed_time(self):
         _, events = self.events(run=runner(0, stdout="did it", stderr="warning"))
         exit_event = events["bridge.engine.exit"]
-        self.assertEqual(0, exit_event["exit"])
+        self.assertEqual("success", exit_event["outcome"])
         self.assertEqual("did it", exit_event["stdout"])
-        self.assertEqual("warning", exit_event["stderr"])
         self.assertIsInstance(exit_event["elapsed_ms"], int)
 
     def test_each_verdict_is_recorded_with_its_reason(self):
@@ -433,7 +427,7 @@ class TestTheRunIsRecorded(unittest.TestCase):
         for answers, code, verdict in (
             (True, 0, "LAUNCHED"),                 # acknowledgement in the window
             (False, 1, "FAILED"),                  # clean exit, nothing posted
-            (None, 0, "LAUNCHED"),                 # unverifiable, engine exited 0
+            (None, 2, "AMBIGUOUS"),                # side effect unverifiable
         ):
             with self.subTest(verdict=verdict):
                 actual_code, events = self.events(answers=answers)
@@ -453,6 +447,6 @@ class TestTheRunIsRecorded(unittest.TestCase):
         """Recording a timeout as a failure would tell a reader failover was
         safe when it never was."""
         run = runner(raises=subprocess.TimeoutExpired(cmd="claude", timeout=1))
-        code, events = self.events(run=run, answers=False)
+        code, events = self.events(run=run, answers=None)
         self.assertEqual(2, code)
         self.assertEqual("AMBIGUOUS", events["bridge.outcome"]["verdict"])

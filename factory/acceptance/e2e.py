@@ -378,7 +378,6 @@ def worker_configuration_error() -> str:
         return ("no valid FACTORY_WORKER_*_LAUNCH declaration; live E2E requires "
                 "a worker pointing at factory/runtime/bridge.py")
 
-    expected_engines = {"claude-delivery": "claude", "codex-delivery": "codex"}
     for spec in specs:
         command = workers.launch_command(spec, 123456789, 987654321)
         joined = " ".join(command)
@@ -388,15 +387,10 @@ def worker_configuration_error() -> str:
         if "{story}" not in spec.launch or "{project}" not in spec.launch:
             return (f"{spec.name} launch must include both {{story}} and {{project}} "
                     "placeholders")
-        expected = expected_engines.get(spec.name)
-        if expected:
-            try:
-                engine = command[command.index("--engine") + 1]
-            except (ValueError, IndexError):
-                return f"{spec.name} launch must include --engine {expected}"
-            if engine != expected:
-                return (f"{spec.name} selects engine {engine!r}; expected "
-                        f"{expected!r}")
+        if spec.name != "capacity-delivery":
+            return f"{spec.name} bypasses the capacity-delivery boundary"
+        if "--engine" in command:
+            return f"{spec.name} must not select a provider engine"
     return ""
 
 
