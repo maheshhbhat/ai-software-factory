@@ -13,13 +13,14 @@ import invoke
 
 
 class OutputTests(unittest.TestCase):
-    def test_review_payload_can_only_write_the_outcome(self):
+    def test_review_payload_can_only_write_the_outcome_without_last_message_overwrite(self):
         with mock.patch.object(pathlib.Path, "read_text", return_value="prompt"):
             payload = invoke.review_payload({"head": "a" * 40}, pathlib.Path("out.json"))
         self.assertEqual("workspace-write", payload.access)
         self.assertEqual(("Write",), payload.allowed_tools)
         self.assertEqual(("Bash", "Agent"), payload.disallowed_tools)
-        self.assertEqual(pathlib.Path("out.json"), payload.output_path)
+        self.assertIsNone(payload.output_path)
+        self.assertIn("Write the JSON outcome to: out.json", payload.text)
 
     def test_default_review_timeout_is_three_minutes(self):
         self.assertEqual(180, invoke.DEFAULT_REVIEW_TIMEOUT)

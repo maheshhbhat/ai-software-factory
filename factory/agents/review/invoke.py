@@ -156,7 +156,11 @@ def review_payload(fields: dict, staging: pathlib.Path) -> InvocationPayload:
               + f"\n\nWrite the JSON outcome to: {staging}\n\nInput: "
               + json.dumps(fields, sort_keys=True))
     return InvocationPayload(
-        prompt, output_path=staging, access="workspace-write",
+        # The reviewer writes the structured artifact with its only allowed
+        # tool.  Do not also pass this path as Codex's --output-last-message:
+        # Codex writes that file after the turn and would replace the valid
+        # JSON artifact with final prose such as "Wrote the review outcome".
+        prompt, access="workspace-write",
         allowed_tools=("Write",), disallowed_tools=("Bash", "Agent"))
 
 

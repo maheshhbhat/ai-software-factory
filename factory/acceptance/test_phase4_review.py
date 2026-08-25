@@ -94,9 +94,11 @@ class ReviewAcceptanceTests(unittest.TestCase):
         root = pathlib.Path(kwargs["cwd"]).parent
         self.assertEqual(cmd[:2], ["codex", "exec"])
         self.assertNotIn("shared-token", " ".join(cmd))
+        self.assertNotIn("--output-last-message", cmd)
         self.serialized = json.loads(cmd[-1].split("Input: ", 1)[1])
         self.workspace_entries = sorted(x.name for x in root.iterdir())
-        pathlib.Path(cmd[cmd.index("--output-last-message") + 1]).write_text(json.dumps(
+        staging = cmd[-1].split("Write the JSON outcome to: ", 1)[1].splitlines()[0]
+        pathlib.Path(staging).write_text(json.dumps(
             {"head": self.client.head, "verdict": "approval", "summary": "safe"}))
         return subprocess.CompletedProcess(cmd, 0, "", "")
 
