@@ -482,7 +482,9 @@ class TestWorkerContractRouting(unittest.TestCase):
         os.environ["FACTORY_WORKER_ORDER"] = "claude-delivery"
         os.environ["FACTORY_WORKER_CLAUDE_DELIVERY_LAUNCH"] = "/usr/bin/false"
         with mock.patch.object(poller, "run_dispatcher", return_value=REPORT):
-            with self.assertRaises(poller.WorkerLaunchFailed):
+            with self.assertRaisesRegex(
+                    poller.WorkerLaunchFailed,
+                    "claude-delivery completed with failure"):
                 poller.poll_once("o/r", 54, set())
 
     def test_no_declared_workers_keeps_the_legacy_path(self):

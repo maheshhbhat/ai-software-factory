@@ -693,7 +693,7 @@ def release_definite_failure(repo: str, story_number: int, token: str, *,
                   "autonomous delivery." if operator else
                   "The poller directly observed the completed non-zero worker exit.")
     comment = (f"## {heading}\n\n"
-               "A confirmed factory malfunction stranded this claim.\n\n"
+               "A confirmed worker failure stranded this claim.\n\n"
                f"Reason: {reason}\n\nEvidence: `{evidence}`\n\n"
                f"The failed Attempt is preserved. {provenance}")
     _api(f"https://api.github.com/repos/{repo}/issues/{story_number}/comments",

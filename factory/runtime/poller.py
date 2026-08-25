@@ -255,6 +255,15 @@ def wake_worker(dispatch: dict,
             reason = getattr(entry, "reason", None) or getattr(entry, "result", "")
             print(f"[worker] {entry.worker}: {reason} {entry.detail}".rstrip(), flush=True)
         if report is None:
+            failures = [entry for entry in trail
+                        if getattr(entry, "result", "") == workers.Result.FAILED]
+            if failures:
+                failed = failures[-1]
+                terminal = (getattr(failed, "stderr", "") or
+                            getattr(failed, "stdout", "") or failed.detail)
+                raise WorkerLaunchFailed(
+                    f"{failed.worker} completed with failure: {terminal}",
+                    definite=True)
             raise WorkerLaunchFailed(
                 "no worker accepted the assignment; see the [worker] trail above",
                 definite=not any(getattr(item, "result", "") == workers.Result.AMBIGUOUS

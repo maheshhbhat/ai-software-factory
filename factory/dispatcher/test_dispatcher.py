@@ -376,8 +376,10 @@ class TestClaimRecovery(unittest.TestCase):
         self.assertIn("story:ready", patch["labels"])
         self.assertNotIn("story:claimed", patch["labels"])
         self.assertNotIn("body", patch)
-        self.assertIn("directly observed the completed non-zero worker exit",
-                      api.call_args_list[0].kwargs["payload"]["body"])
+        comment = api.call_args_list[0].kwargs["payload"]["body"]
+        self.assertIn("confirmed worker failure", comment)
+        self.assertIn("worker exited 1", comment)
+        self.assertIn("directly observed the completed non-zero worker exit", comment)
 
     @patch.object(dp, "_api")
     @patch.object(dp, "fetch_pull_requests",
