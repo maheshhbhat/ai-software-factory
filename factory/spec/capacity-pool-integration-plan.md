@@ -59,6 +59,32 @@ There are currently **zero fully `capacity-pool-routed` model-backed production
 capabilities**. Planning consumes the pure router, but the invariant is not met
 until selection and invocation both cross the shared execution boundary.
 
+### Current and intended route inventory
+
+The intended routes below are policy, not coding-time choices. A
+`capacity-ranked` route means the checked-in registry may change live
+availability and ordering, but it may not lower the stated tier, capability,
+effort, provider-diversity, fallback, or envelope rules. The initial flagship
+pool is Claude Fable 5 (`claude-fable-5`, Anthropic) and GPT-5.6 Sol
+(`gpt-5.6-sol`, OpenAI). Adding another eligible model, including Spark or
+Muse, requires a reviewed registry change; experimental capacity remains
+opt-in.
+
+| Model-backed path | Current engine/model/provider | Intended primary route | Intended fallback route | Effort | Allowed fallback triggers | Stop / no fallback | Combined envelope and escalation |
+|---|---|---|---|---|---|---|---|
+| Planning | Claude CLI / `claude-fable-5` / Anthropic, then a locally implemented Codex fallback using `gpt-5.6-sol` / OpenAI | Capacity-ranked flagship with `reason + json`; initially prefer available Claude Fable 5 capacity | One provider-diverse flagship peer; initially GPT-5.6 Sol. An explicit model override is single-route unless fallback is explicitly enabled | medium | missing executable, unavailable, quota/session, rate limit, authentication, timeout | malformed or schema-invalid plan, unsafe output, contract violation, unknown failure | Existing 900 seconds and 5 budget units total. No automatic effort/tier escalation |
+| Delivery invocation plus worker selection/launch | `poll.sh` currently selects Codex CLI / CLI-default unpinned model / OpenAI; an operator override can select Claude CLI / CLI-default unpinned model / Anthropic | Capacity-ranked flagship with `code + write + tests`; initially the best available eligible GPT-5.6 Sol or Claude Fable 5 capacity, with prepaid/expiring eligible capacity preferred by the router | One provider-diverse flagship peer, but only after a failure proven to precede repository mutation. Explicit overrides remain single-route unless fallback is enabled | medium | missing executable, unavailable, quota/session, rate limit, authentication before mutation | malformed result, unsafe output, scope violation, failed tests, unknown failure, timeout or any ambiguous state after possible mutation | The Story's `### Spend cap` time and normalized budget total. No automatic effort/tier escalation; write-time timeout fallback is deferred pending isolated attempt worktrees |
+| Independent review | Claude CLI / CLI-default unpinned model / Anthropic, using the dedicated reviewer identity | Capacity-ranked flagship with `code + reason + json`; initially prefer available Claude Fable 5 capacity under the dedicated reviewer boundary | One independently authenticated, provider-diverse flagship peer; initially GPT-5.6 Sol, with failed-attempt output discarded before retry | medium | missing executable, unavailable, quota/session, rate limit, authentication, timeout with private failed output discarded | malformed or stale-head verdict, unsafe output, review contract violation, unknown failure | Existing 180 seconds plus one explicit normalized review budget total. No automatic effort/tier escalation |
+| Bounded acknowledgement bridge | `live-e2e.sh` declares Claude and Codex CLI routes with CLI-default unpinned models; `FACTORY_WORKER_ORDER` chooses the engine outside Capacity Pool | Capacity-ranked economy model with basic tool use and the required narrow GitHub-comment permission | One provider-diverse economy peer, only before the acknowledgement write. If no eligible economy peer exists, fail closed rather than silently use flagship capacity | low | missing executable, unavailable, quota/session, rate limit, authentication before the write | ambiguous comment write, malformed acknowledgement, scope violation, unknown failure | Existing bridge deadline and one small normalized budget total. No tier or effort escalation |
+| Readiness inference and provider auth/health checks | Doctor selects the first `FACTORY_WORKER_ORDER` entry; Claude or Codex CLI uses its CLI-default unpinned model/provider. Separate CLI auth/version checks are provider-specific | No productive primary/fallback chain. Probe each configured route independently through its adapter using an economy exact-answer request | None within a route check; failure names that route unhealthy. The doctor continues checking other configured routes so it reports all capacity, not a substituted success | low | Not applicable: each configured provider is tested independently | wrong/malformed answer, auth failure, unavailable route, timeout; one provider's success never hides another's failure | 90 seconds and one small normalized budget per independently reported route. No escalation |
+
+The Delivery row also governs `poll.sh`, dispatcher identity selection,
+`runtime/workers.py`, and poller launch. Those files do not receive a separate
+model policy: migration removes their provider choice and leaves them with one
+logical `delivery` capability request. The bridge row governs the indirect
+`factory/acceptance/e2e.py` route. Direct real-call harnesses inherit the route
+for the production capability they exercise or are retired as specified below.
+
 ## Real-call harness inventory
 
 These files are not steady-state production, but they can spend real model
