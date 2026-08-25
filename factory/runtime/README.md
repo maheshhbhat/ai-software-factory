@@ -221,19 +221,13 @@ A worker declares four things: a name (a valid `Agent-ID`), a launch command, an
 optional health probe, and its capabilities. Configuration only:
 
 ```sh
-export FACTORY_WORKER_ORDER=claude-delivery,codex-delivery
-
-export FACTORY_WORKER_CLAUDE_DELIVERY_LAUNCH='/path/wake-claude {story}'
-export FACTORY_WORKER_CLAUDE_DELIVERY_HEALTH='/path/claude-probe'
-export FACTORY_WORKER_CLAUDE_DELIVERY_CAPABILITIES=delivery
-
-export FACTORY_WORKER_CODEX_DELIVERY_LAUNCH='/path/wake-codex {story}'
-export FACTORY_WORKER_CODEX_DELIVERY_HEALTH='/path/codex-probe'
-export FACTORY_WORKER_CODEX_DELIVERY_CAPABILITIES=delivery
+export FACTORY_WORKER_ORDER=capacity-delivery
+export FACTORY_WORKER_CAPACITY_DELIVERY_LAUNCH='/path/capacity-worker {story}'
+export FACTORY_WORKER_CAPACITY_DELIVERY_CAPABILITIES=delivery
 ```
 
-Swapping the preferred engine is a change to `FACTORY_WORKER_ORDER` and nothing
-else. With no workers declared, the legacy single-command path
+Provider and model preference belongs to Capacity Pool, not worker order. With
+no workers declared, the legacy single-command path
 (`FACTORY_WORKER_CMD`) is used unchanged.
 
 ### Selection is configuration, not judgment
@@ -270,21 +264,18 @@ workers on one Story is a corruption.
 worker declaration points at:
 
 ```sh
-export FACTORY_WORKER_CLAUDE_DELIVERY_LAUNCH='python3 factory/runtime/bridge.py \
-    --engine claude --story {story} --project {project}'
-
-export FACTORY_WORKER_CODEX_DELIVERY_LAUNCH='python3 factory/runtime/bridge.py \
-    --engine codex --story {story} --project {project}'
+export FACTORY_WORKER_CAPACITY_DELIVERY_LAUNCH='python3 factory/runtime/bridge.py \
+    --story {story} --project {project}'
 ```
 
 Before it existed, the runtime printed a `WAKE` line and a human-configured
 standing CLI session picked it up. That session was not a factory-owned
 launcher, so swappability was proven in tests and not in the world.
 
-The bridge is an *implementation*, not another orchestrator: `workers.py` still
-chooses the engine and enforces the failover rules. The bridge only turns
-`(engine, story, project)` into a CLI invocation, and prints the exact command
-so the handoff is observable.
+The bridge is an *implementation*, not another orchestrator. It supplies the
+bounded acknowledgement prompt and verifies the durable comment. Capacity Pool
+alone chooses and invokes the provider/model, applies fallback policy, and owns
+the combined envelope.
 
 **What the engine is told:** repository, story number, project number. Nothing
 else — no spec, no scope, no criteria. It reads the substrate itself (§4).

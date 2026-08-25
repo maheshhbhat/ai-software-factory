@@ -8,7 +8,6 @@ import base64
 import json
 import os
 import pathlib
-import shlex
 import subprocess
 import sys
 import tempfile
@@ -19,14 +18,19 @@ DEFAULT_REVIEW_TIMEOUT = 180
 
 HERE = pathlib.Path(__file__).resolve().parent
 ROOT = HERE.parents[2]
+sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "factory" / "runtime"))
 import review_route  # noqa: E402
 import observability as obs  # noqa: E402
 import runlog  # noqa: E402
 import streaming  # noqa: E402
-
-REAL_SUBPROCESS_RUN = subprocess.run
-
+from factory.capacity_pool.executor import CapacityExecutor  # noqa: E402
+from factory.capacity_pool.policy import POLICIES, resolved_registry  # noqa: E402
+from factory.capacity_pool.providers import (  # noqa: E402
+    AttemptResult, InvocationPayload, ProviderAdapter, cli_adapter,
+    provider_environment,
+)
+from factory.capacity_pool.state import CapacityState  # noqa: E402
 
 class ReviewError(RuntimeError):
     """A review could not be delivered.
@@ -93,7 +97,7 @@ def review_environment(review_home: pathlib.Path) -> dict[str, str]:
         if not isinstance(token, str) or not token:
             raise ReviewError("reviewer credential unavailable")
         env["CLAUDE_CODE_OAUTH_TOKEN"] = token
-    review_home.mkdir(mode=0o700)
+    review_home.mkdir(mode=0o700, parents=True)
     env.update({"HOME": str(review_home), "USER": "factory-reviewer",
                 "LOGNAME": "factory-reviewer"})
     return env
@@ -102,30 +106,6 @@ def review_environment(review_home: pathlib.Path) -> dict[str, str]:
 def git_auth_header(token: str) -> str:
     value = base64.b64encode(f"x-access-token:{token}".encode()).decode()
     return f"Authorization: Basic {value}"
-
-
-def command(input_path: pathlib.Path, output_path: pathlib.Path) -> list[str]:
-    template = os.environ.get("FACTORY_REVIEW_MODEL_CMD", "").strip()
-    if template:
-        return [part.replace("{input_file}", str(input_path))
-                    .replace("{output_file}", str(output_path))
-                for part in shlex.split(template)]
-    payload = (HERE.joinpath("prompt.md").read_text()
-               + f"\n\nWrite the JSON outcome to: {output_path}\n\nInput: "
-               + input_path.read_text())
-    # The verdict is read from the outcome file, never from stdout, so asking
-    # for JSON on stdout costs the review nothing and is what makes the
-    # reviewer state its own usage. It grants no tool and changes no identity.
-    return ["claude", "-p", payload, "--permission-mode", "acceptEdits",
-            "--tools", "Write", "--allowedTools", "Write",
-            "--disallowedTools", "Bash,Agent",
-            "--output-format", "stream-json", "--verbose",
-            "--safe-mode", "--no-session-persistence"]
-
-
-def engine_name(cmd) -> str | None:
-    """The engine a reviewer command launches, recognised or not."""
-    return pathlib.PurePath(cmd[0]).name.lower() if cmd else None
 
 
 def outcome_path(workspace: pathlib.Path) -> pathlib.Path:
@@ -153,62 +133,45 @@ def finalize_outcome(staging: pathlib.Path, output: pathlib.Path) -> None:
         raise ReviewError("malformed reviewer output") from exc
 
 
-def printed(value) -> str:
-    """Whatever a subprocess wrote, decoded for us or not."""
-    if isinstance(value, bytes):
-        return value.decode("utf-8", "replace")
-    return value or ""
+def reviewer_provider_environment(provider: str,
+                                  review_home: pathlib.Path) -> dict[str, str]:
+    """Build a provider-specific reviewer identity without repository tokens."""
+    if provider == "anthropic":
+        return provider_environment(provider, review_environment(review_home))
+    review_home.mkdir(mode=0o700, parents=True)
+    source = dict(os.environ)
+    configured = source.get("FACTORY_REVIEW_CODEX_HOME", "").strip()
+    if configured:
+        source["CODEX_HOME"] = configured
+    source.pop("HOME", None)
+    source.pop("GH_TOKEN", None)
+    source.pop("GITHUB_TOKEN", None)
+    return provider_environment(provider, source)
 
 
-def run(cmd, *, cwd, timeout=DEFAULT_REVIEW_TIMEOUT, env=None):
-    try:
-        if subprocess.run is REAL_SUBPROCESS_RUN:
-            result = streaming.run(
-                cmd, cwd=cwd, env=env or clean_environment(), timeout=timeout,
-                component="reviewer", operation="engine-stream",
-                engine=engine_name(cmd))
-        else:
-            result = subprocess.run(
-                cmd, cwd=cwd, env=env or clean_environment(), timeout=timeout,
-                capture_output=True, text=True)
-    except subprocess.TimeoutExpired as exc:
-        raise ReviewError(f"reviewer unavailable: timeout after {timeout}s",
-                          printed(exc.stdout)) from exc
-    if result.returncode:
-        raise ReviewError(
-            f"reviewer unavailable: exit {result.returncode}: "
-            f"{(result.stderr or result.stdout or '')[:300]}",
-            printed(result.stdout))
-    return result
+def review_payload(fields: dict, staging: pathlib.Path) -> InvocationPayload:
+    prompt = (HERE.joinpath("prompt.md").read_text()
+              + f"\n\nWrite the JSON outcome to: {staging}\n\nInput: "
+              + json.dumps(fields, sort_keys=True))
+    return InvocationPayload(
+        prompt, output_path=staging, access="workspace-write",
+        allowed_tools=("Write",), disallowed_tools=("Bash", "Agent"))
 
 
-def launch_reviewer(cmd, *, cwd, timeout, env, story, pull_request):
-    """Run the reviewer, recording what it reported about its own usage.
+def bounded_review_adapter(provider: str, *, cwd: pathlib.Path, environment: dict,
+                           staging: pathlib.Path, output: pathlib.Path,
+                           runner=subprocess.run) -> ProviderAdapter:
+    """Discard every failed attempt's private artifact before a peer runs."""
+    base = cli_adapter(provider, cwd=cwd, environment=environment, runner=runner)
 
-    One runtime-log record per invocation, whether the launch completed or
-    failed, naming the story it reviewed. A reviewer that reported no usage is
-    recorded as having reported none; no number is substituted for it.
-    """
-    engine = engine_name(cmd)
-    runlog.event("review.engine.started", story=story, pull_request=pull_request,
-                 engine=engine, timeout_seconds=timeout)
-    try:
-        result = run(cmd, cwd=cwd, timeout=timeout, env=env)
-    except ReviewError as error:
-        runlog.event("review.engine.failed", story=story, pull_request=pull_request,
-                     engine=engine, detail=str(error))
-        runlog.engine_usage(story=story, engine=engine, phase="review",
-                            pull_request=pull_request, launch="failed",
-                            output=error.output)
-        raise
-    # A launch that produced no stdout at all reported no usage — that is a
-    # record saying so, never a zero standing in for a measurement.
-    runlog.event("review.engine.finished", story=story, pull_request=pull_request,
-                 engine=engine)
-    runlog.engine_usage(story=story, engine=engine, phase="review",
-                        pull_request=pull_request, launch="completed",
-                        output=printed(getattr(result, "stdout", None)))
-    return result
+    def invoke(**kwargs):
+        store_outcome(staging, output)
+        result = base.run(**kwargs)
+        if not result.succeeded:
+            store_outcome(staging, output)
+        return result
+
+    return ProviderAdapter(provider, invoke)
 
 
 def criteria(body: str) -> str:
@@ -239,7 +202,8 @@ def parse_result(path: pathlib.Path, head: str) -> dict:
 
 
 def execute(repo: str, pull_number: int, token: str, *, client=None,
-            timeout=DEFAULT_REVIEW_TIMEOUT):
+            timeout=DEFAULT_REVIEW_TIMEOUT, state: CapacityState | None = None,
+            registry=None, runner=None):
     client = client or GitHub(repo, token)
     runlog.event("review.preparing", repo=repo, pull_request=pull_number)
     client.api("")
@@ -289,23 +253,77 @@ def execute(repo: str, pull_number: int, token: str, *, client=None,
                            text=True, timeout=timeout)
         runlog.event("review.clone.finished", story=story_number,
                      pull_request=pull_number, head=target.head)
-        input_path = workspace / "input.json"
         staging_path = staging_outcome_path(workspace)
         output_path = outcome_path(workspace)
         store_outcome(staging_path, output_path)
-        input_path.write_text(json.dumps(fields, sort_keys=True))
-        # The fresh identity is built before the launch is attempted, so a
-        # credential that could not be assembled is not recorded as an engine
-        # invocation that happened.
-        reviewer_env = review_environment(workspace / "reviewer-home")
-        with obs.Activity("independent-review", "engine", "reviewing",
-                          trace_id=review_trace, repo=repo, story=story_number,
-                          project=project_number, pull_request=pull_number):
-            launch_reviewer(command(input_path, staging_path), cwd=workspace / "repo",
-                            timeout=timeout, env=reviewer_env, story=story_number,
-                            pull_request=pull_number)
-        finalize_outcome(staging_path, output_path)
-        result = parse_result(output_path, target.head)
+        owns_state = state is None
+        if state is None:
+            configured = os.environ.get("FACTORY_CAPACITY_STATE", "").strip()
+            state_path = (pathlib.Path(configured) if configured else
+                          ROOT / "runs" / "capacity-pool.sqlite")
+            state_path.parent.mkdir(parents=True, exist_ok=True)
+            state = CapacityState(state_path, uri=False)
+        try:
+            available = tuple(registry or resolved_registry(health=state.health))
+            if runner is None:
+                def runner(command, **kwargs):
+                    return streaming.run(
+                        command, component="reviewer",
+                        operation="capacity-engine-stream",
+                        engine=pathlib.PurePath(command[0]).name.lower(), **kwargs)
+            labels = project_labels | {
+                item.get("name") for item in story.get("labels", [])}
+            triggers = frozenset(
+                name for name, candidates in {
+                    "high-risk": {"high-risk", "risk:high"},
+                    "architecture": {"architecture", "type:architecture"},
+                    "security": {"security", "risk:security"},
+                }.items() if labels & candidates)
+            request = POLICIES["review"].request(
+                triggers=triggers, total_timeout_seconds=timeout)
+            providers = {item.provider for item in available}
+            adapters = {provider: bounded_review_adapter(
+                provider, cwd=workspace / "repo",
+                environment=reviewer_provider_environment(
+                    provider, workspace / "reviewer-home" / provider),
+                staging=staging_path, output=output_path, runner=runner)
+                for provider in providers}
+            capacity = CapacityExecutor(
+                adapters, state,
+                telemetry=lambda **values: obs.telemetry(
+                    component="independent-review", operation="capacity-route",
+                    story=story_number, project=project_number,
+                    pull_request=pull_number, **values))
+            parsed = {}
+
+            def validate(_output):
+                finalize_outcome(staging_path, output_path)
+                parsed.update(parse_result(output_path, target.head))
+
+            with obs.Activity("independent-review", "engine", "reviewing",
+                              trace_id=review_trace, repo=repo, story=story_number,
+                              project=project_number, pull_request=pull_number):
+                capacity_result = capacity.execute(
+                    task_key=f"review:{repo}:{pull_number}:{target.head}",
+                    request=request, registry=available,
+                    payload=review_payload(fields, staging_path),
+                    validate=validate)
+            if capacity_result.attempts:
+                final_attempt = capacity_result.attempts[-1]
+                runlog.engine_usage(
+                    story=story_number, engine=final_attempt["model"],
+                    phase="review", pull_request=pull_number,
+                    launch=("completed" if capacity_result.outcome == "success"
+                            else "failed"), output=capacity_result.output)
+            if capacity_result.outcome != "success":
+                detail = (f": {capacity_result.output}"
+                          if capacity_result.output else "")
+                raise ReviewError(
+                    f"review capacity failed: {capacity_result.outcome}{detail}")
+            result = dict(parsed)
+        finally:
+            if owns_state:
+                state.close()
 
     runlog.event("review.publishing", story=story_number,
                  pull_request=pull_number, head=target.head,

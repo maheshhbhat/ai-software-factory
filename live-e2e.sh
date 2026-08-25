@@ -14,11 +14,9 @@
 #   ./live-e2e.sh --only dispatch     one requirement
 #   ./live-e2e.sh                     every reachable requirement
 set -e
-export FACTORY_WORKER_ORDER="${FACTORY_WORKER_ORDER:-claude-delivery,codex-delivery}"
-export FACTORY_WORKER_CLAUDE_DELIVERY_LAUNCH="python3 factory/runtime/bridge.py --engine claude --story {story} --project {project}"
-export FACTORY_WORKER_CLAUDE_DELIVERY_CAPABILITIES=delivery
-export FACTORY_WORKER_CODEX_DELIVERY_LAUNCH="python3 factory/runtime/bridge.py --engine codex --story {story} --project {project}"
-export FACTORY_WORKER_CODEX_DELIVERY_CAPABILITIES=delivery
+export FACTORY_WORKER_ORDER="${FACTORY_WORKER_ORDER:-capacity-delivery}"
+export FACTORY_WORKER_CAPACITY_DELIVERY_LAUNCH="python3 factory/runtime/bridge.py --story {story} --project {project}"
+export FACTORY_WORKER_CAPACITY_DELIVERY_CAPABILITIES=delivery
 GITHUB_TOKEN="${GITHUB_TOKEN:-$(gh auth token)}"; export GITHUB_TOKEN
 exec python3 factory/acceptance/e2e.py \
   --repo "${FACTORY_REPO:-maheshhbhat/ai-software-factory}" \

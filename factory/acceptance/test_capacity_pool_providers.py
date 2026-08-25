@@ -27,6 +27,22 @@ class CapacityProviderTests(unittest.TestCase):
         self.assertIn("terra", codex)
         self.assertIn('model_reasoning_effort="medium"', codex)
 
+    def test_capability_specific_tool_and_network_bounds_are_adapter_data(self):
+        payload = InvocationPayload(
+            "ack", access="workspace-write", network_access=True,
+            skip_git_repo_check=True,
+            allowed_tools=("Bash(gh issue comment:*)",),
+            disallowed_tools=("Write", "Edit"))
+        claude = claude_command(
+            model="economy", effort="low", payload=payload, budget_units=1)
+        codex = codex_command(model="economy", effort="low", payload=payload)
+        self.assertEqual("Bash(gh issue comment:*)",
+                         claude[claude.index("--allowedTools") + 1])
+        self.assertEqual("Write,Edit",
+                         claude[claude.index("--disallowedTools") + 1])
+        self.assertIn("sandbox_workspace_write.network_access=true", codex)
+        self.assertIn("--skip-git-repo-check", codex)
+
     def test_provider_failure_is_normalized_without_prompt_in_diagnostic(self):
         def runner(command, **kwargs):
             return subprocess.CompletedProcess(command, 1, "", "rate limit reached")
