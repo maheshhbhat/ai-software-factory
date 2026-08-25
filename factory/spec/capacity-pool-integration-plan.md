@@ -63,20 +63,35 @@ until selection and invocation both cross the shared execution boundary.
 
 The intended routes below are policy, not coding-time choices. A
 `capacity-ranked` route means the checked-in registry may change live
-availability and ordering, but it may not lower the stated tier, capability,
-effort, provider-diversity, fallback, or envelope rules. The initial flagship
-pool is Claude Fable 5 (`claude-fable-5`, Anthropic) and GPT-5.6 Sol
-(`gpt-5.6-sol`, OpenAI). Adding another eligible model, including Spark or
-Muse, requires a reviewed registry change; experimental capacity remains
-opt-in.
+availability and ordering, but it may not lower the stated capability, tier,
+effort, provider-diversity, fallback, or envelope rules.
+
+The first checked-in registry must include the capacity classes the factory is
+intended to use from launch: Codex Spark as coding-specialized prepaid/expiring
+capacity, GPT-5.6 Terra (`gpt-5.6-terra`, OpenAI) as balanced capacity,
+GPT-5.6 Luna (`gpt-5.6-luna`, OpenAI) as economy capacity, GPT-5.6 Sol
+(`gpt-5.6-sol`, OpenAI) as flagship capacity, and independently authenticated
+Anthropic peers at economy, balanced, and flagship tiers. The installed Codex
+Spark CLI model ID and Anthropic model IDs are pinned as registry data only
+after their adapter smoke checks verify them; the plan does not invent an
+unverified provider slug. Claude Fable 5 (`claude-fable-5`) remains the known
+current Planning primary and an eligible flagship entry. Muse remains
+experimental and opt-in.
+
+The governing rule is: **task capability determines the minimum eligible tier;
+Capacity Pool then optimizes within that set using health, unreserved remaining
+capacity, expiring/prepaid capacity, provider diversity, cost, and policy.
+Flagship is an explicit escalation resource, not the factory default.** Model
+tier and reasoning effort are independent. A provider failure may choose only
+an eligible peer at the same requested tier and effort; it never raises either.
 
 | Model-backed path | Current engine/model/provider | Intended primary route | Intended fallback route | Effort | Allowed fallback triggers | Stop / no fallback | Combined envelope and escalation |
 |---|---|---|---|---|---|---|---|
-| Planning | Claude CLI / `claude-fable-5` / Anthropic, then a locally implemented Codex fallback using `gpt-5.6-sol` / OpenAI | Capacity-ranked flagship with `reason + json`; initially prefer available Claude Fable 5 capacity | One provider-diverse flagship peer; initially GPT-5.6 Sol. An explicit model override is single-route unless fallback is explicitly enabled | medium | missing executable, unavailable, quota/session, rate limit, authentication, timeout | malformed or schema-invalid plan, unsafe output, contract violation, unknown failure | Existing 900 seconds and 5 budget units total. No automatic effort/tier escalation |
-| Delivery invocation plus worker selection/launch | `poll.sh` currently selects Codex CLI / CLI-default unpinned model / OpenAI; an operator override can select Claude CLI / CLI-default unpinned model / Anthropic | Capacity-ranked flagship with `code + write + tests`; initially the best available eligible GPT-5.6 Sol or Claude Fable 5 capacity, with prepaid/expiring eligible capacity preferred by the router | One provider-diverse flagship peer, but only after a failure proven to precede repository mutation. Explicit overrides remain single-route unless fallback is enabled | medium | missing executable, unavailable, quota/session, rate limit, authentication before mutation | malformed result, unsafe output, scope violation, failed tests, unknown failure, timeout or any ambiguous state after possible mutation | The Story's `### Spend cap` time and normalized budget total. No automatic effort/tier escalation; write-time timeout fallback is deferred pending isolated attempt worktrees |
-| Independent review | Claude CLI / CLI-default unpinned model / Anthropic, using the dedicated reviewer identity | Capacity-ranked flagship with `code + reason + json`; initially prefer available Claude Fable 5 capacity under the dedicated reviewer boundary | One independently authenticated, provider-diverse flagship peer; initially GPT-5.6 Sol, with failed-attempt output discarded before retry | medium | missing executable, unavailable, quota/session, rate limit, authentication, timeout with private failed output discarded | malformed or stale-head verdict, unsafe output, review contract violation, unknown failure | Existing 180 seconds plus one explicit normalized review budget total. No automatic effort/tier escalation |
-| Bounded acknowledgement bridge | `live-e2e.sh` declares Claude and Codex CLI routes with CLI-default unpinned models; `FACTORY_WORKER_ORDER` chooses the engine outside Capacity Pool | Capacity-ranked economy model with basic tool use and the required narrow GitHub-comment permission | One provider-diverse economy peer, only before the acknowledgement write. If no eligible economy peer exists, fail closed rather than silently use flagship capacity | low | missing executable, unavailable, quota/session, rate limit, authentication before the write | ambiguous comment write, malformed acknowledgement, scope violation, unknown failure | Existing bridge deadline and one small normalized budget total. No tier or effort escalation |
-| Readiness inference and provider auth/health checks | Doctor selects the first `FACTORY_WORKER_ORDER` entry; Claude or Codex CLI uses its CLI-default unpinned model/provider. Separate CLI auth/version checks are provider-specific | No productive primary/fallback chain. Probe each configured route independently through its adapter using an economy exact-answer request | None within a route check; failure names that route unhealthy. The doctor continues checking other configured routes so it reports all capacity, not a substituted success | low | Not applicable: each configured provider is tested independently | wrong/malformed answer, auth failure, unavailable route, timeout; one provider's success never hides another's failure | 90 seconds and one small normalized budget per independently reported route. No escalation |
+| Planning | Claude CLI / `claude-fable-5` / Anthropic, then a locally implemented Codex fallback using `gpt-5.6-sol` / OpenAI | Capacity-ranked balanced `reason + json`; initially GPT-5.6 Terra or an independently authenticated Sonnet-class peer | One provider-diverse balanced peer. Explicit model overrides are single-route unless fallback is enabled | medium | missing executable, unavailable, quota/session, rate limit, authentication, timeout | malformed or schema-invalid plan, unsafe output, contract violation, unknown failure | Existing 900 seconds and 5 budget units total. Flagship Sol/Fable/Opus-class is allowed only when the input carries a checked-in architecture/high-complexity trigger or an explicit operator escalation; provider failure alone never escalates |
+| Delivery invocation plus worker selection/launch | `poll.sh` currently selects Codex CLI / CLI-default unpinned model / OpenAI; an operator override can select Claude CLI / CLI-default unpinned model / Anthropic | Balanced coding-specialized capacity with `code + write + tests`; prefer verified Codex Spark whenever it is capable and has underused/expiring capacity | One provider-diverse balanced coding peer, but only after a failure proven to precede repository mutation. Explicit overrides remain single-route unless fallback is enabled | medium | missing executable, unavailable, quota/session, rate limit, authentication before mutation | malformed result, unsafe output, scope violation, failed tests, unknown failure, timeout or any ambiguous state after possible mutation | The Story's `### Spend cap` time and normalized budget total. Flagship is allowed only by an explicit checked-in high-complexity/hazard trigger or operator escalation; provider failure never escalates. Write-time timeout fallback remains deferred pending isolated attempt worktrees |
+| Independent review | Claude CLI / CLI-default unpinned model / Anthropic, using the dedicated reviewer identity | Capacity-ranked balanced `code + reason + json`; initially GPT-5.6 Terra or an independently authenticated Sonnet-class peer under the dedicated reviewer boundary | One independently authenticated, provider-diverse balanced peer, with failed-attempt output discarded before retry | medium | missing executable, unavailable, quota/session, rate limit, authentication, timeout with private failed output discarded | malformed or stale-head verdict, unsafe output, review contract violation, unknown failure | Existing 180 seconds plus one explicit normalized review budget total. Flagship is allowed only for a checked-in high-risk, architecture-sensitive, security-sensitive, or explicit operator trigger; provider failure never escalates |
+| Bounded acknowledgement bridge | `live-e2e.sh` declares Claude and Codex CLI routes with CLI-default unpinned models; `FACTORY_WORKER_ORDER` chooses the engine outside Capacity Pool | Capacity-ranked economy model with basic tool use and the required narrow GitHub-comment permission; initially GPT-5.6 Luna or an independently authenticated Haiku-class peer | One provider-diverse economy peer, only before the acknowledgement write. If no eligible economy peer exists, fail closed rather than silently raise tier | low | missing executable, unavailable, quota/session, rate limit, authentication before the write | ambiguous comment write, malformed acknowledgement, scope violation, unknown failure | Existing bridge deadline and one small normalized budget total. No tier or effort escalation |
+| Readiness inference and provider auth/health checks | Doctor selects the first `FACTORY_WORKER_ORDER` entry; Claude or Codex CLI uses its CLI-default unpinned model/provider. Separate CLI auth/version checks are provider-specific | No productive primary/fallback chain. Probe each configured route independently through its adapter using an economy exact-answer request, initially Luna/Haiku-class | None within a route check; failure names that route unhealthy. The doctor continues checking other configured routes so it reports all capacity, not a substituted success | low | Not applicable: each configured provider is tested independently | wrong/malformed answer, auth failure, unavailable route, timeout; one provider's success never hides another's failure | 90 seconds and one small normalized budget per independently reported route. No tier or effort escalation |
 
 The Delivery row also governs `poll.sh`, dispatcher identity selection,
 `runtime/workers.py`, and poller launch. Those files do not receive a separate
@@ -137,16 +152,18 @@ labels, or weakens a gate.
 
 | Workload | Minimum capability / tier | Starting effort | Fallback allowed | Quality stop | Overall envelope |
 |---|---|---|---|---|---|
-| Planning | `reason + json`, flagship | medium | missing executable, unavailable, quota/session, rate limit, authentication, timeout | malformed/schema-invalid plan, unsafe output, contract violation | Existing 900 seconds and 5 budget units across all attempts |
-| Delivery | `code + write + tests`, flagship | medium | missing executable, unavailable, quota/session, rate limit, or authentication **before repository mutation** | malformed result, scope violation, unsafe output, failed tests; timeout after possible mutation is ambiguous and stops unless attempt isolation is implemented | Story `### Spend cap` time and budget across all attempts |
-| Independent review | `code + reason + json`, flagship | medium | missing executable, unavailable, quota/session, rate limit, authentication, timeout after the failed attempt's private output is discarded | malformed/stale-head verdict, unsafe output, review contract violation | Existing 180 seconds plus a new explicit normalized review budget across all attempts |
-| Bounded acknowledgement bridge | basic tool use, economy | low | availability failures before acknowledgement write | ambiguous comment write, malformed acknowledgement, scope violation | Existing bridge timeout and one small normalized budget |
+| Planning | `reason + json`, balanced normally; flagship only on explicit architecture/high-complexity trigger | medium | missing executable, unavailable, quota/session, rate limit, authentication, timeout; same tier/effort only | malformed/schema-invalid plan, unsafe output, contract violation | Existing 900 seconds and 5 budget units across all attempts |
+| Delivery | `code + write + tests`, coding-specialized normally; balanced coding peer fallback; flagship only on explicit high-complexity/hazard trigger | medium | missing executable, unavailable, quota/session, rate limit, or authentication **before repository mutation**; same requested tier/effort only | malformed result, scope violation, unsafe output, failed tests; timeout after possible mutation is ambiguous and stops unless attempt isolation is implemented | Story `### Spend cap` time and budget across all attempts |
+| Independent review | `code + reason + json`, balanced normally; flagship only on explicit risk/architecture/security trigger | medium | missing executable, unavailable, quota/session, rate limit, authentication, timeout after the failed attempt's private output is discarded; same requested tier/effort only | malformed/stale-head verdict, unsafe output, review contract violation | Existing 180 seconds plus a new explicit normalized review budget across all attempts |
+| Bounded acknowledgement bridge | basic tool use, economy | low | availability failures before acknowledgement write; economy peer only | ambiguous comment write, malformed acknowledgement, scope violation | Existing bridge timeout and one small normalized budget |
 | Readiness inference probe | exact-answer text, economy | low | Probe every configured critical provider route independently; it is evidence, not productive fallback | wrong/malformed answer | One 90-second total probe envelope per route check, with an explicit small budget |
 
 Effort escalation is policy data, never an accidental provider default. A
-hazard Story does not silently buy a stronger model; a future escalation policy
-requires its own reviewed evidence. Explicit operator/model overrides produce a
-single-step route unless the override explicitly opts into fallback.
+hazard/high-complexity classification may select a reviewed higher minimum tier
+before routing, but a failed attempt never raises tier or effort. The triggering
+metadata, selected tier, and reason are recorded. Explicit operator/model
+overrides produce a single-step route unless the override explicitly opts into
+fallback.
 
 ### Delivery's write-side constraint
 
@@ -322,10 +339,10 @@ autonomous factory never claims factory control-plane work.
 
 | Story | Declared implementation area | Independent failure proof |
 |---|---|---|
-| Shared boundary | `factory/capacity_pool/{policy,executor,state,inventory}.py`, `factory/capacity_pool/providers/**`, Capacity Pool README/ADR, and gate-discovered Capacity Pool architecture/executor tests | Unknown executable boundary, duplicate model identity, unsupported effort, ineligible route, budget exhaustion, forbidden fallback, and a new direct-invocation fixture all fail closed. State tests prove every health transition, cooldown/probe-only recovery, capped failed-probe backoff, stale-data handling, atomic concurrent reservations, lease expiry/reconciliation, duplicate suppression, and terminal no-capacity behavior. |
-| Planning and probes | Planning invoke/tests, doctor/tests, and only the workload/provider policy entries they consume | Real campaign/project schemas pass through both provider adapters; quota and timeout use only the remainder; malformed output stops; a provider-auth/probe failure is named. |
-| Delivery | `poll.sh`, dispatcher worker identity, runtime worker/poller launch, delivery invoke/tests, and delivery Capacity Pool acceptance scenarios | Deliberate pre-mutation primary unavailability reaches one fallback; scope/test/unsafe failures and ambiguous mutation launch no second writer; Story time and budget never reset. |
-| Review and closure | Review invoke/tests, bridge/tests, direct real-call harness migrations, enforcement debt removal, and the controlled end-to-end failover scenario | Exact-head fallback succeeds with private failed output discarded; malformed/stale verdict stops; the full critical path completes with primary Claude unavailable and the inventory reports zero production violations. |
+| Shared boundary | `factory/capacity_pool/{policy,executor,state,inventory}.py`, `factory/capacity_pool/providers/**`, Capacity Pool README/ADR, and gate-discovered Capacity Pool architecture/executor tests | Unknown executable boundary, duplicate model identity, unsupported effort, ineligible route, budget exhaustion, forbidden fallback, and a new direct-invocation fixture all fail closed. Policy tests prove the lowest capable tier wins, prepaid/expiring eligible capacity wins within policy, provider failure never raises tier/effort, and flagship/experimental routes require their exact trigger. State tests prove every health transition, cooldown/probe-only recovery, capped failed-probe backoff, stale-data handling, atomic concurrent reservations, lease expiry/reconciliation, duplicate suppression, and terminal no-capacity behavior. |
+| Planning and probes | Planning invoke/tests, doctor/tests, and only the workload/provider policy entries they consume | Normal Planning selects a balanced route; an explicit architecture/high-complexity fixture selects flagship. Real campaign/project schemas pass through balanced provider peers; quota and timeout use only the remainder without tier/effort escalation; malformed output stops; economy Luna/Haiku-class probes name each route failure. |
+| Delivery | `poll.sh`, dispatcher worker identity, runtime worker/poller launch, delivery invoke/tests, and delivery Capacity Pool acceptance scenarios | Verified Codex Spark is selected for a capable normal Story when its underused/expiring capacity is available; deliberate pre-mutation unavailability reaches one provider-diverse balanced coding peer, never flagship; an explicit high-complexity/hazard fixture may select flagship. Scope/test/unsafe failures and ambiguous mutation launch no second writer; Story time and budget never reset. |
+| Review and closure | Review invoke/tests, bridge/tests, direct real-call harness migrations, enforcement debt removal, and the controlled end-to-end failover scenario | Normal exact-head review selects balanced capacity; explicit risk/architecture/security input may select flagship. Balanced fallback succeeds with private failed output discarded; malformed/stale verdict stops. Bridge/readiness remain economy. The full critical path completes with its primary provider unavailable, no tier/effort increase, and zero production inventory violations. |
 
 No Story may combine a product change with these factory control-plane paths.
 The shared-boundary Story may introduce the temporary exact debt manifest, but
@@ -338,6 +355,12 @@ as an exception.
 - Deterministic fallback and stop-condition tests pass for Planning, Delivery,
   Review, bridge, and doctor workloads.
 - Explicit overrides are single-provider unless fallback opt-in is present.
+- Normal Planning and Review prove balanced selection; normal bounded Delivery
+  proves verified Codex Spark preference when capable and underused/expiring;
+  bridge/readiness prove economy selection. Negative tests fail if any normal
+  path consumes flagship capacity.
+- Checked-in explicit complexity/risk fixtures are the only automatic flagship
+  triggers. Provider failure tests prove fallback preserves tier and effort.
 - Combined time/budget tests prove no fallback reset.
 - Lifecycle tests prove unavailable capacity cannot return before a successful
   bounded probe, failed probes back off without hot-looping, stale observations
