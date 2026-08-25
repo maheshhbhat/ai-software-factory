@@ -172,11 +172,19 @@ def run_model(value: dict, timeout: int, max_usd: float,
             f"planning model failed ({result.returncode}): {(result.stderr or '')[:300]}")
     try:
         try:
-            envelope = json.loads(result.stdout)
+            parsed_stdout = json.loads(result.stdout)
         except json.JSONDecodeError:
+            parsed_stdout = None
+        if (isinstance(parsed_stdout, dict)
+                and "type" not in parsed_stdout
+                and "structured_output" not in parsed_stdout):
+            envelope = parsed_stdout
+        else:
             events = [json.loads(line) for line in result.stdout.splitlines()
                       if line.strip()]
             envelope = None
+            # The StructuredOutput tool has already validated the schema. Prefer
+            # that payload to any later result text or wrapper envelope.
             for event in reversed(events):
                 if not isinstance(event, dict):
                     continue
@@ -194,15 +202,19 @@ def run_model(value: dict, timeout: int, max_usd: float,
                 if tool_payload is not None:
                     envelope = tool_payload
                     break
-                raw = event.get("result")
-                if isinstance(raw, str) and raw.strip():
-                    try:
-                        parsed = json.loads(raw)
-                    except json.JSONDecodeError:
+            if envelope is None:
+                for event in reversed(events):
+                    if not isinstance(event, dict):
                         continue
-                    if isinstance(parsed, dict):
-                        envelope = parsed
-                        break
+                    raw = event.get("result")
+                    if isinstance(raw, str) and raw.strip():
+                        try:
+                            parsed = json.loads(raw)
+                        except json.JSONDecodeError:
+                            continue
+                        if isinstance(parsed, dict):
+                            envelope = parsed
+                            break
         if isinstance(envelope, dict) and isinstance(envelope.get("structured_output"), dict):
             envelope = envelope["structured_output"]
         elif isinstance(envelope, dict) and isinstance(envelope.get("result"), str):
