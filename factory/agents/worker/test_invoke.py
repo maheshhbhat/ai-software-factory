@@ -114,6 +114,15 @@ class BoundaryTests(unittest.TestCase):
         self.assertEqual("acceptEdits",
                          command[command.index("--permission-mode") + 1])
 
+    def test_claude_is_told_not_to_spend_on_unavailable_shell_commands(self):
+        with tempfile.TemporaryDirectory() as directory:
+            input_file = pathlib.Path(directory, "input.json")
+            input_file.write_text("input")
+            command = invoke.model_command(str(input_file), invoke.Bounds(3.0, 10))
+        payload = command[command.index("-p") + 1]
+        self.assertIn("do not invoke Bash or any shell command", payload)
+        self.assertIn("wrapper runs the\n  repository's real test command", payload)
+
     def test_codex_command_is_headless_writable_and_reports_usage(self):
         with mock.patch.dict(invoke.os.environ, {}, clear=True), \
              mock.patch.object(invoke.pathlib.Path, "read_text", return_value="prompt"):
