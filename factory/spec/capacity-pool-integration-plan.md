@@ -1,0 +1,388 @@
+# Capacity Pool factory-wide integration plan
+
+Status: **Chief Architect review required; implementation has not started.**
+
+Enhancement: #498. Planning Story: #505.
+
+## Decision requested
+
+Make Capacity Pool the only production boundary allowed to select or invoke a
+model/provider. Agents own their prompt, sandbox, input contract, and output
+validation. Capacity Pool owns route selection, provider adapters, effort,
+availability, fallback, the combined logical-task envelope, and routing
+telemetry.
+
+Product Project #30 must remain inactive until this plan is approved, the
+critical production migrations below are implemented, and the controlled
+failover exercise passes.
+
+## Audit method and scope
+
+The audit inspected production Python and shell entrypoints for concrete model
+CLI names, model-command overrides, engine selectors, subprocess boundaries,
+and indirect launch configuration. It then traced every match to the process
+that actually runs it. Tests, specifications, and historical evidence were not
+treated as production merely because they mention a model. Live verification
+harnesses are listed separately because they spend real model calls even though
+they are not part of the steady-state poll loop.
+
+The required classifications mean:
+
+- `capacity-pool-routed`: a model-backed capability obtains and executes its
+  route only through Capacity Pool.
+- `deterministic / no model`: the component performs no model inference and
+  must remain outside Capacity Pool.
+- `violation: direct model invocation`: the component selects a provider/model,
+  constructs a provider CLI command, or launches that command outside the
+  approved Capacity Pool adapter boundary.
+
+## Production inventory
+
+| Capability or component | Actual boundary | Current classification | Evidence and finding |
+|---|---|---|---|
+| Capacity policy | `factory/capacity_pool/router.py` | `deterministic / no model` | Purely ranks declared capacity and computes remaining envelopes. It deliberately does not execute models. |
+| Planning | `factory/agents/planning/invoke.py` | `violation: direct model invocation` | It calls the router, but also declares Claude/GPT models, constructs both provider CLI commands, classifies provider failures, divides the envelope, and launches both processes. Routing is only partially centralized. |
+| Delivery worker | `factory/agents/worker/invoke.py` | `violation: direct model invocation` | The `--engine` argument and `FACTORY_DELIVERY_MODEL_CMD` select an engine; this module constructs and launches Claude or Codex commands and maintains provider-specific credential rules. |
+| Worker selection and launch | `poll.sh`, `factory/dispatcher/dispatcher.py`, `factory/runtime/workers.py`, `factory/runtime/poller.py` | `violation: direct model invocation` | Provider-specific worker IDs and launch commands are ordered outside Capacity Pool. `FACTORY_WORKER_ORDER` and the dispatcher choose Claude/Codex identities before the model workload is evaluated. |
+| Independent review | `factory/agents/review/invoke.py` | `violation: direct model invocation` | It constructs and directly launches Claude, has a Claude-specific credential home, and has no independently authenticated fallback. Its exact-head and output-validation boundaries are otherwise suitable adapters. |
+| Legacy bounded worker bridge | `factory/runtime/bridge.py`, configured by `live-e2e.sh` | `violation: direct model invocation` | It maps `--engine` directly to Claude/Codex commands. The normal product poll does not use it, but it remains a production-callable live entrypoint. |
+| Readiness engine inference probe | `factory/acceptance/e2e_doctor.py` | `violation: direct model invocation` | Authentication/version checks are diagnostics, but `worker_engine_start()` performs a real inference and selects its CLI from `FACTORY_WORKER_ORDER` outside Capacity Pool. |
+| Planning route discovery | `factory/runtime/planning_route.py` | `deterministic / no model` | Selects a GitHub planning artifact only; it does not select or invoke a model. |
+| Review routing/linking | `factory/runtime/review_route.py`, `factory/runtime/review_link.py` | `deterministic / no model` | Selects PR review work and applies verified lifecycle consequences; inference occurs only in the violating review wrapper above. |
+| Dispatch, sequencing, completion, continuation | `factory/dispatcher/**`, `factory/runtime/sequencer.py`, `completion.py`, `continuation.py` | `deterministic / no model` | Except for the provider-specific worker identity named above, these are GitHub state machines and deterministic checks. They must not become model-backed. |
+| Human queue, acceptance, sampling, rescue/repair, status | `factory/runtime/humanqueue.py`, `sampling.py`, `repair_claim.py`, `status.py`, approval/acceptance wrappers | `deterministic / no model` | Acceptance is a human bell. Sampling selects evidence. Rescue applies an explicit human decision. No hidden acceptance, supervisor, or rescue model invocation exists. |
+| Merge/scope gates | `factory/gates/**` and repository workflows | `deterministic / no model` | Trusted-main code and tests decide scope/test eligibility. Model output cannot replace these gates. |
+| Observability and subprocess streaming | `factory/runtime/observability.py`, `runlog.py`, `streaming.py` | `deterministic / no model` | Record and transport bounded events. They may be reused by Capacity Pool but do not choose a route. |
+| Coverage and KPI reporting | `factory/coverage_report.py`, `factory/acceptance/rung*_report.py` | `deterministic / no model` | Run tests and derive reports from evidence. |
+
+There are currently **zero fully `capacity-pool-routed` model-backed production
+capabilities**. Planning consumes the pure router, but the invariant is not met
+until selection and invocation both cross the shared execution boundary.
+
+### Current and intended route inventory
+
+The intended routes below are policy, not coding-time choices. A
+`capacity-ranked` route means the checked-in registry may change live
+availability and ordering, but it may not lower the stated capability, tier,
+effort, provider-diversity, fallback, or envelope rules.
+
+The first checked-in registry must include the capacity classes the factory is
+intended to use from launch: Codex Spark as coding-specialized prepaid/expiring
+capacity, GPT-5.6 Terra (`gpt-5.6-terra`, OpenAI) as balanced capacity,
+GPT-5.6 Luna (`gpt-5.6-luna`, OpenAI) as economy capacity, GPT-5.6 Sol
+(`gpt-5.6-sol`, OpenAI) as flagship capacity, and independently authenticated
+Anthropic peers at economy, balanced, and flagship tiers. The installed Codex
+Spark CLI model ID and Anthropic model IDs are pinned as registry data only
+after their adapter smoke checks verify them; the plan does not invent an
+unverified provider slug. Claude Fable 5 (`claude-fable-5`) remains the known
+current Planning primary and an eligible flagship entry. Muse remains
+experimental and opt-in.
+
+The governing rule is: **task capability determines the minimum eligible tier;
+Capacity Pool then optimizes within that set using health, unreserved remaining
+capacity, expiring/prepaid capacity, provider diversity, cost, and policy.
+Flagship is an explicit escalation resource, not the factory default.** Model
+tier and reasoning effort are independent. A provider failure may choose only
+an eligible peer at the same requested tier and effort; it never raises either.
+
+| Model-backed path | Current engine/model/provider | Intended primary route | Intended fallback route | Effort | Allowed fallback triggers | Stop / no fallback | Combined envelope and escalation |
+|---|---|---|---|---|---|---|---|
+| Planning | Claude CLI / `claude-fable-5` / Anthropic, then a locally implemented Codex fallback using `gpt-5.6-sol` / OpenAI | Capacity-ranked balanced `reason + json`; initially GPT-5.6 Terra or an independently authenticated Sonnet-class peer | One provider-diverse balanced peer. Explicit model overrides are single-route unless fallback is enabled | medium | missing executable, unavailable, quota/session, rate limit, authentication, timeout | malformed or schema-invalid plan, unsafe output, contract violation, unknown failure | Existing 900 seconds and 5 budget units total. Flagship Sol/Fable/Opus-class is allowed only when the input carries a checked-in architecture/high-complexity trigger or an explicit operator escalation; provider failure alone never escalates |
+| Delivery invocation plus worker selection/launch | `poll.sh` currently selects Codex CLI / CLI-default unpinned model / OpenAI; an operator override can select Claude CLI / CLI-default unpinned model / Anthropic | Balanced coding-specialized capacity with `code + write + tests`; prefer verified Codex Spark whenever it is capable and has underused/expiring capacity | One provider-diverse balanced coding peer, but only after a failure proven to precede repository mutation. Explicit overrides remain single-route unless fallback is enabled | medium | missing executable, unavailable, quota/session, rate limit, authentication before mutation | malformed result, unsafe output, scope violation, failed tests, unknown failure, timeout or any ambiguous state after possible mutation | The Story's `### Spend cap` time and normalized budget total. Flagship is allowed only by an explicit checked-in high-complexity/hazard trigger or operator escalation; provider failure never escalates. Write-time timeout fallback remains deferred pending isolated attempt worktrees |
+| Independent review | Claude CLI / CLI-default unpinned model / Anthropic, using the dedicated reviewer identity | Capacity-ranked balanced `code + reason + json`; initially GPT-5.6 Terra or an independently authenticated Sonnet-class peer under the dedicated reviewer boundary | One independently authenticated, provider-diverse balanced peer, with failed-attempt output discarded before retry | medium | missing executable, unavailable, quota/session, rate limit, authentication, timeout with private failed output discarded | malformed or stale-head verdict, unsafe output, review contract violation, unknown failure | Existing 180 seconds plus one explicit normalized review budget total. Flagship is allowed only for a checked-in high-risk, architecture-sensitive, security-sensitive, or explicit operator trigger; provider failure never escalates |
+| Bounded acknowledgement bridge | `live-e2e.sh` declares Claude and Codex CLI routes with CLI-default unpinned models; `FACTORY_WORKER_ORDER` chooses the engine outside Capacity Pool | Capacity-ranked economy model with basic tool use and the required narrow GitHub-comment permission; initially GPT-5.6 Luna or an independently authenticated Haiku-class peer | One provider-diverse economy peer, only before the acknowledgement write. If no eligible economy peer exists, fail closed rather than silently raise tier | low | missing executable, unavailable, quota/session, rate limit, authentication before the write | ambiguous comment write, malformed acknowledgement, scope violation, unknown failure | Existing bridge deadline and one small normalized budget total. No tier or effort escalation |
+| Readiness inference and provider auth/health checks | Doctor selects the first `FACTORY_WORKER_ORDER` entry; Claude or Codex CLI uses its CLI-default unpinned model/provider. Separate CLI auth/version checks are provider-specific | No productive primary/fallback chain. Probe each configured route independently through its adapter using an economy exact-answer request, initially Luna/Haiku-class | None within a route check; failure names that route unhealthy. The doctor continues checking other configured routes so it reports all capacity, not a substituted success | low | Not applicable: each configured provider is tested independently | wrong/malformed answer, auth failure, unavailable route, timeout; one provider's success never hides another's failure | 90 seconds and one small normalized budget per independently reported route. No tier or effort escalation |
+
+The Delivery row also governs `poll.sh`, dispatcher identity selection,
+`runtime/workers.py`, and poller launch. Those files do not receive a separate
+model policy: migration removes their provider choice and leaves them with one
+logical `delivery` capability request. The bridge row governs the indirect
+`factory/acceptance/e2e.py` route. Direct real-call harnesses inherit the route
+for the production capability they exercise or are retired as specified below.
+
+## Real-call harness inventory
+
+These files are not steady-state production, but they can spend real model
+calls and therefore cannot remain a loophole in architectural enforcement:
+
+| Harness | Current status | Required disposition |
+|---|---|---|
+| `factory/acceptance/phase4_live.py` | Direct Claude worker and reviewer calls | Migrate to the shared provider-adapter smoke interface or retire after equivalent Capacity Pool coverage exists. |
+| `factory/acceptance/test_engine_live.py` | Direct Claude read-only probe | Replace with provider-adapter/Capacity Pool smoke coverage. |
+| `factory/acceptance/e2e.py` via `live-e2e.sh` | Indirect direct invocation through `runtime/bridge.py` | Route the bridge workload through Capacity Pool, then keep the harness as end-to-end evidence. |
+| `factory/acceptance/reviewer_real.py`, `factory/acceptance/phase4_real.py`, `factory/acceptance/rung1_live.py`, `factory/acceptance/two_story_real.py` | Invoke production wrappers/poller rather than model CLIs | No independent route is needed; they inherit the migrated production boundary. |
+
+Mock commands inside deterministic tests remain allowed. Authentication and
+version diagnostics may call provider CLIs only through the provider adapter's
+non-inference probe API, so provider knowledge has one audited home.
+
+## Target boundary
+
+Add four layers under `factory/capacity_pool/`:
+
+1. `policy.py` contains the checked-in model-capacity registry and one workload
+   policy per capability. No agent declares model names or provider order.
+2. `executor.py` accepts a workload request plus capability-specific callbacks,
+   asks the existing pure router for a route, runs at most that route, accounts
+   for elapsed time and budget after every attempt, classifies provider
+   failures, and emits one final outcome.
+3. `providers/` contains the only production CLI adapters. Each adapter owns
+   command construction, independent authentication environment, usage parsing,
+   non-inference health/auth probes, and mapping provider errors into the shared
+   failure vocabulary.
+4. `state.py` owns the transactional local capacity ledger: health state,
+   cooldown/probe timing, reservations, active leases, observed consumption,
+   and bounded routing history. It uses only Python's standard library and a
+   SQLite transaction so concurrent factory processes cannot reserve the same
+   capacity snapshot independently.
+
+Agents remain responsible for material that must not be generalized:
+
+- Planning supplies its prompt and JSON schema and validates the returned plan.
+- Delivery supplies its worktree, Story input, write-capable sandbox, declared
+  scope verification, tests, and PR creation.
+- Review supplies its fresh exact-head checkout, untrusted-diff isolation,
+  output location, schema validation, and verdict application.
+- The doctor supplies the harmless exact-answer probe request.
+
+The executor never interprets product plans, edits files, approves work, applies
+labels, or weakens a gate.
+
+## Workload policies
+
+| Workload | Minimum capability / tier | Starting effort | Fallback allowed | Quality stop | Overall envelope |
+|---|---|---|---|---|---|
+| Planning | `reason + json`, balanced normally; flagship only on explicit architecture/high-complexity trigger | medium | missing executable, unavailable, quota/session, rate limit, authentication, timeout; same tier/effort only | malformed/schema-invalid plan, unsafe output, contract violation | Existing 900 seconds and 5 budget units across all attempts |
+| Delivery | `code + write + tests`, coding-specialized normally; balanced coding peer fallback; flagship only on explicit high-complexity/hazard trigger | medium | missing executable, unavailable, quota/session, rate limit, or authentication **before repository mutation**; same requested tier/effort only | malformed result, scope violation, unsafe output, failed tests; timeout after possible mutation is ambiguous and stops unless attempt isolation is implemented | Story `### Spend cap` time and budget across all attempts |
+| Independent review | `code + reason + json`, balanced normally; flagship only on explicit risk/architecture/security trigger | medium | missing executable, unavailable, quota/session, rate limit, authentication, timeout after the failed attempt's private output is discarded; same requested tier/effort only | malformed/stale-head verdict, unsafe output, review contract violation | Existing 180 seconds plus a new explicit normalized review budget across all attempts |
+| Bounded acknowledgement bridge | basic tool use, economy | low | availability failures before acknowledgement write; economy peer only | ambiguous comment write, malformed acknowledgement, scope violation | Existing bridge timeout and one small normalized budget |
+| Readiness inference probe | exact-answer text, economy | low | Probe every configured critical provider route independently; it is evidence, not productive fallback | wrong/malformed answer | One 90-second total probe envelope per route check, with an explicit small budget |
+
+Effort escalation is policy data, never an accidental provider default. A
+hazard/high-complexity classification may select a reviewed higher minimum tier
+before routing, but a failed attempt never raises tier or effort. The triggering
+metadata, selected tier, and reason are recorded. Explicit operator/model
+overrides produce a single-step route unless the override explicitly opts into
+fallback.
+
+### Delivery's write-side constraint
+
+A timed-out write-capable process may have changed its worktree. Starting a
+second model in that same worktree would mix authorship and make the result
+ambiguous. The smallest safe first integration therefore permits delivery
+fallback only for failures proven to occur before mutation. Timeout fallback is
+fail-closed until a later, separately reviewed design gives every provider
+attempt an isolated worktree and promotes only one validated result. The
+controlled critical-path exercise uses deliberate primary unavailability, not
+a write-side timeout, so it proves provider continuity without weakening this
+boundary.
+
+## Failure and resource contract
+
+Provider adapters return a common attempt result containing provider, model,
+effort, start/end time, reported usage, mutation status where applicable,
+normalized failure reason, and bounded redacted diagnostics.
+
+Only `unavailable`, `quota`, `rate-limit`, `auth`, and policy-safe `timeout`
+permit the next route step. `malformed-output`, `schema-invalid`,
+`unsafe-output`, `scope-violation`, failed tests, ambiguous mutation, and
+unknown non-zero failures stop the logical task.
+
+The logical request owns one deadline and one normalized budget. Before every
+attempt the executor derives the remainder from observed elapsed time and
+consumption. A missing executable consumes no provider budget. When a provider
+does not report cost, the executor charges the entire reserved attempt budget;
+it never assumes zero. A provider without a dollar-limit flag receives a
+documented deterministic timeout/token surrogate derived from the remaining
+budget. No adapter may receive the original full envelope after the first
+attempt starts.
+
+Telemetry must record route ID, workload, attempt index, reason, provider,
+model, tier, effort, elapsed/remaining time, consumed/remaining normalized
+budget, mutation state where relevant, and final outcome. It must not record
+credentials, full prompts, or unbounded model output.
+
+## Capacity lifecycle and recovery
+
+Health is tracked per `(provider, model)` and, when an adapter can prove a
+provider-wide incident, at provider scope. A model-specific error does not
+exclude healthy peers from the same provider. An ambiguous error affects only
+the attempted model unless the adapter has provider-wide evidence.
+
+The state machine is explicit and persisted:
+
+`healthy -> degraded -> rate-limited/quota-exhausted -> unavailable -> cooldown -> probe -> healthy`
+
+Not every incident must visit every intermediate state. Deterministic
+transitions are:
+
+- Validated success moves `degraded` to `healthy` and refreshes its observation
+  time. A single ordinary success does not erase a provider-wide incident.
+- Retryable failures record their normalized reason and move the affected scope
+  to `rate-limited/quota-exhausted` or `unavailable`, then immediately to
+  `cooldown` with `retry_after` when the provider reports one. Without one, the
+  workload policy supplies a bounded cooldown.
+- Cooldown expiry makes the route eligible only for one leased `probe`; it does
+  not restore normal routing eligibility by itself.
+- A cheap, read-only, bounded, contract-validated probe is the only transition
+  from `probe` to `healthy`. A failed probe returns to `cooldown` with capped
+  exponential backoff and deterministic jitter derived from the route key, so
+  concurrent processes neither hot-loop nor synchronize a probe storm.
+- A quality-stop result may move a model to `degraded` after the checked-in
+  consecutive-failure threshold, but it never causes fallback for the current
+  task. Promotion back to `healthy` still requires the normal probe path.
+
+Every transition records scope, previous/new state, normalized reason,
+observation time, cooldown boundary, probe lease/result, and source. Credentials,
+prompts, and unbounded output are excluded. State older than the policy's
+maximum age is never treated as healthy: stale capacity is conservatively
+ranked behind fresh healthy capacity, and a stale authentication/availability
+observation requires a probe before use. If no safe probe or fresh route exists,
+routing fails closed with `no-eligible-capacity`.
+
+Recovery affects only routing decisions created after the successful probe.
+An active logical task retains its immutable route plan and never silently
+fails back to a recovered primary. Resume, if added later, requires an explicit
+policy and a new logical attempt identity.
+
+## Concurrency and operational safety
+
+- **Concurrent consumption:** route selection and capacity reservation occur in
+  one SQLite transaction. Each attempt receives a unique expiring lease and a
+  conservative budget reservation. Completion reconciles reported use; a
+  crashed lease is not reusable until expiry and reconciliation. Capacity is
+  ranked from availability minus active reservations, not a bare snapshot.
+- **Stale snapshots:** every capacity and health observation carries its source
+  and timestamp. Stale data is conservatively demoted or requires a probe; it
+  is never silently interpreted as full healthy capacity.
+- **Fallback loops:** a logical request has one immutable route ID, bounded step
+  list, attempted-model set, deadline, and budget. A provider/model can run at
+  most once for that route unless a separately approved resume policy says
+  otherwise.
+- **Duplicate execution:** the caller supplies a stable logical-task key. The
+  state ledger atomically rejects a second active lease for the same key.
+  Expired/abandoned leases require reconciliation; they do not authorize an
+  automatic second write-capable attempt.
+- **Partial work and resume:** v1 never resumes or mixes partial model output.
+  Read-only failed output is discarded. Write-capable ambiguous or partial work
+  stops for human-safe recovery; isolated-attempt promotion remains deferred.
+- **Provider concentration:** the router prefers provider diversity after the
+  first eligible route and policy may cap concurrent reservations by provider.
+  It does not lower capability tier or admit an unhealthy provider merely to
+  satisfy diversity.
+- **Quality degradation:** only contract validation, unsafe-output detection,
+  scope/test failures, and checked-in rolling thresholds may degrade a model.
+  The pool does not make subjective quality judgments. Quality failures stop
+  the current task rather than provider-hop.
+- **Experimental capacity:** experimental models remain opt-in. Promotion or
+  demotion is a reviewed registry change backed by smoke, contract, and
+  workload evidence; routing success alone cannot auto-promote a model.
+- **Operator overrides:** an override must still satisfy capability, health,
+  sandbox, and envelope checks. It is one route unless fallback is explicitly
+  opted in, and it cannot force an unhealthy route without a separately logged
+  emergency override that remains fail-closed on quality/security checks.
+- **No eligible capacity:** return one observable terminal
+  `no-eligible-capacity` result. Do not busy-wait, silently lower tier, increase
+  effort/budget, select an experimental model, or require a human to relay the
+  same task to another provider.
+
+## Architectural enforcement
+
+Add a gate-discovered acceptance test backed by a checked-in machine-readable
+inventory. It scans production Python ASTs and shell entrypoints and fails when:
+
+- a provider CLI name, provider-specific model name, or provider-specific
+  command builder appears outside `factory/capacity_pool/providers/`;
+- production code invokes a model command except through
+  `capacity_pool.executor`;
+- `FACTORY_WORKER_ORDER`, `--engine`, or provider-specific model-command
+  overrides select a production provider outside the migration compatibility
+  boundary; or
+- an executable production file is absent from the inventory.
+
+The first enforcement change carries an exact, reviewed debt allowlist for the
+violations in this document so it blocks new bypasses immediately. Each
+migration removes its entries. The final integration cannot pass while any
+production debt entry remains. Test fixtures may declare mock executable names;
+real-call harnesses must use the provider adapter or carry an explicit temporary
+debt entry that is removed before Project #30 activation.
+
+## Smallest implementation sequence
+
+1. **Shared execution boundary and enforcement.** Add workload-policy data,
+   provider adapters, the executor, transactional capacity state/leases,
+   lifecycle recovery and probes, common attempt results, envelope accounting,
+   telemetry, and the inventory-backed architectural test. Preserve current
+   behavior behind exact debt entries; do not migrate an agent opportunistically.
+2. **Planning and readiness probes.** Move Planning's existing Capacity Pool
+   route and both CLI adapters into the shared boundary. Move real inference and
+   auth/health smoke checks in the doctor to adapter APIs. Prove both exact
+   planning schemas and each configured provider with harmless real calls.
+3. **Delivery path.** Replace provider-specific dispatcher/worker IDs with one
+   logical delivery capability. Route `poll.sh`, dispatcher, worker launcher,
+   and delivery invocation through the executor. Preserve the Story envelope,
+   credential isolation, write sandbox, scope checks, test gate, and explicit
+   override semantics. Prove fallback on pre-mutation primary unavailability;
+   prove ambiguous mutation and quality failures do not switch providers.
+4. **Review, bridge, and live harness closure.** Route exact-head review and the
+   bounded bridge through the executor, migrate/retire direct live harness
+   calls, remove the final debt entries, and run the controlled end-to-end
+   exercise with the primary Claude route deliberately unavailable. Require
+   Planning, Delivery, and Review to complete through independently
+   authenticated fallback routes; require malformed output to stop; verify the
+   combined envelopes and telemetry by read-back.
+
+Each item is a separate bounded direct/external Story and gated PR. The
+autonomous factory never claims factory control-plane work.
+
+### Proposed Story boundaries
+
+| Story | Declared implementation area | Independent failure proof |
+|---|---|---|
+| Shared boundary | `factory/capacity_pool/{policy,executor,state,inventory}.py`, `factory/capacity_pool/providers/**`, Capacity Pool README/ADR, and gate-discovered Capacity Pool architecture/executor tests | Unknown executable boundary, duplicate model identity, unsupported effort, ineligible route, budget exhaustion, forbidden fallback, and a new direct-invocation fixture all fail closed. Policy tests prove the lowest capable tier wins, prepaid/expiring eligible capacity wins within policy, provider failure never raises tier/effort, and flagship/experimental routes require their exact trigger. State tests prove every health transition, cooldown/probe-only recovery, capped failed-probe backoff, stale-data handling, atomic concurrent reservations, lease expiry/reconciliation, duplicate suppression, and terminal no-capacity behavior. |
+| Planning and probes | Planning invoke/tests, doctor/tests, and only the workload/provider policy entries they consume | Normal Planning selects a balanced route; an explicit architecture/high-complexity fixture selects flagship. Real campaign/project schemas pass through balanced provider peers; quota and timeout use only the remainder without tier/effort escalation; malformed output stops; economy Luna/Haiku-class probes name each route failure. |
+| Delivery | `poll.sh`, dispatcher worker identity, runtime worker/poller launch, delivery invoke/tests, and delivery Capacity Pool acceptance scenarios | Verified Codex Spark is selected for a capable normal Story when its underused/expiring capacity is available; deliberate pre-mutation unavailability reaches one provider-diverse balanced coding peer, never flagship; an explicit high-complexity/hazard fixture may select flagship. Scope/test/unsafe failures and ambiguous mutation launch no second writer; Story time and budget never reset. |
+| Review and closure | Review invoke/tests, bridge/tests, direct real-call harness migrations, enforcement debt removal, and the controlled end-to-end failover scenario | Normal exact-head review selects balanced capacity; explicit risk/architecture/security input may select flagship. Balanced fallback succeeds with private failed output discarded; malformed/stale verdict stops. Bridge/readiness remain economy. The full critical path completes with its primary provider unavailable, no tier/effort increase, and zero production inventory violations. |
+
+No Story may combine a product change with these factory control-plane paths.
+The shared-boundary Story may introduce the temporary exact debt manifest, but
+the final Story must remove every production debt entry rather than relabel it
+as an exception.
+
+## Evidence required before Project #30 activation
+
+- The architectural enforcement inventory contains no production violation.
+- Deterministic fallback and stop-condition tests pass for Planning, Delivery,
+  Review, bridge, and doctor workloads.
+- Explicit overrides are single-provider unless fallback opt-in is present.
+- Normal Planning and Review prove balanced selection; normal bounded Delivery
+  proves verified Codex Spark preference when capable and underused/expiring;
+  bridge/readiness prove economy selection. Negative tests fail if any normal
+  path consumes flagship capacity.
+- Checked-in explicit complexity/risk fixtures are the only automatic flagship
+  triggers. Provider failure tests prove fallback preserves tier and effort.
+- Combined time/budget tests prove no fallback reset.
+- Lifecycle tests prove unavailable capacity cannot return before a successful
+  bounded probe, failed probes back off without hot-looping, stale observations
+  are conservative, and concurrent reservations cannot oversubscribe capacity.
+- Duplicate logical-task leases and fallback loops are rejected, and
+  `no-eligible-capacity` fails closed without hidden tier/effort escalation.
+- Harmless real read-only/authentication smoke checks pass for every configured
+  provider adapter.
+- The controlled end-to-end run completes Planning, Delivery, and Review with
+  primary Claude capacity deliberately unavailable, zero human relay for model
+  switching, and no weakened output, scope, security, or merge gate.
+- Project #30 is still `project:awaiting-ready` until all preceding evidence is
+  reviewed and accepted.
+
+## Deliberately deferred
+
+- Automatic delivery fallback after a write-capable timeout or ambiguous
+  process outcome, until isolated-attempt promotion is designed.
+- ML quality prediction, automatic effort escalation, background quota
+  scraping, persistent scheduling services, or an event bus.
+- Product Project #30 implementation and any widening of its scope.
+
+This document is the required planning stop. Approval authorizes the four
+bounded integration Stories above; it does not itself authorize implementation
+of any additional architecture.
