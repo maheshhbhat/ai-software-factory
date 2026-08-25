@@ -103,7 +103,7 @@ non-inference probe API, so provider knowledge has one audited home.
 
 ## Target boundary
 
-Add three layers under `factory/capacity_pool/`:
+Add four layers under `factory/capacity_pool/`:
 
 1. `policy.py` contains the checked-in model-capacity registry and one workload
    policy per capability. No agent declares model names or provider order.
@@ -115,6 +115,11 @@ Add three layers under `factory/capacity_pool/`:
    command construction, independent authentication environment, usage parsing,
    non-inference health/auth probes, and mapping provider errors into the shared
    failure vocabulary.
+4. `state.py` owns the transactional local capacity ledger: health state,
+   cooldown/probe timing, reservations, active leases, observed consumption,
+   and bounded routing history. It uses only Python's standard library and a
+   SQLite transaction so concurrent factory processes cannot reserve the same
+   capacity snapshot independently.
 
 Agents remain responsible for material that must not be generalized:
 
@@ -180,6 +185,90 @@ model, tier, effort, elapsed/remaining time, consumed/remaining normalized
 budget, mutation state where relevant, and final outcome. It must not record
 credentials, full prompts, or unbounded model output.
 
+## Capacity lifecycle and recovery
+
+Health is tracked per `(provider, model)` and, when an adapter can prove a
+provider-wide incident, at provider scope. A model-specific error does not
+exclude healthy peers from the same provider. An ambiguous error affects only
+the attempted model unless the adapter has provider-wide evidence.
+
+The state machine is explicit and persisted:
+
+`healthy -> degraded -> rate-limited/quota-exhausted -> unavailable -> cooldown -> probe -> healthy`
+
+Not every incident must visit every intermediate state. Deterministic
+transitions are:
+
+- Validated success moves `degraded` to `healthy` and refreshes its observation
+  time. A single ordinary success does not erase a provider-wide incident.
+- Retryable failures record their normalized reason and move the affected scope
+  to `rate-limited/quota-exhausted` or `unavailable`, then immediately to
+  `cooldown` with `retry_after` when the provider reports one. Without one, the
+  workload policy supplies a bounded cooldown.
+- Cooldown expiry makes the route eligible only for one leased `probe`; it does
+  not restore normal routing eligibility by itself.
+- A cheap, read-only, bounded, contract-validated probe is the only transition
+  from `probe` to `healthy`. A failed probe returns to `cooldown` with capped
+  exponential backoff and deterministic jitter derived from the route key, so
+  concurrent processes neither hot-loop nor synchronize a probe storm.
+- A quality-stop result may move a model to `degraded` after the checked-in
+  consecutive-failure threshold, but it never causes fallback for the current
+  task. Promotion back to `healthy` still requires the normal probe path.
+
+Every transition records scope, previous/new state, normalized reason,
+observation time, cooldown boundary, probe lease/result, and source. Credentials,
+prompts, and unbounded output are excluded. State older than the policy's
+maximum age is never treated as healthy: stale capacity is conservatively
+ranked behind fresh healthy capacity, and a stale authentication/availability
+observation requires a probe before use. If no safe probe or fresh route exists,
+routing fails closed with `no-eligible-capacity`.
+
+Recovery affects only routing decisions created after the successful probe.
+An active logical task retains its immutable route plan and never silently
+fails back to a recovered primary. Resume, if added later, requires an explicit
+policy and a new logical attempt identity.
+
+## Concurrency and operational safety
+
+- **Concurrent consumption:** route selection and capacity reservation occur in
+  one SQLite transaction. Each attempt receives a unique expiring lease and a
+  conservative budget reservation. Completion reconciles reported use; a
+  crashed lease is not reusable until expiry and reconciliation. Capacity is
+  ranked from availability minus active reservations, not a bare snapshot.
+- **Stale snapshots:** every capacity and health observation carries its source
+  and timestamp. Stale data is conservatively demoted or requires a probe; it
+  is never silently interpreted as full healthy capacity.
+- **Fallback loops:** a logical request has one immutable route ID, bounded step
+  list, attempted-model set, deadline, and budget. A provider/model can run at
+  most once for that route unless a separately approved resume policy says
+  otherwise.
+- **Duplicate execution:** the caller supplies a stable logical-task key. The
+  state ledger atomically rejects a second active lease for the same key.
+  Expired/abandoned leases require reconciliation; they do not authorize an
+  automatic second write-capable attempt.
+- **Partial work and resume:** v1 never resumes or mixes partial model output.
+  Read-only failed output is discarded. Write-capable ambiguous or partial work
+  stops for human-safe recovery; isolated-attempt promotion remains deferred.
+- **Provider concentration:** the router prefers provider diversity after the
+  first eligible route and policy may cap concurrent reservations by provider.
+  It does not lower capability tier or admit an unhealthy provider merely to
+  satisfy diversity.
+- **Quality degradation:** only contract validation, unsafe-output detection,
+  scope/test failures, and checked-in rolling thresholds may degrade a model.
+  The pool does not make subjective quality judgments. Quality failures stop
+  the current task rather than provider-hop.
+- **Experimental capacity:** experimental models remain opt-in. Promotion or
+  demotion is a reviewed registry change backed by smoke, contract, and
+  workload evidence; routing success alone cannot auto-promote a model.
+- **Operator overrides:** an override must still satisfy capability, health,
+  sandbox, and envelope checks. It is one route unless fallback is explicitly
+  opted in, and it cannot force an unhealthy route without a separately logged
+  emergency override that remains fail-closed on quality/security checks.
+- **No eligible capacity:** return one observable terminal
+  `no-eligible-capacity` result. Do not busy-wait, silently lower tier, increase
+  effort/budget, select an experimental model, or require a human to relay the
+  same task to another provider.
+
 ## Architectural enforcement
 
 Add a gate-discovered acceptance test backed by a checked-in machine-readable
@@ -204,7 +293,8 @@ debt entry that is removed before Project #30 activation.
 ## Smallest implementation sequence
 
 1. **Shared execution boundary and enforcement.** Add workload-policy data,
-   provider adapters, the executor, common attempt results, envelope accounting,
+   provider adapters, the executor, transactional capacity state/leases,
+   lifecycle recovery and probes, common attempt results, envelope accounting,
    telemetry, and the inventory-backed architectural test. Preserve current
    behavior behind exact debt entries; do not migrate an agent opportunistically.
 2. **Planning and readiness probes.** Move Planning's existing Capacity Pool
@@ -232,7 +322,7 @@ autonomous factory never claims factory control-plane work.
 
 | Story | Declared implementation area | Independent failure proof |
 |---|---|---|
-| Shared boundary | `factory/capacity_pool/{policy,executor,inventory}.py`, `factory/capacity_pool/providers/**`, Capacity Pool README/ADR, and gate-discovered Capacity Pool architecture/executor tests | Unknown executable boundary, duplicate model identity, unsupported effort, ineligible route, budget exhaustion, forbidden fallback, and a new direct-invocation fixture all fail closed. |
+| Shared boundary | `factory/capacity_pool/{policy,executor,state,inventory}.py`, `factory/capacity_pool/providers/**`, Capacity Pool README/ADR, and gate-discovered Capacity Pool architecture/executor tests | Unknown executable boundary, duplicate model identity, unsupported effort, ineligible route, budget exhaustion, forbidden fallback, and a new direct-invocation fixture all fail closed. State tests prove every health transition, cooldown/probe-only recovery, capped failed-probe backoff, stale-data handling, atomic concurrent reservations, lease expiry/reconciliation, duplicate suppression, and terminal no-capacity behavior. |
 | Planning and probes | Planning invoke/tests, doctor/tests, and only the workload/provider policy entries they consume | Real campaign/project schemas pass through both provider adapters; quota and timeout use only the remainder; malformed output stops; a provider-auth/probe failure is named. |
 | Delivery | `poll.sh`, dispatcher worker identity, runtime worker/poller launch, delivery invoke/tests, and delivery Capacity Pool acceptance scenarios | Deliberate pre-mutation primary unavailability reaches one fallback; scope/test/unsafe failures and ambiguous mutation launch no second writer; Story time and budget never reset. |
 | Review and closure | Review invoke/tests, bridge/tests, direct real-call harness migrations, enforcement debt removal, and the controlled end-to-end failover scenario | Exact-head fallback succeeds with private failed output discarded; malformed/stale verdict stops; the full critical path completes with primary Claude unavailable and the inventory reports zero production violations. |
@@ -249,6 +339,11 @@ as an exception.
   Review, bridge, and doctor workloads.
 - Explicit overrides are single-provider unless fallback opt-in is present.
 - Combined time/budget tests prove no fallback reset.
+- Lifecycle tests prove unavailable capacity cannot return before a successful
+  bounded probe, failed probes back off without hot-looping, stale observations
+  are conservative, and concurrent reservations cannot oversubscribe capacity.
+- Duplicate logical-task leases and fallback loops are rejected, and
+  `no-eligible-capacity` fails closed without hidden tier/effort escalation.
 - Harmless real read-only/authentication smoke checks pass for every configured
   provider adapter.
 - The controlled end-to-end run completes Planning, Delivery, and Review with
