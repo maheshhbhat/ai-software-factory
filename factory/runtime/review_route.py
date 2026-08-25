@@ -57,6 +57,23 @@ def target(pull: dict, story: dict, comments: list[dict]) -> ReviewTarget | None
     return ReviewTarget(number, pull["number"], head)
 
 
+def behind_targets(pulls: list[dict], issues: dict[int, dict]) -> list[int]:
+    """Return factory review PRs whose branch GitHub reports behind its base."""
+    found = []
+    for pull in sorted(pulls, key=lambda value: value.get("number", 0)):
+        if (pull.get("state") != "open" or pull.get("draft") or
+                pull.get("mergeable_state") != "behind"):
+            continue
+        if not LINK.findall((pull.get("body") or "").replace("\r\n", "\n")):
+            continue
+        number = story_number(pull)
+        story = issues.get(number) or {}
+        labels = {item.get("name", "") for item in story.get("labels", [])}
+        if "story:in-review" in labels:
+            found.append(pull["number"])
+    return found
+
+
 def marker(pull_number: int, head: str, verdict: str) -> str:
     if verdict not in ("approval", "findings"):
         raise RouteError("review verdict must be approval or findings")

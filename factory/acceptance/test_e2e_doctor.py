@@ -83,8 +83,36 @@ class SafetyTests(unittest.TestCase):
 
 
 class GitHubChecks(unittest.TestCase):
+    def test_disabled_repository_auto_merge_blocks_readiness(self):
+        payload={"data":{"repository":{"isPrivate":False,"viewerPermission":"ADMIN",
+          "autoMergeAllowed":False,
+          "project":{"number":400,"state":"OPEN","body":"### Roadmap commitment\n\n#384\n",
+                     "labels":{"nodes":[{"name":"type:project"},{"name":"project:active"}]}},
+          "commitment":{"number":384,"state":"OPEN",
+                        "body":"No product or factory implementation work",
+                        "labels":{"nodes":[{"name":"type:roadmap-commitment"}]}},
+          "issues":{"nodes":[
+              {"number":400,"body":"### Roadmap commitment\n\n#384\n",
+               "labels":{"nodes":[{"name":"type:project"}]}}],
+              "pageInfo":{"hasNextPage":False}},
+          "defaultBranchRef":{"branchProtectionRule":{
+              "requiredStatusCheckContexts":["merge-gate"]}}},
+          "rateLimit":{"remaining":4999,"resetAt":"later"}}}
+        def respond(args, **_):
+            if args[-1].endswith("/rulesets"):
+                return completed(args,stdout="[]")
+            return completed(args,stdout=json.dumps(payload))
+        value=doctor.Doctor("owner/repo",400,commitment=384,
+                            target="runs/rung1/live_product/project-400/app.py",
+                            environ={"PATH":"/bin"},runner=respond)
+        value.token="token"; value.github()
+        check=next(row for row in value.checks if row.name=="repository auto-merge")
+        self.assertFalse(check.passed)
+        self.assertEqual("disabled", check.detail)
+
     def test_authorization_branch_protection_and_capacity_are_checked(self):
         payload={"data":{"repository":{"isPrivate":True,"viewerPermission":"ADMIN",
+          "autoMergeAllowed":True,
           "project":{"number":400,"state":"OPEN","body":"### Roadmap commitment\n\n#384\n",
                      "labels":{"nodes":[{"name":"type:project"},{"name":"project:awaiting-ready"}]}},
           "commitment":{"number":384,"state":"OPEN",
@@ -115,6 +143,7 @@ class GitHubChecks(unittest.TestCase):
 
     def test_real_rest_failure_blocks_even_when_graphql_capacity_is_healthy(self):
         payload={"data":{"repository":{"isPrivate":False,"viewerPermission":"ADMIN",
+          "autoMergeAllowed":True,
           "project":{"number":400,"state":"OPEN","body":"### Roadmap commitment\n\n#384\n",
                      "labels":{"nodes":[{"name":"type:project"},{"name":"project:active"}]}},
           "commitment":{"number":384,"state":"OPEN",
@@ -142,6 +171,7 @@ class GitHubChecks(unittest.TestCase):
 
     def test_existing_project_or_story_blocks_commitment_isolation(self):
         payload={"data":{"repository":{"isPrivate":False,"viewerPermission":"ADMIN",
+          "autoMergeAllowed":True,
           "project":{"number":400,"state":"OPEN","body":"### Roadmap commitment\n\n#384\n",
                      "labels":{"nodes":[{"name":"type:project"},{"name":"project:active"}]}},
           "commitment":{"number":384,"state":"OPEN",

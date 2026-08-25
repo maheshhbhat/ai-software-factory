@@ -400,6 +400,33 @@ def route_merge(repo: str, pull: dict, comments: list[dict], *, apply=True) -> b
     return True
 
 
+def refresh_behind_branches(repo: str, pulls: list[dict], issues: dict[int, dict],
+                            *, apply: bool = True) -> set[int]:
+    """Refresh factory Story PRs that cannot merge against the current base.
+
+    Updating the branch changes its head SHA.  The caller therefore excludes it
+    from this review pass; the next poll re-runs checks and obtains a fresh-head
+    review before enabling auto-merge.
+    """
+    refreshed = set()
+    if not apply:
+        return refreshed
+    try:
+        targets = review_route.behind_targets(pulls, issues)
+    except review_route.RouteError as exc:
+        raise WorkerLaunchFailed(f"stale branch route failed closed: {exc}") from exc
+    for number in targets:
+        result = subprocess.run(
+            ["gh", "pr", "update-branch", str(number), "--repo", repo],
+            capture_output=True, text=True)
+        if result.returncode:
+            raise WorkerLaunchFailed(
+                f"stale branch refresh failed for PR #{number}: "
+                f"{(result.stderr or result.stdout)[:400]}")
+        refreshed.add(number)
+    return refreshed
+
+
 def run_phase4_reviews(repo: str, apply: bool = True) -> list[review_route.ReviewTarget]:
     token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or ""
     issues = dispatcher.fetch_issues(repo, token)
@@ -407,7 +434,9 @@ def run_phase4_reviews(repo: str, apply: bool = True) -> list[review_route.Revie
     comments = {number: dispatcher._api(
         f"https://api.github.com/repos/{repo}/issues/{number}/comments?per_page=100", token)
                 for number in issues}
-    targets = review_targets(pulls, issues, comments)
+    refreshed = refresh_behind_branches(repo, pulls, issues, apply=apply)
+    targets = review_targets(
+        [pull for pull in pulls if pull.get("number") not in refreshed], issues, comments)
     for target in targets:
         if not apply:
             continue

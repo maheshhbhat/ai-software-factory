@@ -210,7 +210,7 @@ class Doctor:
             return
         owner, name = self.repo.split("/", 1)
         query = """query($owner:String!,$name:String!,$project:Int!,$commitment:Int!){
-          repository(owner:$owner,name:$name){isPrivate viewerPermission
+          repository(owner:$owner,name:$name){isPrivate viewerPermission autoMergeAllowed
             project:issue(number:$project){number state body labels(first:20){nodes{name}}}
             commitment:issue(number:$commitment){number state body labels(first:20){nodes{name}}}
             issues(first:100,states:OPEN){nodes{number body labels(first:20){nodes{name}}}
@@ -235,6 +235,8 @@ class Doctor:
                     repo.get("viewerPermission") in {"WRITE", "MAINTAIN", "ADMIN"},
                     f"visibility={'private' if repo.get('isPrivate') else 'public'}; "
                     f"permission={repo.get('viewerPermission')}")
+        self.record("repository auto-merge", repo.get("autoMergeAllowed") is True,
+                    ("enabled" if repo.get("autoMergeAllowed") is True else "disabled"))
         remaining = int((value.get("rateLimit") or {}).get("remaining", 0))
         self.record("GitHub API capacity", remaining >= 200,
                     f"{remaining} GraphQL points remaining")
