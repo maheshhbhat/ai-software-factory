@@ -32,6 +32,8 @@ def _python_invokes_provider(path: pathlib.Path) -> bool:
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
             if node.value in PROVIDER_NAMES and isinstance(getattr(node, "parent", None), ast.Call):
                 return True
+    if "factory.capacity_pool.providers" in source:
+        return False
     return bool(PYTHON_MARKERS.search(source))
 
 

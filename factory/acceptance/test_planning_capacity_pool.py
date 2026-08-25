@@ -8,6 +8,9 @@ import unittest
 from unittest import mock
 
 from factory.agents.planning import invoke
+from factory.agents.planning.test_artifacts import campaign_output
+from factory.capacity_pool.router import ModelCapacity, Tier
+from factory.capacity_pool.state import CapacityState
 
 
 class Result:
@@ -18,13 +21,36 @@ class Result:
 
 
 VALUE = {"trigger": {"labels": ["type:roadmap-commitment"]}}
-OUTPUT = {"contract": "schema-bound by the production command"}
+OUTPUT = campaign_output()
+
+
+class Clock:
+    def __init__(self, *values):
+        self.values = list(values)
+        self.last = self.values[-1] if self.values else 0
+
+    def __call__(self):
+        if self.values:
+            self.last = self.values.pop(0)
+        return self.last
 
 
 class PlanningCapacityPoolAcceptance(unittest.TestCase):
     def run_quietly(self, *args, **kwargs):
-        with mock.patch.object(invoke.obs, "operational_log"):
-            return invoke.run_model(*args, **kwargs)
+        state = CapacityState()
+        capabilities = frozenset({"reason", "json"})
+        registry = (
+            ModelCapacity("anthropic-balanced", "anthropic", Tier.BALANCED,
+                          capabilities, prepaid_or_expiring=True),
+            ModelCapacity("gpt-5.6-terra", "openai", Tier.BALANCED, capabilities),
+        )
+        for item in registry:
+            state.mark_healthy(item.provider, item.name, "test-probe")
+        try:
+            with mock.patch.object(invoke.obs, "operational_log"):
+                return invoke.run_model(*args, **kwargs, state=state, registry=registry)
+        finally:
+            state.close()
 
     def test_fast_quota_failure_preserves_full_remainder_for_gpt_5_6_sol(self):
         calls = []
@@ -37,11 +63,11 @@ class PlanningCapacityPoolAcceptance(unittest.TestCase):
 
         with mock.patch.dict(os.environ, {}, clear=True):
             result = self.run_quietly(
-                VALUE, 100, 10, runner=runner, clock=iter((0, 0)).__next__)
+                VALUE, 100, 10, runner=runner, clock=Clock(0, 0))
         self.assertEqual(OUTPUT, result)
-        self.assertEqual([80, 100], [timeout for _, timeout in calls])
-        self.assertIn("claude-fable-5", calls[0][0])
-        self.assertIn("gpt-5.6-sol", calls[1][0])
+        self.assertEqual([50, 100], [timeout for _, timeout in calls])
+        self.assertIn("anthropic-balanced", calls[0][0])
+        self.assertIn("gpt-5.6-terra", calls[1][0])
         self.assertIn('model_reasoning_effort="medium"', calls[1][0])
 
     def test_primary_timeout_leaves_only_reserved_logical_task_remainder(self):
@@ -54,11 +80,11 @@ class PlanningCapacityPoolAcceptance(unittest.TestCase):
 
         with mock.patch.dict(os.environ, {}, clear=True):
             result = self.run_quietly(
-                VALUE, 100, 10, runner=runner, clock=iter((0, 80)).__next__)
+                VALUE, 100, 10, runner=runner, clock=Clock(0, 0, 80))
         self.assertEqual(OUTPUT, result)
-        self.assertEqual([80, 20], [timeout for _, timeout in calls])
+        self.assertEqual([50, 20], [timeout for _, timeout in calls])
         primary = calls[0][0]
-        self.assertEqual("8.0", primary[primary.index("--max-budget-usd") + 1])
+        self.assertEqual("5.0", primary[primary.index("--max-budget-usd") + 1])
 
     def test_missing_primary_executable_consumes_no_provider_budget(self):
         calls = []
@@ -70,9 +96,9 @@ class PlanningCapacityPoolAcceptance(unittest.TestCase):
 
         with mock.patch.dict(os.environ, {}, clear=True):
             result = self.run_quietly(
-                VALUE, 100, 10, runner=runner, clock=iter((0, 0)).__next__)
+                VALUE, 100, 10, runner=runner, clock=Clock(0, 0))
         self.assertEqual(OUTPUT, result)
-        self.assertEqual([80, 100], [timeout for _, timeout in calls])
+        self.assertEqual([50, 100], [timeout for _, timeout in calls])
 
     def test_successful_malformed_output_stops_without_provider_switch(self):
         calls = []
@@ -81,7 +107,7 @@ class PlanningCapacityPoolAcceptance(unittest.TestCase):
             return Result(stdout="not-json")
 
         with mock.patch.dict(os.environ, {}, clear=True), \
-             self.assertRaisesRegex(invoke.InvocationError, "malformed JSON"):
+             self.assertRaisesRegex(invoke.InvocationError, "schema-invalid"):
             self.run_quietly(VALUE, 100, 10, runner=runner)
         self.assertEqual(["claude"], [command[0] for command in calls])
 
@@ -92,7 +118,7 @@ class PlanningCapacityPoolAcceptance(unittest.TestCase):
             return Result(3, stderr="invalid command option")
 
         with mock.patch.dict(os.environ, {}, clear=True), \
-             self.assertRaisesRegex(invoke.InvocationError, "without eligible fallback"):
+             self.assertRaisesRegex(invoke.InvocationError, "unknown-failure"):
             self.run_quietly(VALUE, 100, 10, runner=runner)
         self.assertEqual(["claude"], [command[0] for command in calls])
 

@@ -44,7 +44,9 @@ class ProviderAdapter:
             raise TypeError("provider adapter returned an invalid attempt result")
         return result
 
-    def health_probe(self, *, model: str, timeout_seconds: int) -> bool:
+    def health_probe(self, *, model: str, timeout_seconds: int,
+                     effort: str = "low") -> bool:
         if self._probe is None:
             return False
-        return bool(self._probe(model=model, timeout_seconds=timeout_seconds))
+        return bool(self._probe(model=model, timeout_seconds=timeout_seconds,
+                                effort=effort))

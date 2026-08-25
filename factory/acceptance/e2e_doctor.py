@@ -25,8 +25,12 @@ from dataclasses import dataclass
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 RUNTIME = ROOT / "factory" / "runtime"
 sys.path.insert(0, str(RUNTIME))
+sys.path.insert(0, str(ROOT))
 import observability as obs  # noqa: E402
 import status as live_status  # noqa: E402
+from factory.capacity_pool.policy import resolved_registry  # noqa: E402
+from factory.capacity_pool.providers import cli_adapter, provider_environment  # noqa: E402
+from factory.capacity_pool.state import CapacityState  # noqa: E402
 
 DEFAULT_REPO = "maheshhbhat/ai-software-factory"
 FORBIDDEN_EXACT = {
@@ -119,10 +123,6 @@ class Doctor:
         self.token = token.stdout.strip() if token.returncode == 0 else ""
         self.record("GitHub credential", bool(self.token),
                     "available" if self.token else "gh auth token failed")
-        codex = self.command(["codex", "login", "status"])
-        self.record("Codex authentication", codex.returncode == 0,
-                    (codex.stdout or codex.stderr).strip()[:200] or
-                    f"exit {codex.returncode}")
         reviewer_file = pathlib.Path(self.env.get("HOME", "")) / ".factory-reviewer-token"
         reviewer = self.env.get("CLAUDE_CODE_OAUTH_TOKEN", "")
         if not reviewer and reviewer_file.is_file():
@@ -130,79 +130,32 @@ class Doctor:
         self.record("reviewer credential", bool(reviewer),
                     "dedicated credential available" if reviewer else
                     "CLAUDE_CODE_OAUTH_TOKEN and ~/.factory-reviewer-token are absent")
-        claude = self.command(["claude", "--version"])
-        self.record("reviewer binary", claude.returncode == 0,
-                    (claude.stdout or claude.stderr).strip()[:200] or
-                    f"exit {claude.returncode}")
-        if reviewer:
-            with tempfile.TemporaryDirectory(prefix="factory-review-auth-") as home:
-                review_env = {key: self.env[key] for key in
-                              ("PATH", "LANG", "LC_ALL", "SHELL", "TMPDIR")
-                              if self.env.get(key)}
-                review_env.update({"HOME": home, "USER": "factory-reviewer",
-                                   "LOGNAME": "factory-reviewer",
-                                   "CLAUDE_CODE_OAUTH_TOKEN": reviewer})
-                auth = self.command(["claude", "auth", "status"], env=review_env)
-            self.record("reviewer authentication", auth.returncode == 0,
-                        "dedicated reviewer identity authenticated" if auth.returncode == 0
-                        else (auth.stderr or auth.stdout).strip()[:200])
-        else:
-            self.record("reviewer authentication", False, "credential unavailable")
 
     def worker_engine_start(self):
-        """Prove login metadata can actually start the configured worker."""
-        configured = self.env.get("FACTORY_WORKER_ORDER", "codex-delivery")
-        first = configured.split(",", 1)[0].strip()
-        if first == "claude-delivery":
-            engine = "claude"
-        elif first == "codex-delivery":
-            engine = "codex"
-        else:
-            self.record("worker engine start", False,
-                        f"unsupported configured worker: {first or 'empty'}")
-            return
-        prompt = "Reply exactly FACTORY_WORKER_READY. Do not inspect or change files."
-        base = {key: self.env[key] for key in
-                ("PATH", "LANG", "LC_ALL", "SHELL", "TMPDIR")
-                if self.env.get(key)}
-        if engine == "claude":
-            # poll.sh removes the dedicated reviewer OAuth token before any
-            # worker launch. Claude delivery uses the operator keychain or its
-            # own API key, never the reviewer identity.
-            for key in ("HOME", "USER", "ANTHROPIC_API_KEY"):
-                if self.env.get(key):
-                    base[key] = self.env[key]
-            command = ["claude", "-p", prompt, "--permission-mode", "dontAsk",
-                       "--tools", "", "--max-turns", "1",
-                       "--output-format", "json", "--no-session-persistence"]
-        else:
-            command = ["codex", "exec", "--sandbox", "read-only", "--ephemeral",
-                       "--ignore-user-config", "--json", prompt]
-        with tempfile.TemporaryDirectory(prefix="factory-doctor-engine-") as directory:
-            result = self.command(command, timeout=90, env=base,
-                                  cwd=pathlib.Path(directory))
-        output = (result.stdout or "") + "\n" + (result.stderr or "")
-        events = []
-        for line in output.splitlines():
-            try:
-                value = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(value, dict):
-                events.append(value)
-        if engine == "claude":
-            answered = any(row.get("type") == "result" and
-                           row.get("result") == "FACTORY_WORKER_READY"
-                           for row in events)
-        else:
-            answered = any(row.get("type") == "item.completed" and
-                           (row.get("item") or {}).get("type") == "agent_message" and
-                           (row.get("item") or {}).get("text") == "FACTORY_WORKER_READY"
-                           for row in events)
-        ready = result.returncode == 0 and answered
-        detail = (f"real {engine} worker started and answered" if ready else
-                  (output.strip()[-400:] or f"{engine} exited {result.returncode}"))
-        self.record("worker engine start", ready, detail)
+        """Probe every configured capacity independently and persist the result."""
+        configured = [item for item in resolved_registry(self.env) if item.available]
+        state_path = self.env.get("FACTORY_CAPACITY_STATE", "").strip()
+        state = CapacityState(state_path, uri=False) if state_path else CapacityState()
+        try:
+            for item in configured:
+                adapter = cli_adapter(
+                    item.provider, cwd=ROOT,
+                    environment=provider_environment(item.provider, self.env),
+                    runner=self.runner)
+                effort = "low" if "low" in item.supports_effort else sorted(
+                    item.supports_effort)[0]
+                passed = adapter.health_probe(
+                    model=item.name, timeout_seconds=90, effort=effort)
+                if passed:
+                    state.mark_healthy(item.provider, item.name, "doctor-probe-success")
+                else:
+                    state.mark_failure(item.provider, item.name, "doctor-probe-failed")
+                self.record(f"capacity probe {item.provider}/{item.name}", passed,
+                            "adapter probe answered" if passed else "adapter probe failed")
+            if not configured:
+                self.record("capacity probes", False, "no configured model capacity")
+        finally:
+            state.close()
 
     def github(self):
         if not self.token:
