@@ -135,8 +135,11 @@ def cli_adapter(provider: str, *, cwd: pathlib.Path, environment: dict[str, str]
         return AttemptResult("success", output, None)
 
     def probe(*, model, timeout_seconds, effort="low"):
+        # A minimal claude-fable-5 reply costs ~$0.15, so a 0.1 cap makes the
+        # probe fail on budget with valid credentials — indistinguishable in
+        # the health store from an auth failure.
         result = invoke(model=model, effort=effort, timeout_seconds=timeout_seconds,
-                        budget_units=0.1,
+                        budget_units=0.5,
                         payload=InvocationPayload("Reply exactly CAPACITY_OK"))
         def exact(value):
             if value == "CAPACITY_OK":
