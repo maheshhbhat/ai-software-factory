@@ -46,7 +46,7 @@ def classify_failure(text: str, returncode: int) -> str:
 
 BASE_ENVIRONMENT = frozenset({"PATH", "LANG", "LC_ALL", "TMPDIR", "SHELL"})
 PROVIDER_ENVIRONMENT = {
-    "openai": frozenset({"OPENAI_API_KEY", "CODEX_HOME"}),
+    "openai": frozenset({"HOME", "OPENAI_API_KEY", "CODEX_HOME"}),
     "anthropic": frozenset({
         "HOME", "USER", "LOGNAME", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN",
     }),

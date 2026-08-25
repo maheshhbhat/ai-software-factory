@@ -120,6 +120,20 @@ precisely so `unittest discover -p 'test_*.py'` cannot collect it by accident.
 before it does either. An E2E test that looks free gets run in a loop by someone
 who did not read this.
 
+The Capacity Pool provider failover proof is read-only and writes only its local
+evidence file. It deliberately reports Anthropic unavailable before inference,
+then requires the real OpenAI GPT-5.6 Sol adapter to complete the same flagship
+medium Review-class request inside one combined envelope:
+
+```bash
+python3 factory/acceptance/capacity_failover_live.py \
+  --output runs/capacity-failover/evidence.json
+```
+
+It also advances the failed provider scope through cooldown and a successful
+probe before recording it healthy. The command exits non-zero if fallback,
+schema validation, envelope accounting, or recovery is not proven.
+
 **Cleanup is the behaviour under test.** §9.3 forbids any component from
 cancelling a Story, so this cannot close its own fixture — a teardown would be a
 component doing what the contract reserves to a human, and would delete the
