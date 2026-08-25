@@ -4,7 +4,7 @@
     {"name": "capacity-policy", "paths": ["factory/capacity_pool/router.py", "factory/capacity_pool/policy.py"], "classification": "deterministic / no model"},
     {"name": "capacity-executor", "paths": ["factory/capacity_pool/executor.py"], "classification": "capacity-pool-routed"},
     {"name": "planning", "paths": ["factory/agents/planning/invoke.py"], "classification": "capacity-pool-routed"},
-    {"name": "delivery", "paths": ["poll.sh", "factory/agents/worker/invoke.py", "factory/dispatcher/dispatcher.py", "factory/runtime/workers.py", "factory/runtime/poller.py"], "classification": "violation: direct model invocation"},
+    {"name": "delivery", "paths": ["poll.sh", "factory/agents/worker/invoke.py", "factory/dispatcher/dispatcher.py", "factory/runtime/workers.py", "factory/runtime/poller.py"], "classification": "capacity-pool-routed"},
     {"name": "independent-review", "paths": ["factory/agents/review/invoke.py"], "classification": "violation: direct model invocation"},
     {"name": "bounded-bridge", "paths": ["live-e2e.sh", "factory/runtime/bridge.py"], "classification": "violation: direct model invocation"},
     {"name": "readiness-probe", "paths": ["factory/acceptance/e2e_doctor.py", "factory/acceptance/test_engine_live.py"], "classification": "capacity-pool-routed"},
@@ -12,13 +12,8 @@
     {"name": "deterministic-runtime", "paths": ["factory/runtime/planning_route.py", "factory/runtime/review_route.py", "factory/runtime/review_link.py", "factory/runtime/sequencer.py", "factory/runtime/completion.py", "factory/runtime/continuation.py", "factory/runtime/humanqueue.py", "factory/runtime/sampling.py", "factory/runtime/repair_claim.py", "factory/runtime/status.py", "factory/gates", "factory/runtime/observability.py", "factory/runtime/runlog.py", "factory/runtime/streaming.py"], "classification": "deterministic / no model"}
   ],
   "temporary_direct_invocation_debt": [
-    "poll.sh",
     "live-e2e.sh",
-    "factory/agents/worker/invoke.py",
     "factory/agents/review/invoke.py",
-    "factory/dispatcher/dispatcher.py",
-    "factory/runtime/workers.py",
-    "factory/runtime/poller.py",
     "factory/runtime/bridge.py",
     "factory/acceptance/phase4_live.py"
   ]

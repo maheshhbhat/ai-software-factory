@@ -273,9 +273,9 @@ class Doctor:
 
     def configuration(self):
         poll = (ROOT / "poll.sh").read_text()
-        self.record("Codex-only worker default",
-                    'FACTORY_WORKER_ORDER="codex-delivery"' in poll,
-                    "poll.sh defaults to codex-delivery")
+        self.record("Capacity Pool delivery default",
+                    'FACTORY_WORKER_ORDER="capacity-delivery"' in poll,
+                    "poll.sh dispatches through one Capacity Pool boundary")
         harness = (ROOT / "factory" / "acceptance" / "two_story_real.py").read_text()
         self.record("Story spend default", "$5 / 60 min" in harness,
                     "$5 and 60 minutes per disposable Story")

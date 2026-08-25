@@ -11,6 +11,9 @@ from unittest import mock
 WORKER = pathlib.Path(__file__).resolve().parents[1] / "agents" / "worker"
 sys.path.insert(0, str(WORKER))
 import invoke
+from factory.capacity_pool.providers import AttemptResult, ProviderAdapter
+from factory.capacity_pool.router import ModelCapacity, Tier
+from factory.capacity_pool.state import CapacityState
 
 
 STORY_BODY = """### Project
@@ -116,14 +119,31 @@ class WorkerLifecycleTests(unittest.TestCase):
         self.model.chmod(0o755)
         self.environment = {"FACTORY_DELIVERY_MODEL_CMD": str(self.model),
                             "FACTORY_DELIVERY_TEST_CMD": "/usr/bin/true"}
+        self.state = CapacityState()
+        self.capacity = ModelCapacity(
+            "test-delivery", "openai", Tier.BALANCED,
+            frozenset({"code", "write", "tests"}))
+        self.state.mark_healthy("openai", "test-delivery", "acceptance-fixture")
 
     def tearDown(self):
+        self.state.close()
         self.temp.cleanup()
 
     def deliver(self):
-        with mock.patch.dict(os.environ, self.environment, clear=False):
+        def adapter(_provider, *, cwd, mutation_state, **_kwargs):
+            def run_model(**_attempt):
+                completed = subprocess.run(
+                    [str(self.model)], cwd=cwd, capture_output=True, text=True)
+                return AttemptResult(
+                    "success" if completed.returncode == 0 else "error",
+                    completed.stdout, mutation_state=mutation_state())
+            return ProviderAdapter("openai", run_model)
+
+        with mock.patch.dict(os.environ, self.environment, clear=False), \
+                mock.patch.object(invoke, "cli_adapter", side_effect=adapter):
             return invoke.execute("owner/repo", 214, "token", self.checkout,
-                                  client=self.client)
+                                  client=self.client, state=self.state,
+                                  registry=(self.capacity,))
 
     def test_first_delivery_replay_and_retry_use_one_durable_pr(self):
         first = self.deliver()

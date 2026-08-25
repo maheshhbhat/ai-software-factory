@@ -1,45 +1,10 @@
 #!/usr/bin/env python3
 """Headless bounded delivery: claimed Story identity in, one durable PR out.
 
-The engine runs in a built environment, never an inherited one. Inheriting the
-operator's shell would hand the engine `GITHUB_TOKEN`/`GH_TOKEN` — which can
-write to the repository outside the wrapper's control — and the whole
-`FACTORY_WORKER_*` block, which is how the operator declares *which* engine to
-launch. A prompt-injected engine that could edit either could change what the
-factory does next. So the environment is an allowlist, and this module states
-what is on it and why:
-
-* `PATH` — find the engine binary and the tools it shells out to.
-* `LANG`, `LC_ALL` — decoding of the engine's own output.
-* `TMPDIR` — scratch space; the engine writes nothing durable outside the worktree.
-* `SHELL` — the interpreter the engine's Bash tool uses.
-
-That is the whole of `tool_environment()`, and it is all a subprocess gets
-unless it is an engine that has to log in. The delivered change's own test
-command is such a subprocess: it needs the tools, the locale and scratch
-space, and nothing that could authenticate as the operator — so it is launched
-with `tool_environment()` and never grows a credential when a new engine is
-declared.
-
-An engine additionally gets its own login, and *which* credential that is is
-both engine-specific and platform-specific — so it is declared per engine in
-`ENGINE_CREDENTIALS` rather than accumulated into one shared list. The Claude
-CLI resolves its login from the macOS keychain, which is looked up for the
-calling user and so needs `USER`; on Linux the same credential is a file under
-`HOME` and `USER` is irrelevant. Either way an explicit `ANTHROPIC_API_KEY` or
-`CLAUDE_CODE_OAUTH_TOKEN` also works. Appending today's variable name to one
-list would pass the platform it was found on and silently fail the other, so
-`clean_environment()` forwards exactly the sources that exist on the platform
-it is running on, and `unreachable_credentials()` lets a test say "this engine
-can log in" without naming a variable. `clean_environment()` takes the engine
-as a required argument for the same reason: a call site has to say whether it
-is launching an engine, and only an engine launch can reach a credential.
-
-Write permission is granted deliberately: Claude receives `acceptEdits` and
-Codex receives automatic approval inside its workspace-write sandbox, because
-the Story asks the engine to change files. That does not widen what may be delivered — `execute()`
-compares every changed path against the Story's declared `### Scope` after the
-engine exits and refuses the delivery if anything falls outside it.
+Capacity Pool owns model/provider choice, credentials, command construction,
+health, leases, and fallback. This wrapper owns the product mutation boundary:
+it supplies the Story prompt, validates changed paths, runs product tests, and
+writes the linked pull request only after those checks pass.
 """
 
 from __future__ import annotations
@@ -64,12 +29,18 @@ from dataclasses import dataclass
 
 HERE = pathlib.Path(__file__).resolve().parent
 ROOT = HERE.parents[2]
+sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "factory" / "gates"))
 sys.path.insert(0, str(ROOT / "factory" / "runtime"))
 import merge_gate  # noqa: E402
 import observability as obs  # noqa: E402
 import runlog  # noqa: E402
-import streaming  # noqa: E402
+from factory.capacity_pool.executor import CapacityExecutor  # noqa: E402
+from factory.capacity_pool.policy import POLICIES, resolved_registry  # noqa: E402
+from factory.capacity_pool.providers import (  # noqa: E402
+    InvocationPayload, cli_adapter, provider_environment,
+)
+from factory.capacity_pool.state import CapacityState  # noqa: E402
 
 DEFAULT_TIMEOUT = 3600
 DEFAULT_MAX_USD = 40.0
@@ -139,38 +110,8 @@ def platform_diagnostics(checkout: pathlib.Path) -> dict:
     return result
 
 
-@dataclass(frozen=True)
-class Credential:
-    """One way an engine resolves its own login, and what that costs us."""
-
-    source: str
-    variables: tuple[str, ...] = ()
-    platforms: tuple[str, ...] = ()  # empty means every platform
-
-    def on(self, platform: str) -> bool:
-        return not self.platforms or platform.startswith(self.platforms)
-
-
-# Not credentials: the tools, locale and scratch space any engine needs.
+# Not credentials: tools, locale, and scratch space for product tests.
 BASE_ENVIRONMENT = ("PATH", "LANG", "LC_ALL", "TMPDIR", "SHELL")
-
-# How each engine logs in. Platform-specific by nature — see the module
-# docstring for why this is a table and not one shared list of names.
-ENGINE_CREDENTIALS: dict[str, tuple[Credential, ...]] = {
-    "claude": (
-        Credential("macOS login keychain, resolved for the calling user",
-                   ("USER",), ("darwin",)),
-        Credential("credential file under the operator's home directory",
-                   ("HOME",), ("linux",)),
-        Credential("explicit API key", ("ANTHROPIC_API_KEY",)),
-        Credential("explicit OAuth token", ("CLAUDE_CODE_OAUTH_TOKEN",)),
-    ),
-    # Verified 2026-08-22: `codex exec` authenticates under an environment
-    # holding nothing but the base set, on either platform.
-    "codex": (
-        Credential("engine-managed session, needing nothing from this environment"),
-    ),
-}
 
 
 @dataclass(frozen=True)
@@ -289,24 +230,6 @@ def linked_prs(story: int, pulls: list[dict]) -> list[dict]:
     return found
 
 
-def credential_sources(engine: str | None,
-                       platform: str | None = None) -> tuple[Credential, ...]:
-    """The logins reachable on this platform, for the engine being launched.
-
-    `None` means the subprocess is not an engine at all and has nothing to log
-    in to, so it gets no credential. A *named* engine we do not recognise —
-    anything launched through `FACTORY_DELIVERY_MODEL_CMD` — gets every
-    declared engine's sources, since we cannot tell which one it will look for.
-    """
-    if engine is None:
-        return ()
-    platform = sys.platform if platform is None else platform
-    declared = ((ENGINE_CREDENTIALS[engine],) if engine in ENGINE_CREDENTIALS
-                else tuple(ENGINE_CREDENTIALS.values()))
-    return tuple(source for group in declared for source in group
-                 if source.on(platform))
-
-
 def tool_environment(environ=None) -> dict[str, str]:
     """Tools, locale and scratch space — what a non-engine subprocess gets.
 
@@ -316,77 +239,6 @@ def tool_environment(environ=None) -> dict[str, str]:
     environ = os.environ if environ is None else environ
     return {key: value for key, value in environ.items()
             if key in BASE_ENVIRONMENT}
-
-
-def clean_environment(engine: str | None, platform: str | None = None,
-                      environ=None) -> dict[str, str]:
-    """Allowlist an engine's environment: the tool set, plus its own logins."""
-    environ = os.environ if environ is None else environ
-    keep = {name for source in credential_sources(engine, platform)
-            for name in source.variables}
-    return tool_environment(environ) | {key: value for key, value
-                                        in environ.items() if key in keep}
-
-
-def unreachable_credentials(engine: str | None, env: dict[str, str],
-                            platform: str | None = None) -> list[Credential]:
-    """Declared logins this environment has cut the engine off from.
-
-    Empty means every way the engine knows how to authenticate on this platform
-    survived the allowlist. This is the question a test should ask — an engine
-    that cannot log in is the failure, not the absence of a particular name.
-    """
-    return [source for source in credential_sources(engine, platform)
-            if not all(name in env for name in source.variables)]
-
-
-def engine_name(command: list[str]) -> str | None:
-    """The engine a model command launches, recognised or not.
-
-    Every model command launches *some* engine, so the name is returned even
-    when it is not in `ENGINE_CREDENTIALS` — an operator's own
-    `FACTORY_DELIVERY_MODEL_CMD` still has to log in. `None` is reserved for
-    "there is no command", which is not an engine launch.
-    """
-    if not command:
-        return None
-    return pathlib.PurePath(command[0]).name.lower()
-
-
-def model_command(input_file: str, bounds: Bounds,
-                  engine: str = "claude") -> list[str]:
-    template = os.environ.get("FACTORY_DELIVERY_MODEL_CMD", "").strip()
-    if template:
-        return [part.replace("{input_file}", input_file)
-                    .replace("{max_usd}", str(bounds.max_usd))
-                    .replace("{timeout}", str(bounds.timeout))
-                for part in shlex.split(template)]
-    prompt = HERE.joinpath("prompt.md").read_text()
-    payload = prompt + "\n\n## Invocation input\n\n" + pathlib.Path(input_file).read_text()
-    if engine == "codex":
-        # Codex has no CLI dollar-cap option. The enclosing subprocess timeout
-        # still enforces the Story's time bound, and its JSONL events preserve
-        # the usage it actually reports. Do not invent a spend guarantee.
-        # --approve-for-me supplies the workspace-write sandbox itself. Codex
-        # rejects combining it with an explicit --sandbox option.
-        return ["codex", "exec", "--approve-for-me", "--ephemeral",
-                "--ignore-user-config", "--json", payload]
-    if engine != "claude":
-        raise DeliveryError(f"unsupported delivery engine: {engine}")
-    effort = os.environ.get("FACTORY_DELIVERY_CLAUDE_EFFORT", "low").strip().lower()
-    if effort not in {"low", "medium", "high", "xhigh", "max"}:
-        raise DeliveryError(
-            "FACTORY_DELIVERY_CLAUDE_EFFORT must be low, medium, high, xhigh, or max")
-    # acceptEdits grants Edit/Write; dontAsk denies them. The Story asks the
-    # engine to change files, and `execute()` enforces the Story's Scope on
-    # what it changed afterwards. See the module docstring.
-    #
-    # stream-json exposes the engine lifecycle while preserving its usage.
-    return ["claude", "-p", payload, "--max-budget-usd", str(bounds.max_usd),
-            "--effort", effort,
-            "--permission-mode", "acceptEdits", "--output-format", "stream-json",
-            "--verbose",
-            "--no-session-persistence"]
 
 
 def printed(value) -> str:
@@ -425,66 +277,6 @@ def run(cmd: list[str], *, cwd: pathlib.Path, timeout: int, env=None,
             f"; stderr tail: {runlog.tail(result.stderr)}"
             f"; stdout tail: {runlog.tail(result.stdout)}",
             printed(result.stdout))
-    return result
-
-
-def run_engine_streamed(cmd: list[str], *, cwd: pathlib.Path, timeout: int,
-                        env, story: int, project: int | None) -> subprocess.CompletedProcess:
-    """Stream bounded, redacted engine output while retaining usage evidence."""
-    try:
-        return streaming.run(
-            cmd, cwd=cwd, env=env, timeout=timeout,
-            component="delivery-worker", operation="engine-stream",
-            story=story, project=project, engine=engine_name(cmd))
-    except subprocess.TimeoutExpired as exc:
-        detail = f"bounded execution exhausted after {timeout}s"
-        stderr = printed(exc.stderr)
-        if stderr:
-            detail += f"; stderr tail: {runlog.tail(stderr)}"
-        raise DeliveryError(detail, printed(exc.stdout)) from exc
-
-
-def launch_engine(cmd: list[str], *, cwd: pathlib.Path, timeout: int, env,
-                  story: int, project: int | None = None,
-                  runner=subprocess.run) -> subprocess.CompletedProcess:
-    """Run the delivery engine, recording what it reported about its usage.
-
-    One runtime-log record per invocation, whether the launch completed or
-    failed. Nothing is inferred: if the engine said nothing about its usage the
-    record says exactly that, and no number is invented to stand in for it.
-    """
-    engine = engine_name(cmd)
-    try:
-        if runner is subprocess.run:
-            result = run_engine_streamed(
-                cmd, cwd=cwd, timeout=timeout, env=env,
-                story=story, project=project)
-            if result.returncode:
-                raise DeliveryError(
-                    f"command failed ({result.returncode})"
-                    f"; stderr tail: {runlog.tail(result.stderr)}"
-                    f"; stdout tail: {runlog.tail(result.stdout)}",
-                    printed(result.stdout))
-        else:
-            result = run(cmd, cwd=cwd, timeout=timeout, env=env, runner=runner)
-    except DeliveryError as error:
-        runlog.engine_usage(story=story, project=project, engine=engine,
-                            phase="worker", launch="failed", output=error.output)
-        raise
-    runlog.engine_usage(story=story, project=project, engine=engine,
-                        phase="worker", launch="completed",
-                        output=printed(getattr(result, "stdout", None)))
-    # Usage accounting alone cannot explain a successful engine process that
-    # leaves the worktree unchanged. Preserve only the bounded, credential-
-    # redacted tail so a later wrapper failure has the engine's own final
-    # explanation without turning the operation log into a prompt transcript.
-    obs.operational_log(
-        "INFO", "delivery engine completed",
-        component="delivery-worker", operation="engine-output",
-        story=story, project=project, engine=engine,
-        engine_output_tail=runlog.tail(
-            printed(getattr(result, "stdout", None))),
-    )
     return result
 
 
@@ -574,8 +366,8 @@ def read_back_pr(client: GitHub, story_number: int, durable: str,
 
 def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
             *, timeout: int | None = None, max_usd: float | None = None,
-            engine: str = "claude", runner=subprocess.run,
-            client: GitHub | None = None) -> Delivery:
+            runner=subprocess.run, client: GitHub | None = None,
+            state: CapacityState | None = None, registry=None) -> Delivery:
     client = client or GitHub(repo, token)
     metadata = client.api("")  # read preflight before any write
     default = metadata.get("default_branch")
@@ -622,21 +414,74 @@ def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
         git(["worktree", "add", "--detach", str(worktree), base_ref], checkout,
             runner=runner)
         try:
-            with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as handle:
-                json.dump(value, handle)
-                input_file = handle.name
+            prompt = (HERE.joinpath("prompt.md").read_text()
+                      + "\n\n## Invocation input\n\n" + json.dumps(value, indent=2))
+            owns_state = state is None
+            if state is None:
+                configured = os.environ.get("FACTORY_CAPACITY_STATE", "").strip()
+                state_path = (pathlib.Path(configured) if configured else
+                              checkout / "runs" / "capacity-pool.sqlite")
+                state_path.parent.mkdir(parents=True, exist_ok=True)
+                state = CapacityState(state_path, uri=False)
             try:
-                command = model_command(input_file, bounds, engine)
+                available = tuple(registry or resolved_registry(health=state.health))
+                labels_set = set(labels(story))
+                triggers = frozenset(
+                    name for name, candidates in {
+                        "hazard": {"hazard", "risk:hazard"},
+                        "high-complexity": {"high-complexity", "complexity:high"},
+                    }.items() if labels_set & candidates)
+                request = POLICIES["delivery"].request(
+                    triggers=triggers, total_timeout_seconds=bounds.timeout,
+                    total_budget_units=bounds.max_usd)
+
+                def mutation_state():
+                    return ("post-mutation" if changed_paths(
+                        worktree, f"origin/{default}", runner=runner) else "none")
+
+                adapters = {provider: cli_adapter(
+                    provider, cwd=worktree,
+                    environment=provider_environment(provider), runner=runner,
+                    mutation_state=mutation_state)
+                    for provider in {item.provider for item in available}}
+                capacity = CapacityExecutor(
+                    adapters, state,
+                    telemetry=lambda **fields: obs.telemetry(
+                        component="delivery-worker", operation="capacity-route",
+                        story=story_number, project=project_number, **fields))
+
+                def validate(_output):
+                    produced = changed_paths(
+                        worktree, f"origin/{default}", runner=runner)
+                    if not produced:
+                        raise DeliveryError("worker produced no repository changes")
+                    outside = merge_gate.paths_out_of_scope(produced, scope)
+                    if outside:
+                        raise DeliveryError("worker changed paths outside Story scope: "
+                                            + ", ".join(outside))
+
                 with obs.Activity("delivery-worker", "engine", "executing",
                                   trace_id=delivery_trace, repo=repo,
-                                  story=story_number, project=project_number,
-                                  engine=engine_name(command)):
-                    launch_engine(command, cwd=worktree, timeout=bounds.timeout,
-                                  env=clean_environment(engine_name(command)),
-                                  story=story_number, project=project_number,
-                                  runner=runner)
+                                  story=story_number, project=project_number):
+                    result = capacity.execute(
+                        task_key=f"delivery:{repo}:{story_number}:{version}",
+                        request=request, registry=available,
+                        payload=InvocationPayload(prompt, access="workspace-write"),
+                        validate=validate)
+                if result.attempts:
+                    final_attempt = result.attempts[-1]
+                    runlog.engine_usage(
+                        story=story_number, project=project_number,
+                        engine=final_attempt["model"], phase="worker",
+                        launch=("completed" if result.outcome == "success" else "failed"),
+                        output=result.output)
+                if result.outcome != "success":
+                    detail = f": {result.output}" if result.output else ""
+                    raise DeliveryError(
+                        f"delivery capacity failed: {result.outcome}{detail}")
             finally:
-                pathlib.Path(input_file).unlink(missing_ok=True)
+                if owns_state:
+                    state.close()
             paths = changed_paths(worktree, f"origin/{default}", runner=runner)
             if not paths:
                 raise DeliveryError("worker produced no repository changes")
@@ -680,8 +525,6 @@ def main(argv=None) -> int:
     parser.add_argument("--repo", required=True)
     parser.add_argument("--story", required=True, type=int)
     parser.add_argument("--checkout", default=str(ROOT))
-    parser.add_argument("--engine", choices=sorted(ENGINE_CREDENTIALS),
-                        default="claude")
     parser.add_argument("--timeout", type=int)
     parser.add_argument("--max-usd", type=float)
     args = parser.parse_args(argv)
@@ -692,8 +535,7 @@ def main(argv=None) -> int:
     try:
         with checkout_for_repo(args.repo, pathlib.Path(args.checkout)) as checkout:
             result = execute(args.repo, args.story, token, checkout,
-                             timeout=args.timeout, max_usd=args.max_usd,
-                             engine=args.engine)
+                             timeout=args.timeout, max_usd=args.max_usd)
     except Exception as exc:
         obs.operational_log("ERROR", "delivery worker failed", exc=exc,
                             component="delivery-worker", operation="delivery",

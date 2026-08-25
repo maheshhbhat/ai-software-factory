@@ -210,7 +210,7 @@ def configured_workers() -> list[WorkerSpec]:
     Order comes from `FACTORY_WORKER_ORDER` — configuration, not judgment. The
     selector never reorders, scores, or second-guesses it (#84 item 4).
     """
-    order = os.environ.get("FACTORY_WORKER_ORDER", "claude-delivery,codex-delivery")
+    order = os.environ.get("FACTORY_WORKER_ORDER", "capacity-delivery")
     specs = []
     for name in (n.strip() for n in order.split(",") if n.strip()):
         spec = _spec_from_env(name)
