@@ -68,6 +68,11 @@ class Doctor:
         self.commitment, self.target = commitment, target
         self.mode = mode
         self.env = dict(os.environ if environ is None else environ)
+        # poll.sh always supplies the selected repository to the mutable
+        # poller. Bind the doctor to the same effective configuration before
+        # fingerprinting its receipt; a stale caller value must not win over
+        # the explicit --repo argument.
+        self.env["FACTORY_REPO"] = repo
         self.runner = runner or subprocess.run
         self.checks: list[Check] = []
         self.token = ""
