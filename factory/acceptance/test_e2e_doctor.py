@@ -116,6 +116,105 @@ class SafetyTests(unittest.TestCase):
 
 
 class GitHubChecks(unittest.TestCase):
+    def test_preplanned_mode_requires_exact_declared_unstarted_stories(self):
+        project_body = """### Stories
+
+#402
+#403
+
+### Roadmap commitment
+
+#384
+"""
+        payload={"data":{"repository":{"isPrivate":False,"viewerPermission":"ADMIN",
+          "autoMergeAllowed":True,
+          "project":{"number":400,"state":"OPEN","body":project_body,
+                     "labels":{"nodes":[{"name":"type:project"},{"name":"project:active"}]}},
+          "commitment":{"number":384,"state":"OPEN","body":"real product outcome",
+                        "labels":{"nodes":[{"name":"type:roadmap-commitment"}]}},
+          "issues":{"nodes":[
+              {"number":400,"body":"### Roadmap commitment\n\n#384\n",
+               "labels":{"nodes":[{"name":"type:project"}]}},
+              {"number":402,"body":"### Project\n\n#400\n",
+               "labels":{"nodes":[{"name":"type:story"},{"name":"story:ready"}]}},
+              {"number":403,"body":"### Project\n\n#400\n",
+               "labels":{"nodes":[{"name":"type:story"},{"name":"story:blocked"}]}}],
+              "pageInfo":{"hasNextPage":False}},
+          "defaultBranchRef":{"branchProtectionRule":{
+              "requiredStatusCheckContexts":["merge-gate"]}}},
+          "rateLimit":{"remaining":4999,"resetAt":"later"}}}
+        def respond(args, **_):
+            if "issues?state=open" in args[-1]:
+                return completed(args, stdout="[]")
+            if args[-1].endswith("/rulesets"):
+                return completed(args, stdout="[]")
+            return completed(args, stdout=json.dumps(payload))
+        value=doctor.Doctor("owner/repo",400,commitment=384,target="",
+                            mode="preplanned",environ={"PATH":"/bin"},runner=respond)
+        value.token="token"; value.github()
+        self.assertTrue(all(check.passed for check in value.checks), value.checks)
+        self.assertNotIn("test-only commitment", [row.name for row in value.checks])
+
+    def test_preplanned_mode_blocks_undeclared_or_started_story(self):
+        project_body = "### Stories\n\n#402\n\n### Roadmap commitment\n\n#384\n"
+        payload={"data":{"repository":{"isPrivate":False,"viewerPermission":"ADMIN",
+          "autoMergeAllowed":True,
+          "project":{"number":400,"state":"OPEN","body":project_body,
+                     "labels":{"nodes":[{"name":"type:project"},{"name":"project:active"}]}},
+          "commitment":{"number":384,"state":"OPEN","body":"real product outcome",
+                        "labels":{"nodes":[{"name":"type:roadmap-commitment"}]}},
+          "issues":{"nodes":[
+              {"number":400,"body":"### Roadmap commitment\n\n#384\n",
+               "labels":{"nodes":[{"name":"type:project"}]}},
+              {"number":402,"body":"### Project\n\n#400\n",
+               "labels":{"nodes":[{"name":"type:story"},{"name":"story:claimed"}]}},
+              {"number":403,"body":"### Project\n\n#400\n",
+               "labels":{"nodes":[{"name":"type:story"},{"name":"story:blocked"}]}}],
+              "pageInfo":{"hasNextPage":False}},
+          "defaultBranchRef":{"branchProtectionRule":{
+              "requiredStatusCheckContexts":["merge-gate"]}}},
+          "rateLimit":{"remaining":4999,"resetAt":"later"}}}
+        def respond(args, **_):
+            if "issues?state=open" in args[-1]: return completed(args, stdout="[]")
+            if args[-1].endswith("/rulesets"): return completed(args, stdout="[]")
+            return completed(args, stdout=json.dumps(payload))
+        value=doctor.Doctor("owner/repo",400,commitment=384,target="",
+                            mode="preplanned",environ={"PATH":"/bin"},runner=respond)
+        value.token="token"; value.github()
+        check=next(row for row in value.checks
+                   if row.name=="isolated preplanned Project")
+        self.assertFalse(check.passed)
+        self.assertIn("declared=[402]", check.detail)
+
+    def test_preplanned_mode_requires_human_approved_project(self):
+        payload={"data":{"repository":{"isPrivate":False,"viewerPermission":"ADMIN",
+          "autoMergeAllowed":True,
+          "project":{"number":400,"state":"OPEN",
+                     "body":"### Stories\n\n#402\n\n### Roadmap commitment\n\n#384\n",
+                     "labels":{"nodes":[{"name":"type:project"},
+                                          {"name":"project:awaiting-ready"}]}},
+          "commitment":{"number":384,"state":"OPEN","body":"real product outcome",
+                        "labels":{"nodes":[{"name":"type:roadmap-commitment"}]}},
+          "issues":{"nodes":[
+              {"number":400,"body":"### Roadmap commitment\n\n#384\n",
+               "labels":{"nodes":[{"name":"type:project"}]}},
+              {"number":402,"body":"### Project\n\n#400\n",
+               "labels":{"nodes":[{"name":"type:story"},
+                                    {"name":"story:blocked"}]}}],
+              "pageInfo":{"hasNextPage":False}},
+          "defaultBranchRef":{"branchProtectionRule":{
+              "requiredStatusCheckContexts":["merge-gate"]}}},
+          "rateLimit":{"remaining":4999,"resetAt":"later"}}}
+        def respond(args, **_):
+            if "issues?state=open" in args[-1]: return completed(args, stdout="[]")
+            if args[-1].endswith("/rulesets"): return completed(args, stdout="[]")
+            return completed(args, stdout=json.dumps(payload))
+        value=doctor.Doctor("owner/repo",400,commitment=384,target="",
+                            mode="preplanned",environ={"PATH":"/bin"},runner=respond)
+        value.token="token"; value.github()
+        check=next(row for row in value.checks if row.name=="Project authorization")
+        self.assertFalse(check.passed)
+
     def test_disabled_repository_auto_merge_blocks_readiness(self):
         payload={"data":{"repository":{"isPrivate":False,"viewerPermission":"ADMIN",
           "autoMergeAllowed":False,
@@ -337,6 +436,41 @@ class LocalChecks(unittest.TestCase):
         self.assertFalse(value.checks[0].passed)
         self.assertIn("FACTORY_DELIVERY_MODEL_CMD",value.checks[0].detail)
 
+    def test_preplanned_mode_requires_clean_exact_origin_main(self):
+        responses = {
+            ("git", "status", "--porcelain"): completed([], stdout=""),
+            ("git", "rev-parse", "HEAD"): completed([], stdout="a" * 40 + "\n"),
+            ("git", "rev-parse", "origin/main"): completed([], stdout="a" * 40 + "\n"),
+            ("pgrep", "-f", "[f]actory/runtime/poller.py"):
+                completed([], code=1),
+        }
+        value=doctor.Doctor("owner/repo",400,commitment=384,target="",
+                            mode="preplanned",environ={"PATH":"/bin"},
+                            runner=RecordingRunner(responses))
+        with mock.patch.object(doctor.shutil, "which", return_value="/bin/tool"):
+            value.local()
+        check=next(row for row in value.checks
+                   if row.name=="clean merged factory revision")
+        self.assertTrue(check.passed, check)
+
+    def test_preplanned_mode_blocks_dirty_or_unmerged_revision(self):
+        responses = {
+            ("git", "status", "--porcelain"):
+                completed([], stdout=" M factory/acceptance/e2e_doctor.py\n"),
+            ("git", "rev-parse", "HEAD"): completed([], stdout="a" * 40 + "\n"),
+            ("git", "rev-parse", "origin/main"): completed([], stdout="b" * 40 + "\n"),
+            ("pgrep", "-f", "[f]actory/runtime/poller.py"):
+                completed([], code=1),
+        }
+        value=doctor.Doctor("owner/repo",400,commitment=384,target="",
+                            mode="preplanned",environ={"PATH":"/bin"},
+                            runner=RecordingRunner(responses))
+        with mock.patch.object(doctor.shutil, "which", return_value="/bin/tool"):
+            value.local()
+        check=next(row for row in value.checks
+                   if row.name=="clean merged factory revision")
+        self.assertFalse(check.passed)
+
     def test_observability_smoke_writes_all_streams_and_a_heartbeat(self):
         value=doctor.Doctor("owner/repo",400,commitment=384,
                             target="runs/rung1/live_product/project-400/app.py",
@@ -377,6 +511,27 @@ class LocalChecks(unittest.TestCase):
         self.assertIn("PASS  one",text)
         self.assertIn("FAIL  two",text)
         self.assertIn("BLOCKED — fix 1 failure",text)
+
+    def test_preplanned_cli_does_not_require_target_and_binds_project_identity(self):
+        checks = [doctor.Check("probe", True, "answered")]
+        with tempfile.TemporaryDirectory() as root:
+            path = pathlib.Path(root) / "ready.json"
+            with mock.patch.object(doctor, "Doctor") as doctor_class, \
+                 mock.patch.object(doctor.readiness_receipt, "factory_revision",
+                                   return_value="a" * 40):
+                doctor_class.return_value.run.return_value = checks
+                doctor_class.return_value.env = {}
+                code = doctor.main([
+                    "--repo", "owner/repo", "--project", "60",
+                    "--commitment", "59", "--mode", "preplanned",
+                    "--receipt", str(path)])
+            self.assertEqual(0, code)
+            self.assertEqual("project:60", json.loads(path.read_text())["target"])
+            self.assertEqual("preplanned", doctor_class.call_args.kwargs["mode"])
+
+    def test_rehearsal_cli_still_requires_target(self):
+        with self.assertRaises(SystemExit):
+            doctor.main(["--project", "400", "--commitment", "384"])
 
 
 if __name__ == "__main__":

@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Readiness doctor for the real two-Story factory UAT.
+"""Readiness doctor for disposable rehearsals and approved planned Projects.
+
+The default ``rehearsal`` mode preserves the strict empty test-commitment and
+fresh-target checks used by the fixture harness.  ``preplanned`` mode is for a
+real Project whose Stories already exist: it requires clean merged factory
+code and proves that the commitment contains exactly that Project and the
+Project contains exactly its declared, not-yet-started Stories.
 
 This command may read GitHub, inspect local processes, and run ``poll.sh`` with
 ``--dry-run``.  It creates and removes one temporary detached Git worktree and
@@ -55,9 +61,12 @@ class Check:
 
 class Doctor:
     def __init__(self, repo: str, project: int, *, commitment: int, target: str,
-                 environ=None, runner=None):
+                 mode: str = "rehearsal", environ=None, runner=None):
+        if mode not in {"rehearsal", "preplanned"}:
+            raise ValueError("mode must be 'rehearsal' or 'preplanned'")
         self.repo, self.project = repo, project
         self.commitment, self.target = commitment, target
+        self.mode = mode
         self.env = dict(os.environ if environ is None else environ)
         self.runner = runner or subprocess.run
         self.checks: list[Check] = []
@@ -80,9 +89,21 @@ class Doctor:
         self.record("required binaries", not missing,
                     "available" if not missing else "missing: " + ", ".join(missing))
         status = self.command(["git", "status", "--porcelain"])
-        self.record("local candidate", status.returncode == 0 and bool(status.stdout.strip()),
-                    "local uncommitted candidate present" if status.stdout.strip()
-                    else "no local candidate changes found")
+        if self.mode == "rehearsal":
+            self.record("local candidate", status.returncode == 0 and bool(status.stdout.strip()),
+                        "local uncommitted candidate present" if status.stdout.strip()
+                        else "no local candidate changes found")
+        else:
+            head = self.command(["git", "rev-parse", "HEAD"])
+            upstream = self.command(["git", "rev-parse", "origin/main"])
+            allowed = {"?? runs/capacity-pool.sqlite"}
+            changes = {row for row in status.stdout.splitlines() if row not in allowed}
+            clean_merged = (status.returncode == head.returncode == upstream.returncode == 0
+                            and not changes
+                            and head.stdout.strip() == upstream.stdout.strip())
+            detail = (f"HEAD={head.stdout.strip()[:12]}; origin/main="
+                      f"{upstream.stdout.strip()[:12]}; changes={sorted(changes)}")
+            self.record("clean merged factory revision", clean_merged, detail)
         processes = self.command(["pgrep", "-f", "[f]actory/runtime/poller.py"])
         self.record("no competing poller", processes.returncode == 1,
                     "none running" if processes.returncode == 1
@@ -209,9 +230,11 @@ class Doctor:
                      (rest.stderr or rest.stdout).strip()[:300]))
         project = repo.get("project") or {}
         labels = {item["name"] for item in (project.get("labels") or {}).get("nodes", [])}
+        allowed_project_states = ({"project:active"} if self.mode == "preplanned"
+                                  else {"project:awaiting-ready", "project:active"})
         project_ok = (project.get("state") == "OPEN" and "type:project" in labels and
                       len({x for x in labels if x.startswith("project:")}) == 1 and
-                      labels & {"project:awaiting-ready", "project:active"} and
+                      bool(labels & allowed_project_states) and
                       re.search(r"(?m)^### Roadmap commitment\s*$\n\s*#"
                                 + re.escape(str(self.commitment)) + r"\s*$",
                                 project.get("body") or ""))
@@ -220,11 +243,18 @@ class Doctor:
         commitment = repo.get("commitment") or {}
         commitment_labels = {item["name"] for item in
                              (commitment.get("labels") or {}).get("nodes", [])}
-        self.record("test-only commitment",
-                    commitment.get("state") == "OPEN" and
-                    "type:roadmap-commitment" in commitment_labels and
-                    "No product or factory implementation work" in (commitment.get("body") or ""),
-                    f"Commitment #{self.commitment} remains open and test-only")
+        commitment_ok = (commitment.get("state") == "OPEN" and
+                         "type:roadmap-commitment" in commitment_labels)
+        if self.mode == "rehearsal":
+            commitment_ok = (commitment_ok and
+                             "No product or factory implementation work" in
+                             (commitment.get("body") or ""))
+            commitment_name = "test-only commitment"
+            commitment_detail = f"Commitment #{self.commitment} remains open and test-only"
+        else:
+            commitment_name = "open roadmap commitment"
+            commitment_detail = f"Commitment #{self.commitment}; labels={sorted(commitment_labels)}"
+        self.record(commitment_name, commitment_ok, commitment_detail)
         inventory = repo.get("issues") or {}
         nodes = inventory.get("nodes") or []
         truncated = bool((inventory.get("pageInfo") or {}).get("hasNextPage"))
@@ -245,11 +275,36 @@ class Doctor:
                 r"(?m)^### Project\s*$\n\s*#"
                 + re.escape(str(self.project)) + r"\s*$",
                 item.get("body") or ""))
-        isolated = (not truncated and commitment_projects == [self.project]
-                    and not existing_stories)
+        if self.mode == "rehearsal":
+            isolated = (not truncated and commitment_projects == [self.project]
+                        and not existing_stories)
+            isolation_name = "isolated test commitment"
+        else:
+            stories_match = re.search(
+                r"(?ms)^### Stories\s*$\n(.*?)(?=^### |\Z)",
+                project.get("body") or "")
+            declared_stories = sorted(
+                int(value) for value in re.findall(
+                    r"(?m)^\s*#(\d+)\s*$",
+                    stories_match.group(1) if stories_match else ""))
+            story_nodes = [item for item in nodes if item.get("number") in declared_stories]
+            allowed_story_states = {"story:blocked", "story:ready"}
+            lifecycle_ok = all(
+                len({label for label in issue_labels(item)
+                     if label.startswith("story:")}) == 1 and
+                bool(issue_labels(item) & allowed_story_states)
+                for item in story_nodes)
+            isolated = (not truncated and commitment_projects == [self.project]
+                        and bool(declared_stories)
+                        and existing_stories == declared_stories
+                        and len(story_nodes) == len(declared_stories)
+                        and lifecycle_ok)
+            isolation_name = "isolated preplanned Project"
         details = (f"projects={commitment_projects}; stories={existing_stories}"
                    + ("; open issue inventory exceeds 100" if truncated else ""))
-        self.record("isolated test commitment", isolated, details)
+        if self.mode == "preplanned":
+            details += f"; declared={declared_stories}"
+        self.record(isolation_name, isolated, details)
         protection = ((repo.get("defaultBranchRef") or {}).get("branchProtectionRule") or {})
         contexts = set(protection.get("requiredStatusCheckContexts") or [])
         rulesets = self.command(["gh", "api", f"repos/{self.repo}/rulesets"],
@@ -374,16 +429,21 @@ class Doctor:
     def run(self) -> list[Check]:
         self.local(); self.worktree(); self.substitutions(); self.credentials()
         self.worker_engine_start(); self.github()
-        self.configuration(); self.target_freshness(); self.observability(); self.dry_run()
+        self.configuration()
+        if self.mode == "rehearsal":
+            self.target_freshness()
+        self.observability(); self.dry_run()
         return self.checks
 
 
-def render(checks: list[Check]) -> str:
+def render(checks: list[Check], *, mode: str = "rehearsal") -> str:
     lines = [f"{'PASS' if item.passed else 'FAIL'}  {item.name} — {item.detail}"
              for item in checks]
     failures = sum(not item.passed for item in checks)
-    lines.append("READY — no E2E artifacts were created" if failures == 0 else
-                 f"BLOCKED — fix {failures} failure(s) before E2E")
+    ready = ("READY — approved preplanned Project may enter delivery"
+             if mode == "preplanned" else "READY — no E2E artifacts were created")
+    lines.append(ready if failures == 0 else
+                 f"BLOCKED — fix {failures} failure(s) before delivery")
     return "\n".join(lines)
 
 
@@ -392,7 +452,9 @@ def main(argv=None) -> int:
     parser.add_argument("--repo", default=DEFAULT_REPO)
     parser.add_argument("--project", required=True, type=int)
     parser.add_argument("--commitment", required=True, type=int)
-    parser.add_argument("--target", required=True)
+    parser.add_argument("--target", default="")
+    parser.add_argument("--mode", choices=("rehearsal", "preplanned"),
+                        default="rehearsal")
     parser.add_argument("--receipt",
                         help="readiness receipt path (default: scoped temp path)")
     args = parser.parse_args(argv)
@@ -400,17 +462,20 @@ def main(argv=None) -> int:
         parser.error("--project must be positive")
     if args.commitment <= 0:
         parser.error("--commitment must be positive")
+    if args.mode == "rehearsal" and not args.target:
+        parser.error("--target is required in rehearsal mode")
     instance = Doctor(args.repo, args.project, commitment=args.commitment,
-                      target=args.target)
+                      target=args.target, mode=args.mode)
     checks = instance.run()
-    print(render(checks))
+    print(render(checks, mode=args.mode))
     if not all(item.passed for item in checks):
         return 1
     path = (pathlib.Path(args.receipt) if args.receipt else
             readiness_receipt.default_path(args.repo, args.commitment))
     payload = readiness_receipt.issue(
         path, repo=args.repo, commitment=args.commitment, project=args.project,
-        target=args.target, revision=readiness_receipt.factory_revision(ROOT),
+        target=(args.target or f"project:{args.project}"),
+        revision=readiness_receipt.factory_revision(ROOT),
         environ=instance.env,
         checks=[{"name": row.name, "passed": row.passed, "detail": row.detail}
                 for row in checks])
