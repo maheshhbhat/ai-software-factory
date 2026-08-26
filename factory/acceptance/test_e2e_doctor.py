@@ -32,6 +32,17 @@ class RecordingRunner:
 
 
 class SafetyTests(unittest.TestCase):
+    def test_explicit_repo_is_bound_into_receipt_configuration(self):
+        value = doctor.Doctor(
+            "owner/product", 60, commitment=59, target="", mode="preplanned",
+            environ={"FACTORY_REPO": "stale/other"})
+        self.assertEqual("owner/product", value.env["FACTORY_REPO"])
+        doctor_fingerprint = doctor.readiness_receipt.configuration_fingerprint(
+            value.env)
+        poller_fingerprint = doctor.readiness_receipt.configuration_fingerprint(
+            {"FACTORY_REPO": "owner/product"})
+        self.assertEqual(poller_fingerprint, doctor_fingerprint)
+
     def test_successful_main_writes_scoped_receipt(self):
         checks = [doctor.Check("probe", True, "answered")]
         with tempfile.TemporaryDirectory() as root:
