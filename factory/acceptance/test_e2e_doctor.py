@@ -214,10 +214,15 @@ class LocalChecks(unittest.TestCase):
             environ={"PATH": "/bin"},
             runner=respond)
         value.worker_engine_start()
+        # One probe per registry entry that is enabled without environment
+        # configuration — count it from the registry itself so adding a model
+        # does not silently rot this test.
+        enabled = [item for item in doctor.resolved_registry({"PATH": "/bin"})
+                   if item.available]
         probes = [row for row in value.checks if row.name.startswith("capacity probe")]
-        self.assertEqual(4, len(probes))
+        self.assertEqual(len(enabled), len(probes))
         self.assertTrue(all(row.passed for row in probes))
-        self.assertEqual(4, len(calls))
+        self.assertEqual(len(enabled), len(calls))
 
     def test_one_provider_success_does_not_hide_another_failure(self):
         count = 0
