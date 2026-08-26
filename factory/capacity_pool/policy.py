@@ -78,6 +78,19 @@ REGISTRY = (
     RegistryEntry("gpt-5.6-sol", "openai", "gpt-5.6-sol", Tier.FLAGSHIP,
                   frozenset({"reason", "json", "code", "write", "tests"}),
                   frozenset({"medium", "high", "max"})),
+    # The four entries below were added from the Codex CLI's own model catalog
+    # (~/.codex/models_cache.json) and the Claude CLI, each verified by a live
+    # adapter probe answering CAPACITY_OK on 2026-08-25. Hidden internal
+    # catalog entries (gpt-reserve, codex-auto-review) are deliberately absent.
+    RegistryEntry("gpt-5.5", "openai", "gpt-5.5", Tier.FLAGSHIP,
+                  frozenset({"reason", "json", "code", "write", "tests"}),
+                  frozenset({"medium", "high", "max"})),
+    RegistryEntry("gpt-5.4", "openai", "gpt-5.4", Tier.BALANCED,
+                  frozenset({"reason", "json", "code", "write", "tests"}),
+                  frozenset({"low", "medium", "high"})),
+    RegistryEntry("gpt-5.4-mini", "openai", "gpt-5.4-mini", Tier.ECONOMY,
+                  frozenset({"exact-answer", "basic-tools"}),
+                  frozenset({"low", "medium"})),
     RegistryEntry("anthropic-economy", "anthropic", None, Tier.ECONOMY,
                   frozenset({"exact-answer", "basic-tools"}), frozenset({"low"}),
                   enabled=False),
@@ -87,6 +100,12 @@ REGISTRY = (
     RegistryEntry("claude-fable-5", "anthropic", "claude-fable-5", Tier.FLAGSHIP,
                   frozenset({"reason", "json", "code", "write", "tests"}),
                   frozenset({"medium", "high", "max"})),
+    RegistryEntry("claude-opus-5", "anthropic", "claude-opus-5", Tier.FLAGSHIP,
+                  frozenset({"reason", "json", "code", "write", "tests"}),
+                  frozenset({"low", "medium", "high", "max"})),
+    RegistryEntry("claude-opus-4-8", "anthropic", "claude-opus-4-8", Tier.FLAGSHIP,
+                  frozenset({"reason", "json", "code", "write", "tests"}),
+                  frozenset({"low", "medium", "high", "max"})),
 )
 
 POLICIES = {
