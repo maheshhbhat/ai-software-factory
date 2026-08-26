@@ -19,7 +19,9 @@ Before another product run, the factory must:
 5. avoid claiming work when no eligible model route is reserved; and
 6. classify every invocation outcome and produce complete usage receipts; and
 7. produce one deterministic KPI bundle for a fresh independent 2–4 Story Rung
-   2 project.
+   2 project of **comparable difficulty** to the failed Rung 2, using the same
+   success thresholds and a new user-facing outcome rather than the exact failed
+   feature.
 
 This plan does not add a database, event bus, distributed scheduler, dashboard,
 or new human decision. It does not change Project #30 or #47 product code,
@@ -174,11 +176,14 @@ applicable, its durable worker-start event. The normalized outcomes are:
   and
 - `completed` — the bounded assignment and validation completed.
 
-Each terminal record also includes exact vendor cost when reported. When exact
-cost is unavailable it includes reproducible usage units plus a named reason;
-absence of both is a measurement-integrity failure. The report attributes each
-retry to one outcome and preserves lower-bound wording whenever any price is
-unknown.
+Each terminal record must include a complete reproducible usage receipt. Exact
+vendor dollar cost is required only when the provider exposes it. When exact
+cost is unavailable because capacity is subscription-backed, prepaid, or
+otherwise unpriced per invocation, the receipt must include normalized
+reproducible usage/capacity units plus a named reason that dollar cost is
+unavailable. Absence of both reproducible usage and an applicable exact cost is
+a measurement-integrity failure. The reporter must never fabricate a dollar
+equivalent, and it attributes each retry to one outcome.
 
 ## Evaluation plan
 
@@ -195,7 +200,7 @@ not merely the happy path.
 | Poller singleton | a same-key second poller reaches mutation | one owner runs, duplicates refuse, other keys run, and crash releases the lock |
 | Readiness independence | evaluator consumes a delivery/review verdict instead of exact-revision evidence | fresh evaluator checks map to all risk IDs on integrated `main` |
 | Worker outcome stages | never-started, mid-work, limit, and validation failures collapse to the same reason | every invocation has one stage-correct terminal outcome tied to start evidence |
-| Cost completeness | an invocation lacks both exact cost and reproducible usage with a reason | all invocation receipts reconcile and exact cost is reported only when complete |
+| Usage completeness | an invocation lacks reproducible usage, or a priced invocation cannot reconcile its exposed exact cost | all invocation receipts reconcile; normalized usage is present for every route, and exact dollar cost is reported only where the provider exposes it |
 
 The Project #30 and #47 evaluations may use preserved production-shaped
 fixtures for deterministic runs, but any claim about a current provider or real
@@ -216,15 +221,20 @@ browser must also execute the bounded live check it names.
 7. Add normalized terminal outcomes, retry attribution, and complete usage
    receipts.
 8. Run the four regression classes plus doctor, singleton, readiness, outcome,
-   and cost tests.
+   and usage/cost tests.
 9. Run the repository's existing requirement-coverage and full test commands.
-10. Run doctor, then execute a fresh independent 2–4 Story Rung 2 project. Do not
-   reuse Project #30, Project #47, or their corrective Stories as the qualifying
-   repeat.
+10. Run doctor, then execute a fresh independent 2–4 Story Rung 2 project using
+    a new user-facing outcome of **comparable difficulty** to the failed Rung 2.
+    Do not reuse Project #30, Project #47, or their corrective Stories as the
+    qualifying repeat. Apply the same Rung 2 success thresholds.
 11. Generate and freeze one Rung 2 report. Proceed to Rung 3 only if autonomy is
     at least 75%, relay is zero, escaped defects are zero, and measurement
-    integrity passes. The report must also attribute every retry and provide an
-    exact cost per accepted Story so the Rung 3 cost rule has a working ruler.
+    integrity passes. The report must attribute every retry and provide complete
+    normalized usage per accepted Story across all routes; it must also provide
+    exact dollar cost per accepted Story for the subset of routes where the
+    provider exposes exact pricing. Unavailable dollar pricing on a
+    subscription/prepaid route is not itself a progression failure when its
+    normalized usage receipt is complete and reproducible.
 
 All factory implementation must be performed directly by the Chief Architect
 workflow. The factory must not dispatch Stories that modify its own controls.
