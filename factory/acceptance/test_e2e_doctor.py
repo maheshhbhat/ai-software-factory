@@ -325,5 +325,153 @@ class LocalChecks(unittest.TestCase):
         self.assertIn("BLOCKED — fix 1 failure",text)
 
 
+class OperationalModeChecks(unittest.TestCase):
+    """mode="operational": is it safe to run the factory on real, ongoing
+    work? These checks must not require an empty commitment or a --target,
+    unlike the rehearsal-mode checks above."""
+
+    def test_invalid_mode_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "mode must be"):
+            doctor.Doctor("owner/repo", 400, commitment=384, mode="bogus")
+
+    def test_operational_mode_does_not_require_a_target(self):
+        value = doctor.Doctor("owner/repo", 400, commitment=384,
+                              mode="operational", environ={"PATH": "/bin"})
+        self.assertEqual("", value.target)
+
+    def test_operational_mode_skips_local_candidate_and_scopes_poller_check(self):
+        runner = RecordingRunner()
+        value = doctor.Doctor("owner/repo", 400, commitment=384, mode="operational",
+                              environ={"PATH": "/bin"}, runner=runner)
+        value.local()
+        names = [row.name for row in value.checks]
+        self.assertNotIn("local candidate", names)
+        self.assertIn("no competing poller for this repository", names)
+        pgrep_call = next(call for call in runner.calls if call[0][0] == "pgrep")
+        self.assertIn("owner/repo", pgrep_call[0][2])
+
+    def test_competing_poller_for_a_different_repository_does_not_block(self):
+        # A poller already running for a different repository is normal
+        # multi-product operation, not a competing claim on this repository's
+        # work — pgrep returncode 1 means no match for the scoped pattern.
+        def respond(args, **_):
+            return completed(args, code=1)
+        value = doctor.Doctor("owner/repo", 400, commitment=384, mode="operational",
+                              environ={"PATH": "/bin"}, runner=respond)
+        value.local()
+        check = next(row for row in value.checks
+                    if row.name == "no competing poller for this repository")
+        self.assertTrue(check.passed)
+
+    def test_operational_mode_skips_target_freshness_in_run(self):
+        # run() must not call target_freshness (and therefore must not need a
+        # GitHub round trip for a --target that operational mode never has).
+        calls = []
+        value = doctor.Doctor("owner/repo", 400, commitment=384, mode="operational",
+                              environ={"PATH": "/bin"})
+        for name in ("local", "worktree", "substitutions", "credentials",
+                    "worker_engine_start", "github", "configuration",
+                    "target_freshness", "observability", "dry_run"):
+            setattr(value, name, (lambda n: lambda: calls.append(n))(name))
+        value.run()
+        self.assertNotIn("target_freshness", calls)
+        self.assertIn("github", calls)
+
+    def test_rehearsal_mode_still_calls_target_freshness_in_run(self):
+        calls = []
+        value = doctor.Doctor("owner/repo", 400, commitment=384,
+                              target="runs/rung1/live_product/project-400/app.py",
+                              environ={"PATH": "/bin"})
+        for name in ("local", "worktree", "substitutions", "credentials",
+                    "worker_engine_start", "github", "configuration",
+                    "target_freshness", "observability", "dry_run"):
+            setattr(value, name, (lambda n: lambda: calls.append(n))(name))
+        value.run()
+        self.assertIn("target_freshness", calls)
+
+    def test_operational_mode_accepts_a_project_awaiting_acceptance(self):
+        # A project waiting on a human decision is a normal live state, not a
+        # broken one — the doctor must not report the factory unsafe to run
+        # because a bell is pending. Observed live: Project #47 and #30 both
+        # sat at project:awaiting-acceptance on 2026-08-26 while the factory
+        # was otherwise healthy.
+        payload = {"data": {"repository": {"isPrivate": False, "viewerPermission": "ADMIN",
+          "autoMergeAllowed": True,
+          "project": {"number": 400, "state": "OPEN", "body": "### Roadmap commitment\n\n#384\n",
+                     "labels": {"nodes": [{"name": "type:project"},
+                                          {"name": "project:awaiting-acceptance"}]}},
+          "commitment": {"number": 384, "state": "OPEN",
+                        "body": "real product work", "labels": {"nodes": []}},
+          "issues": {"nodes": [], "pageInfo": {"hasNextPage": False}},
+          "defaultBranchRef": {"branchProtectionRule": {
+              "requiredStatusCheckContexts": ["merge-gate"]}}},
+          "rateLimit": {"remaining": 4999, "resetAt": "later"}}}
+
+        def respond(args, **_):
+            if "issues?state=open" in args[-1]:
+                return completed(args, stdout="[]")
+            if args[-1].endswith("/rulesets"):
+                return completed(args, stdout="[]")
+            return completed(args, stdout=json.dumps(payload))
+        value = doctor.Doctor("owner/repo", 400, commitment=384, mode="operational",
+                              environ={"PATH": "/bin"}, runner=respond)
+        value.token = "token"
+        value.github()
+        names = [row.name for row in value.checks]
+        self.assertNotIn("test-only commitment", names)
+        self.assertNotIn("isolated test commitment", names)
+        check = next(row for row in value.checks if row.name == "Project authorization")
+        self.assertTrue(check.passed, check)
+
+    def test_rehearsal_mode_still_rejects_awaiting_acceptance(self):
+        # The rehearsal check is unchanged: it only ever accepted a fresh
+        # commitment, never one already awaiting a human decision.
+        payload = {"data": {"repository": {"isPrivate": False, "viewerPermission": "ADMIN",
+          "autoMergeAllowed": True,
+          "project": {"number": 400, "state": "OPEN", "body": "### Roadmap commitment\n\n#384\n",
+                     "labels": {"nodes": [{"name": "type:project"},
+                                          {"name": "project:awaiting-acceptance"}]}},
+          "commitment": {"number": 384, "state": "OPEN",
+                        "body": "No product or factory implementation work",
+                        "labels": {"nodes": [{"name": "type:roadmap-commitment"}]}},
+          "issues": {"nodes": [], "pageInfo": {"hasNextPage": False}},
+          "defaultBranchRef": {"branchProtectionRule": {
+              "requiredStatusCheckContexts": ["merge-gate"]}}},
+          "rateLimit": {"remaining": 4999, "resetAt": "later"}}}
+
+        def respond(args, **_):
+            if "issues?state=open" in args[-1]:
+                return completed(args, stdout="[]")
+            if args[-1].endswith("/rulesets"):
+                return completed(args, stdout="[]")
+            return completed(args, stdout=json.dumps(payload))
+        value = doctor.Doctor("owner/repo", 400, commitment=384,
+                              target="runs/rung1/live_product/project-400/app.py",
+                              environ={"PATH": "/bin"}, runner=respond)
+        value.token = "token"
+        value.github()
+        check = next(row for row in value.checks if row.name == "Project authorization")
+        self.assertFalse(check.passed)
+
+    def test_render_operational_mode_wording(self):
+        text = doctor.render([doctor.Check("one", True, "ok")], mode="operational")
+        self.assertIn("READY — the factory should be able to run", text)
+        text = doctor.render([doctor.Check("one", False, "broken")], mode="operational")
+        self.assertIn("NOT READY — fix 1 failure", text)
+
+    def test_cli_operational_mode_does_not_require_target(self):
+        with mock.patch.object(doctor, "Doctor") as fake:
+            fake.return_value.run.return_value = [doctor.Check("one", True, "ok")]
+            code = doctor.main(["--project", "400", "--commitment", "384",
+                               "--mode", "operational"])
+        self.assertEqual(0, code)
+        fake.assert_called_once()
+        self.assertEqual("operational", fake.call_args.kwargs["mode"])
+
+    def test_cli_rehearsal_mode_still_requires_target(self):
+        with self.assertRaises(SystemExit):
+            doctor.main(["--project", "400", "--commitment", "384"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

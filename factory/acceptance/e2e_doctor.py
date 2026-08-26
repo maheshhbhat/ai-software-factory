@@ -1,5 +1,16 @@
 #!/usr/bin/env python3
-"""Readiness doctor for the real two-Story factory UAT.
+"""Readiness doctor for the factory.
+
+Two modes:
+
+``--mode rehearsal`` (default) checks readiness for one disposable two-Story
+test run. It requires an empty commitment (no existing Project or Story) and
+a fresh ``--target`` file that must be absent from live main.
+
+``--mode operational`` checks whether the factory can be safely started on
+real, ongoing work. It drops every "nothing exists yet" requirement that a
+live commitment will never satisfy, and needs no ``--target``. Use this one
+before pointing ``poll.sh`` at a real repository and commitment.
 
 This command may read GitHub, inspect local processes, and run ``poll.sh`` with
 ``--dry-run``.  It creates and removes one temporary detached Git worktree and
@@ -52,10 +63,18 @@ class Check:
 
 
 class Doctor:
-    def __init__(self, repo: str, project: int, *, commitment: int, target: str,
-                 environ=None, runner=None):
+    """mode="rehearsal" (default) checks readiness for one disposable two-Story
+    test run and requires an empty commitment plus a fresh --target. mode=
+    "operational" checks whether the factory can be started on real, ongoing
+    work instead: it drops the "nothing exists yet" requirements that a live
+    commitment will never satisfy, and does not need --target at all."""
+
+    def __init__(self, repo: str, project: int, *, commitment: int, target: str = "",
+                 mode: str = "rehearsal", environ=None, runner=None):
+        if mode not in {"rehearsal", "operational"}:
+            raise ValueError("mode must be 'rehearsal' or 'operational'")
         self.repo, self.project = repo, project
-        self.commitment, self.target = commitment, target
+        self.commitment, self.target, self.mode = commitment, target, mode
         self.env = dict(os.environ if environ is None else environ)
         self.runner = runner or subprocess.run
         self.checks: list[Check] = []
@@ -77,15 +96,22 @@ class Doctor:
                    if shutil.which(name, path=self.env.get("PATH")) is None]
         self.record("required binaries", not missing,
                     "available" if not missing else "missing: " + ", ".join(missing))
-        status = self.command(["git", "status", "--porcelain"])
-        self.record("local candidate", status.returncode == 0 and bool(status.stdout.strip()),
-                    "local uncommitted candidate present" if status.stdout.strip()
-                    else "no local candidate changes found")
-        processes = self.command(["pgrep", "-f", "[f]actory/runtime/poller.py"])
-        self.record("no competing poller", processes.returncode == 1,
-                    "none running" if processes.returncode == 1
-                    else ("poller process already running" if processes.returncode == 0
-                          else "process inspection unavailable"))
+        if self.mode == "rehearsal":
+            status = self.command(["git", "status", "--porcelain"])
+            self.record("local candidate", status.returncode == 0 and bool(status.stdout.strip()),
+                        "local uncommitted candidate present" if status.stdout.strip()
+                        else "no local candidate changes found")
+        # Scoped to this repository, not "no poller anywhere": two real
+        # products can each run their own poller at once, and that is normal.
+        # What must never happen is two pollers claiming the same repository's
+        # work — that produced duplicated attempts and confusing logs live on
+        # 2026-08-26.
+        pattern = f"[f]actory/runtime/poller.py.*--repo {re.escape(self.repo)}(\\s|$)"
+        processes = self.command(["pgrep", "-f", pattern])
+        self.record("no competing poller for this repository", processes.returncode == 1,
+                    "none running for this repository" if processes.returncode == 1
+                    else ("a poller for this repository is already running"
+                          if processes.returncode == 0 else "process inspection unavailable"))
         free = shutil.disk_usage(ROOT).free
         self.record("free disk", free >= 1024 ** 3,
                     f"{free // (1024 ** 2)} MiB available")
@@ -204,47 +230,55 @@ class Doctor:
                      (rest.stderr or rest.stdout).strip()[:300]))
         project = repo.get("project") or {}
         labels = {item["name"] for item in (project.get("labels") or {}).get("nodes", [])}
+        # Operational readiness must not mistake a project waiting on a human
+        # acceptance decision for a broken one — that is a normal live state,
+        # not a fault the doctor should block on.
+        live_states = {"project:awaiting-ready", "project:active"}
+        if self.mode == "operational":
+            live_states |= {"project:awaiting-acceptance"}
         project_ok = (project.get("state") == "OPEN" and "type:project" in labels and
                       len({x for x in labels if x.startswith("project:")}) == 1 and
-                      labels & {"project:awaiting-ready", "project:active"} and
+                      labels & live_states and
                       re.search(r"(?m)^### Roadmap commitment\s*$\n\s*#"
                                 + re.escape(str(self.commitment)) + r"\s*$",
                                 project.get("body") or ""))
         self.record("Project authorization", bool(project_ok),
                     f"Project #{self.project}; labels={sorted(labels)}")
-        commitment = repo.get("commitment") or {}
-        commitment_labels = {item["name"] for item in
-                             (commitment.get("labels") or {}).get("nodes", [])}
-        self.record("test-only commitment",
-                    commitment.get("state") == "OPEN" and
-                    "type:roadmap-commitment" in commitment_labels and
-                    "No product or factory implementation work" in (commitment.get("body") or ""),
-                    f"Commitment #{self.commitment} remains open and test-only")
-        inventory = repo.get("issues") or {}
-        nodes = inventory.get("nodes") or []
-        truncated = bool((inventory.get("pageInfo") or {}).get("hasNextPage"))
+        if self.mode == "rehearsal":
+            commitment = repo.get("commitment") or {}
+            commitment_labels = {item["name"] for item in
+                                 (commitment.get("labels") or {}).get("nodes", [])}
+            self.record("test-only commitment",
+                        commitment.get("state") == "OPEN" and
+                        "type:roadmap-commitment" in commitment_labels and
+                        "No product or factory implementation work" in (commitment.get("body") or ""),
+                        f"Commitment #{self.commitment} remains open and test-only")
+        if self.mode == "rehearsal":
+            inventory = repo.get("issues") or {}
+            nodes = inventory.get("nodes") or []
+            truncated = bool((inventory.get("pageInfo") or {}).get("hasNextPage"))
 
-        def issue_labels(item):
-            return {row["name"] for row in
-                    (item.get("labels") or {}).get("nodes", [])}
+            def issue_labels(item):
+                return {row["name"] for row in
+                        (item.get("labels") or {}).get("nodes", [])}
 
-        commitment_projects = sorted(
-            item["number"] for item in nodes
-            if "type:project" in issue_labels(item) and re.search(
-                r"(?m)^### Roadmap commitment\s*$\n\s*#"
-                + re.escape(str(self.commitment)) + r"\s*$",
-                item.get("body") or ""))
-        existing_stories = sorted(
-            item["number"] for item in nodes
-            if "type:story" in issue_labels(item) and re.search(
-                r"(?m)^### Project\s*$\n\s*#"
-                + re.escape(str(self.project)) + r"\s*$",
-                item.get("body") or ""))
-        isolated = (not truncated and commitment_projects == [self.project]
-                    and not existing_stories)
-        details = (f"projects={commitment_projects}; stories={existing_stories}"
-                   + ("; open issue inventory exceeds 100" if truncated else ""))
-        self.record("isolated test commitment", isolated, details)
+            commitment_projects = sorted(
+                item["number"] for item in nodes
+                if "type:project" in issue_labels(item) and re.search(
+                    r"(?m)^### Roadmap commitment\s*$\n\s*#"
+                    + re.escape(str(self.commitment)) + r"\s*$",
+                    item.get("body") or ""))
+            existing_stories = sorted(
+                item["number"] for item in nodes
+                if "type:story" in issue_labels(item) and re.search(
+                    r"(?m)^### Project\s*$\n\s*#"
+                    + re.escape(str(self.project)) + r"\s*$",
+                    item.get("body") or ""))
+            isolated = (not truncated and commitment_projects == [self.project]
+                        and not existing_stories)
+            details = (f"projects={commitment_projects}; stories={existing_stories}"
+                       + ("; open issue inventory exceeds 100" if truncated else ""))
+            self.record("isolated test commitment", isolated, details)
         protection = ((repo.get("defaultBranchRef") or {}).get("branchProtectionRule") or {})
         contexts = set(protection.get("requiredStatusCheckContexts") or [])
         rulesets = self.command(["gh", "api", f"repos/{self.repo}/rulesets"],
@@ -369,16 +403,23 @@ class Doctor:
     def run(self) -> list[Check]:
         self.local(); self.worktree(); self.substitutions(); self.credentials()
         self.worker_engine_start(); self.github()
-        self.configuration(); self.target_freshness(); self.observability(); self.dry_run()
+        self.configuration()
+        if self.mode == "rehearsal":
+            self.target_freshness()
+        self.observability(); self.dry_run()
         return self.checks
 
 
-def render(checks: list[Check]) -> str:
+def render(checks: list[Check], *, mode: str = "rehearsal") -> str:
     lines = [f"{'PASS' if item.passed else 'FAIL'}  {item.name} — {item.detail}"
              for item in checks]
     failures = sum(not item.passed for item in checks)
-    lines.append("READY — no E2E artifacts were created" if failures == 0 else
-                 f"BLOCKED — fix {failures} failure(s) before E2E")
+    if mode == "operational":
+        lines.append("READY — the factory should be able to run" if failures == 0 else
+                     f"NOT READY — fix {failures} failure(s) before running the factory")
+    else:
+        lines.append("READY — no E2E artifacts were created" if failures == 0 else
+                     f"BLOCKED — fix {failures} failure(s) before E2E")
     return "\n".join(lines)
 
 
@@ -387,15 +428,22 @@ def main(argv=None) -> int:
     parser.add_argument("--repo", default=DEFAULT_REPO)
     parser.add_argument("--project", required=True, type=int)
     parser.add_argument("--commitment", required=True, type=int)
-    parser.add_argument("--target", required=True)
+    parser.add_argument("--target", default="",
+                        help="required in rehearsal mode; unused in operational mode")
+    parser.add_argument("--mode", choices=("rehearsal", "operational"), default="rehearsal",
+                        help="rehearsal: readiness for one disposable two-Story test run. "
+                             "operational: readiness to run the factory on real, ongoing "
+                             "work — no empty-scope or --target requirement.")
     args = parser.parse_args(argv)
     if args.project <= 0:
         parser.error("--project must be positive")
     if args.commitment <= 0:
         parser.error("--commitment must be positive")
+    if args.mode == "rehearsal" and not args.target:
+        parser.error("--target is required in rehearsal mode")
     checks = Doctor(args.repo, args.project, commitment=args.commitment,
-                    target=args.target).run()
-    print(render(checks))
+                    target=args.target, mode=args.mode).run()
+    print(render(checks, mode=args.mode))
     return 0 if all(item.passed for item in checks) else 1
 
 
