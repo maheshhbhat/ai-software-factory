@@ -51,6 +51,7 @@ PROVIDER_ENVIRONMENT = {
     "anthropic": frozenset({
         "HOME", "USER", "LOGNAME", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN",
     }),
+    "meta": frozenset({"HOME", "USER", "LOGNAME", "META_API_KEY", "MUSE_HOME"}),
 }
 
 
@@ -94,18 +95,39 @@ def codex_command(*, model: str, effort: str, payload: InvocationPayload) -> lis
     return command + ["--json", payload.text]
 
 
+def muse_command(*, model: str, effort: str, payload: InvocationPayload) -> list[str]:
+    # `muse exec` is Meta's headless mode. There is no monetary budget flag;
+    # the step cap is the only run bound the CLI offers, so the shared
+    # executor's reserved-budget accounting is the real spend control
+    # (unreported usage consumes the full reservation). Approval and the OS
+    # sandbox stay at their safe defaults; the sandbox is only relaxed for
+    # workspace-write payloads, and network access must be asked for.
+    command = ["muse", "exec", "--json", "--model", model,
+               "--reasoning-effort", effort, "--no-session-log",
+               "--no-foreign-personal-context", "--max-model-steps", "40",
+               "--workspace", "."]
+    if payload.access == "workspace-write":
+        command += ["--disable-approval"]
+    if payload.network_access:
+        command += ["--sandbox-network", "full"]
+    return command + [payload.text]
+
+
 def cli_adapter(provider: str, *, cwd: pathlib.Path, environment: dict[str, str],
                 runner=subprocess.run, mutation_state=lambda: "none") -> ProviderAdapter:
-    if provider not in {"anthropic", "openai"}:
+    if provider not in {"anthropic", "openai", "meta"}:
         raise ValueError(f"unsupported provider adapter: {provider}")
 
     def invoke(*, model, effort, timeout_seconds, budget_units, payload,
                working_directory=None):
         value = payload if isinstance(payload, InvocationPayload) else InvocationPayload(str(payload))
-        command = (claude_command(model=model, effort=effort, payload=value,
-                                  budget_units=budget_units)
-                   if provider == "anthropic"
-                   else codex_command(model=model, effort=effort, payload=value))
+        if provider == "anthropic":
+            command = claude_command(model=model, effort=effort, payload=value,
+                                     budget_units=budget_units)
+        elif provider == "meta":
+            command = muse_command(model=model, effort=effort, payload=value)
+        else:
+            command = codex_command(model=model, effort=effort, payload=value)
         try:
             result = runner(command, cwd=str(working_directory or cwd), env=environment,
                             capture_output=True, text=True, timeout=timeout_seconds)

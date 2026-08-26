@@ -106,6 +106,15 @@ REGISTRY = (
     RegistryEntry("claude-opus-4-8", "anthropic", "claude-opus-4-8", Tier.FLAGSHIP,
                   frozenset({"reason", "json", "code", "write", "tests"}),
                   frozenset({"low", "medium", "high", "max"})),
+    # Muse is the ADR's named experimental entry, finally real: Meta's `muse`
+    # CLI, verified by a live probe answering CAPACITY_OK on 2026-08-26.
+    # Experimental means no workload routes to it unless it explicitly opts
+    # in (allow_experimental); promotion to normal rotation is by recorded
+    # evidence, per the ADR.
+    RegistryEntry("muse-spark-1.2-contributor", "meta", "muse-spark-1.2-contributor",
+                  Tier.BALANCED,
+                  frozenset({"reason", "json", "code", "write", "tests"}),
+                  frozenset({"low", "medium", "high"}), experimental=True),
 )
 
 POLICIES = {
