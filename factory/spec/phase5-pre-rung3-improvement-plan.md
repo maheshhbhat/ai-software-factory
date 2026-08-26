@@ -226,7 +226,10 @@ browser must also execute the bounded live check it names.
 10. Run doctor, then execute a fresh independent 2–4 Story Rung 2 project using
     a new user-facing outcome of **comparable difficulty** to the failed Rung 2.
     Do not reuse Project #30, Project #47, or their corrective Stories as the
-    qualifying repeat. Apply the same Rung 2 success thresholds.
+    qualifying repeat. Before its plan approval, record the concrete comparison
+    in Story count, integration risk, and production-behavior exposure so the
+    outcome cannot be declared comparable after its result is known. Apply the
+    same Rung 2 success thresholds.
 11. Generate and freeze one Rung 2 report. Proceed to Rung 3 only if autonomy is
     at least 75%, relay is zero, escaped defects are zero, and measurement
     integrity passes. The report must attribute every retry and provide complete
