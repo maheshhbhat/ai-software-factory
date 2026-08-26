@@ -113,6 +113,12 @@ def factory(hub, worker=None, env=None):
         mock.patch.object(continuation, "fetch_comments", comments),
         mock.patch.object(continuation, "apply_outcome", apply_outcome),
         mock.patch.object(poller, "run_dispatcher", side_effect=in_process_dispatcher),
+        # Startup readiness has its own acceptance/unit coverage. These
+        # scenarios enter below that boundary to exercise one mutable cycle.
+        mock.patch.object(poller.readiness_receipt, "factory_revision",
+                          return_value="a" * 40),
+        mock.patch.object(poller.readiness_receipt, "validate",
+                          return_value={"checks": [{"passed": True}]}),
     ]
     if worker is not None:
         patches.append(mock.patch.object(workers, "run_observed", worker))

@@ -41,6 +41,7 @@ from factory.capacity_pool.providers import (  # noqa: E402
     InvocationPayload, cli_adapter, provider_environment,
 )
 from factory.capacity_pool.state import CapacityState  # noqa: E402
+from factory.runtime import operating_envelope  # noqa: E402
 
 DEFAULT_TIMEOUT = 3600
 DEFAULT_MAX_USD = 40.0
@@ -347,7 +348,10 @@ def build_input(client: GitHub, story: dict, project: dict) -> dict:
     comments = client.pages(f"/issues/{story['number']}/comments")
     decisions = [item for item in client.pages("/issues?state=all")
                  if "type:adr" in labels(item)]
-    return {"story": story, "project": project, "adrs": decisions,
+    obligations = operating_envelope.obligations(
+        story.get("body") or "", project.get("body") or "")
+    return {"story": story, "project": project,
+            "operating_envelope_obligations": obligations, "adrs": decisions,
             "review_findings": [item for item in comments
                                 if "## Review findings" in (item.get("body") or "")]}
 

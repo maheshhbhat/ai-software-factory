@@ -51,12 +51,17 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import fcntl
+import hashlib
+import io
 import os
+import pathlib
 import re
 import shlex
 import subprocess
 import sys
 import time
+import tempfile
 import urllib.error
 from datetime import datetime, timezone
 
@@ -71,6 +76,7 @@ import planning_route  # noqa: E402  — project planning invocation route (#190
 import review_link  # noqa: E402  — delivery-PR lifecycle reconciliation (#111)
 import review_route  # noqa: E402  — exact-head advisory review routing (#215)
 import observability as obs  # noqa: E402
+import readiness_receipt  # noqa: E402
 import runlog       # noqa: E402  — operational record (#104)
 import sequencer    # noqa: E402  — dependency/project lifecycle sequencing (#193)
 import workers      # noqa: E402  — standard worker contract (#84)
@@ -86,6 +92,41 @@ DISPATCH_RE = re.compile(
 
 DEFAULT_INTERVAL = 60
 MAX_IDLE_INTERVAL = 300
+
+
+class PollerAlreadyRunning(Exception):
+    """The same repository/commitment poller already owns the local lock."""
+
+
+def poller_lock_path(repo: str, commitment: int,
+                     root: str | None = None) -> str:
+    digest = hashlib.sha256(
+        f"{readiness_receipt.canonical_repo(repo)}#{commitment}".encode()
+    ).hexdigest()[:20]
+    return os.path.join(root or tempfile.gettempdir(),
+                        f"factory-poller-{digest}.lock")
+
+
+def acquire_poller_lock(repo: str, commitment: int,
+                        root: str | None = None):
+    path = poller_lock_path(repo, commitment, root)
+    descriptor = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    handle = io.TextIOWrapper(io.FileIO(descriptor, "r+", closefd=True),
+                              encoding="utf-8")
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError as exc:
+        handle.seek(0)
+        holder = handle.read().strip() or "unknown process"
+        handle.close()
+        raise PollerAlreadyRunning(holder) from exc
+    handle.seek(0); handle.truncate()
+    started_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    handle.write(
+        f"pid={os.getpid()} started_at={started_at} "
+        f"repo={readiness_receipt.canonical_repo(repo)} commitment={commitment}\n")
+    handle.flush(); os.fsync(handle.fileno())
+    return handle
 
 
 class MalformedDispatch(Exception):
@@ -650,28 +691,7 @@ def poll_once(repo: str, commitment: int, seen: set[int],
         woken.append(dispatch)
         woken.changed = True
     return woken
-def main(argv: list[str]) -> int:
-    parser = argparse.ArgumentParser(description="Persistent dispatcher runtime (#65)")
-    parser.add_argument("--repo", required=True, help="owner/name")
-    parser.add_argument("--commitment", required=True, type=int,
-                        help="issue number of the standing roadmap commitment")
-    parser.add_argument("--interval", type=int, default=DEFAULT_INTERVAL,
-                        help=f"active/base seconds between polls (default {DEFAULT_INTERVAL})")
-    parser.add_argument("--max-idle-interval", type=int, default=MAX_IDLE_INTERVAL,
-                        help=f"idle backoff ceiling (default {MAX_IDLE_INTERVAL})")
-    parser.add_argument("--once", action="store_true", help="poll once and exit")
-    parser.add_argument("--dry-run", action="store_true",
-                        help="do not claim; useful for observing decisions")
-    args = parser.parse_args(argv)
-
-    if args.interval < 1 or args.max_idle_interval < args.interval:
-        parser.error("--interval must be positive and --max-idle-interval must be >= it")
-
-    if not (os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")):
-        print("[poller] FAIL: no GITHUB_TOKEN/GH_TOKEN. The dispatcher cannot read "
-              "durable state, so nothing is polled. Fail closed.", flush=True)
-        return 1
-
+def run_loop(args) -> int:
     print(f"[poller] watching {args.repo} against commitment #{args.commitment}, "
           f"every {args.interval}s"
           + (" (dry run — no claims)" if args.dry_run else ""), flush=True)
@@ -713,6 +733,55 @@ def main(argv: list[str]) -> int:
         if args.once:
             return 0
         time.sleep(delay)
+
+
+def main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(description="Persistent dispatcher runtime (#65)")
+    parser.add_argument("--repo", required=True, help="owner/name")
+    parser.add_argument("--commitment", required=True, type=int,
+                        help="issue number of the standing roadmap commitment")
+    parser.add_argument("--interval", type=int, default=DEFAULT_INTERVAL,
+                        help=f"active/base seconds between polls (default {DEFAULT_INTERVAL})")
+    parser.add_argument("--max-idle-interval", type=int, default=MAX_IDLE_INTERVAL,
+                        help=f"idle backoff ceiling (default {MAX_IDLE_INTERVAL})")
+    parser.add_argument("--once", action="store_true", help="poll once and exit")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="do not claim; useful for observing decisions")
+    parser.add_argument("--readiness-receipt",
+                        help="doctor receipt path (default: scoped temp path)")
+    args = parser.parse_args(argv)
+
+    if args.interval < 1 or args.max_idle_interval < args.interval:
+        parser.error("--interval must be positive and --max-idle-interval must be >= it")
+
+    if not (os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")):
+        print("[poller] FAIL: no GITHUB_TOKEN/GH_TOKEN. The dispatcher cannot read "
+              "durable state, so nothing is polled. Fail closed.", flush=True)
+        return 1
+
+    try:
+        singleton = acquire_poller_lock(args.repo, args.commitment)
+    except PollerAlreadyRunning as exc:
+        print(f"[poller] REFUSED: another poller already owns {args.repo} "
+              f"commitment #{args.commitment} ({exc})", flush=True)
+        return 73
+    try:
+        if not args.dry_run:
+            path = (pathlib.Path(args.readiness_receipt)
+                    if args.readiness_receipt else
+                    readiness_receipt.default_path(args.repo, args.commitment))
+            try:
+                readiness_receipt.validate(
+                    path, repo=args.repo, commitment=args.commitment,
+                    revision=readiness_receipt.factory_revision(
+                        pathlib.Path(HERE).parents[1]), environ=dict(os.environ))
+            except readiness_receipt.ReceiptError as exc:
+                print(f"[poller] BLOCKED: doctor readiness receipt refused: {exc}",
+                      flush=True)
+                return 78
+        return run_loop(args)
+    finally:
+        singleton.close()
 
 
 if __name__ == "__main__":

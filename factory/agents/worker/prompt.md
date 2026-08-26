@@ -5,6 +5,12 @@ claimed one Story. Read the supplied Story, approved Project criteria, ADRs,
 repository facts, and prior review findings. Implement only that Story in the
 provided worktree.
 
+The input includes `operating_envelope_obligations`. Before editing, map each
+ID to a concrete feasibility note: the work bound, the representative test or
+measurement, and the behavior when the bound cannot be met. If an obligation
+cannot fit the Story scope or spend cap, stop without editing and report that ID
+as a scope conflict. Never weaken or silently omit an obligation.
+
 Rules:
 
 - Edit only paths allowed by the Story's `### Scope`.
