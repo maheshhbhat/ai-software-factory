@@ -18,6 +18,22 @@ python3 -m unittest discover -s factory/acceptance -p 'test_*.py'
 Exit status is the verdict. `report.json` is written beside the runner, because
 a suite whose result exists only in a terminal is not evidence.
 
+Before the fresh Phase 5 repeat, combine the four real evidence producers into
+one JSON object and validate it with:
+
+```bash
+python3 factory/acceptance/pre_rung3_regressions.py EVIDENCE.json \
+  --json runs/pre-rung3-regressions.json
+```
+
+The four keys are `project47_scale`, `project30_provider`,
+`capacity_recovery`, and `adapter_contract`. The command does not manufacture
+evidence. It rejects toy portfolio checks, fixture-only or stale provider
+claims, capacity recovery that mutated before admission or started twice, and
+live adapter probes missing any contract dimension. Exit `0` means all four
+real evidence records passed; exit `1` means at least one failed; exit `2`
+means the bundle itself was absent or malformed.
+
 ## What a scenario is
 
 Three rules, each there because dropping it turns the suite back into unit tests

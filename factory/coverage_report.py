@@ -106,6 +106,7 @@ ACCEPTANCE = {
     "acceptance/test_factory_monitor.py",
     "acceptance/test_capacity_architecture.py",  # live production-boundary inventory gate
     "acceptance/test_planning_capacity_pool.py",
+    "acceptance/test_pre_rung3_regressions.py",  # four production-shaped repeat gates
 }
 CAPACITY_POOL_UNIT = {
     "acceptance/test_capacity_admission.py",
