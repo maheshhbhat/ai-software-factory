@@ -88,12 +88,13 @@ def project_output():
             "alternatives": ["Factory repository"], "consequences": ["Product gate required"]},
             "stories": [{**base, "key": "model", "title": "Model retirement",
                          "operating_envelope_ids": ["OE-SCALE-1"],
-                         "operating_envelope_checks": {
-                             "OE-SCALE-1": "representative model test fails"},
+                         "operating_envelope_checks": [{
+                             "id": "OE-SCALE-1",
+                             "check": "representative model test fails"}],
                          "spec": "Calculate a projection.", "depends_on": []},
                         {**base, "key": "ui", "title": "Show retirement",
                          "operating_envelope_ids": [],
-                         "operating_envelope_checks": {},
+                         "operating_envelope_checks": [],
                          "spec": "Render a projection.", "depends_on": ["model"]}],
             "expected_bells": 2, "digest": """## Plan in plain language
 

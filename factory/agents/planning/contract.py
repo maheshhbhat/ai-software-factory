@@ -90,8 +90,12 @@ PROJECT_JSON_SCHEMA = {
                                         "minItems": 1},
                 "operating_envelope_ids": {"type": "array",
                                            "items": {"type": "string"}},
-                "operating_envelope_checks": {"type": "object",
-                    "additionalProperties": {"type": "string", "minLength": 1}},
+                "operating_envelope_checks": {"type": "array", "items": {
+                    "type": "object", "additionalProperties": False,
+                    "properties": {
+                        "id": {"type": "string", "pattern": "^OE-[A-Z0-9-]+$"},
+                        "check": {"type": "string", "minLength": 1}},
+                    "required": ["id", "check"]}},
                 "scope": {"type": "array", "items": {"type": "string"}, "minItems": 1},
                 "spend_cap": {"type": "string"}},
             "required": ["key", "title", "spec", "phase", "depends_on", "hazard",
@@ -193,9 +197,14 @@ def validate_output(altitude: Altitude, value: dict) -> dict:
             if any(item not in known for item in obligations):
                 raise ContractError("Story references an unknown operating-envelope ID")
             checks = story.get("operating_envelope_checks")
-            if (not isinstance(checks, dict) or set(checks) != set(obligations)
-                    or not all(isinstance(value, str) and value.strip()
-                               for value in checks.values())):
+            check_ids = [item.get("id") for item in checks
+                         if isinstance(item, dict)] if isinstance(checks, list) else []
+            if (not isinstance(checks, list) or len(check_ids) != len(checks)
+                    or len(set(check_ids)) != len(check_ids)
+                    or set(check_ids) != set(obligations)
+                    or any(set(item) != {"id", "check"}
+                           or not isinstance(item["check"], str)
+                           or not item["check"].strip() for item in checks)):
                 raise ContractError(
                     "every Story operating-envelope obligation needs exactly one "
                     "Story-local executable check")

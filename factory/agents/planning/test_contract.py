@@ -17,6 +17,21 @@ class AltitudeTests(unittest.TestCase):
                 elif isinstance(value, list):
                     pending.extend(value)
 
+    def test_codex_structured_output_objects_are_closed_and_fully_required(self):
+        """The Codex structured-output boundary rejects dynamic object keys."""
+        for altitude in contract.Altitude:
+            pending = [contract.json_schema(altitude)]
+            while pending:
+                value = pending.pop()
+                if isinstance(value, dict):
+                    if value.get("type") == "object":
+                        self.assertIs(value.get("additionalProperties"), False)
+                        self.assertEqual(set(value.get("properties", {})),
+                                         set(value.get("required", [])))
+                    pending.extend(value.values())
+                elif isinstance(value, list):
+                    pending.extend(value)
+
     def test_trigger_type_selects_altitude(self):
         self.assertEqual(contract.Altitude.CAMPAIGN,
                          contract.select_altitude({"type:roadmap-commitment"}))
@@ -97,7 +112,7 @@ Text fallback."""
                  "phase": "build", "depends_on": [], "hazard": False,
                  "acceptance_criteria": ["check"],
                  "operating_envelope_ids": ["OE-BROWSER-1"],
-                 "operating_envelope_checks": {}, "scope": ["src/core.js"],
+                 "operating_envelope_checks": [], "scope": ["src/core.js"],
                  "spend_cap": "$5 / 60 min"}
         value = {"altitude": "project", "acceptance_criteria": ["criterion"],
                  "operating_envelope": [{"id": "OE-BROWSER-1",
@@ -107,10 +122,11 @@ Text fallback."""
                  "digest": self.DIGEST}
         with self.assertRaisesRegex(contract.ContractError, "Story-local executable"):
             contract.validate_output(contract.Altitude.PROJECT, value)
-        story["operating_envelope_checks"] = {
-            "OE-BROWSER-1": "browser render exceeds bound"}
+        story["operating_envelope_checks"] = [{
+            "id": "OE-BROWSER-1", "check": "browser render exceeds bound"}]
         self.assertIs(value, contract.validate_output(contract.Altitude.PROJECT, value))
-        story["operating_envelope_checks"]["OE-EXTRA"] = "unassigned check"
+        story["operating_envelope_checks"].append({
+            "id": "OE-EXTRA", "check": "unassigned check"})
         with self.assertRaisesRegex(contract.ContractError, "Story-local executable"):
             contract.validate_output(contract.Altitude.PROJECT, value)
 

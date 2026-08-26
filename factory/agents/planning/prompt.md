@@ -93,8 +93,8 @@ Produce exactly one coherent project plan:
    - an `operating_envelope_ids` list naming every Project operating-envelope
      obligation it independently satisfies or verifies within that Story's own
      scope and spend cap; use an empty list only when none apply;
-   - an `operating_envelope_checks` object with exactly one entry per assigned
-     ID. Each value names the Story-local executable observation that fails when
+   - an `operating_envelope_checks` array with exactly one `{id, check}` object
+     per assigned ID. Each `check` names the Story-local executable observation that fails when
      the obligation is unmet. If a check needs another Story's code, browser
      surface, scope, or later integration, split the Project envelope into atomic
      IDs and assign the integrated check to the final assurance Story;
@@ -157,9 +157,9 @@ GitHub numbers—the writer resolves them after issue creation:
       "hazard": false,
       "acceptance_criteria": ["falsifiable check"],
       "operating_envelope_ids": ["OE-SCALE-1"],
-      "operating_envelope_checks": {
-        "OE-SCALE-1": "the representative model test exceeds its stated bound"
-      },
+      "operating_envelope_checks": [
+        {"id": "OE-SCALE-1", "check": "the representative model test exceeds its stated bound"}
+      ],
       "scope": ["one/bare/path/**"],
       "spend_cap": "$5 / 60 min"
     }
