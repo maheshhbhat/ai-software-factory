@@ -682,7 +682,9 @@ def release_definite_failure(repo: str, story_number: int, token: str, *,
     """Release a claim only when a completed worker is known to have failed.
 
     Unlike lease recovery, this preserves Attempt: a worker really ran and the
-    failed attempt must remain visible to retry and poison accounting.
+    failed attempt must remain visible to retry and poison accounting. A first
+    delivery without a PR returns to ready. A correction with an existing PR
+    returns to review so the same rejected head cannot be dispatched in a loop.
     """
     fresh = fetch_issue(repo, story_number, token)
     if fresh is None or lifecycle_of(fresh, STORY_LIFECYCLE) != CLAIMED:
