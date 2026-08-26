@@ -69,6 +69,59 @@ class CapacityExecutorTests(unittest.TestCase):
             task_key="none", request=self.request(), registry=(), payload={})
         self.assertEqual("no-eligible-capacity", result.outcome)
         self.assertEqual((), result.attempts)
+        self.assertEqual("not-admitted", result.terminal_outcome)
+
+    def test_every_retry_has_one_distinct_outcome_and_complete_usage_receipt(self):
+        executor = CapacityExecutor({
+            "openai": ProviderAdapter("openai", lambda **_: AttemptResult(
+                "quota", usage={"input_tokens": 10},
+                dollar_cost_unavailable_reason="subscription-backed")),
+            "anthropic": ProviderAdapter("anthropic", lambda **_: AttemptResult(
+                "success", "ok", consumed_budget_units=.25,
+                exact_cost_usd=.25)),
+        }, self.state)
+        result = executor.execute(task_key="receipts", request=self.request(),
+                                  registry=self.registry(), payload={})
+        self.assertEqual("completed", result.terminal_outcome)
+        self.assertEqual(2, len(result.attempts))
+        self.assertEqual(2, len({row["invocation_id"] for row in result.attempts}))
+        self.assertEqual(["limit-stopped", "completed"],
+                         [row["terminal_outcome"] for row in result.attempts])
+        first, second = [row["usage_receipt"] for row in result.attempts]
+        self.assertEqual({"input_tokens": 10}, first["reported_usage"])
+        self.assertEqual("subscription-backed",
+                         first["dollar_cost_unavailable_reason"])
+        self.assertIsNone(first["exact_cost_usd"])
+        self.assertEqual(.25, second["exact_cost_usd"])
+        self.assertIsNone(second["dollar_cost_unavailable_reason"])
+        self.assertEqual("reconciled-reservation", second["capacity_unit_basis"])
+
+    def test_missing_usage_and_cost_is_a_measurement_integrity_failure(self):
+        with self.assertRaisesRegex(RuntimeError, "measurement-integrity"):
+            CapacityExecutor._usage_receipt(
+                AttemptResult("success"), charged_capacity_units=None)
+
+    def test_stage_outcomes_do_not_collapse(self):
+        cases = (
+            (AttemptResult("missing-executable", process_started=False),
+             "launch-failed"),
+            (AttemptResult("unknown-failure"), "started-mid-work-failed"),
+            (AttemptResult("timeout"), "limit-stopped"),
+        )
+        for number, (attempt, expected) in enumerate(cases):
+            with self.subTest(expected=expected):
+                self.state.mark_healthy("openai", "terra")
+                def invoke(value=attempt, **_):
+                    return value
+                result = CapacityExecutor({
+                    "openai": ProviderAdapter("openai", invoke),
+                }, self.state).execute(
+                    task_key=f"stage-{number}", request=self.request(),
+                    registry=self.registry()[:1], payload={})
+                self.assertEqual(expected, result.terminal_outcome)
+                self.assertEqual(expected, result.attempts[0]["terminal_outcome"])
+                self.assertIsNotNone(
+                    result.attempts[0]["usage_receipt"]["normalized_capacity_units"])
 
     def test_quality_failure_never_switches_provider(self):
         called = []
@@ -114,6 +167,9 @@ class CapacityExecutorTests(unittest.TestCase):
         result = executor.execute(task_key="plan-4", request=self.request(),
                                   registry=self.registry()[:1], payload={}, validate=reject)
         self.assertEqual("schema-invalid", result.outcome)
+        self.assertEqual("validation-failed", result.terminal_outcome)
+        self.assertEqual("validation-failed",
+                         result.attempts[0]["terminal_outcome"])
 
     def test_pre_reserved_route_is_consumed_once_before_model_start(self):
         task = "delivery:o/r:20:1"
@@ -133,6 +189,10 @@ class CapacityExecutorTests(unittest.TestCase):
         self.assertEqual("success", result.outcome)
         self.assertEqual([f"start:{lease.lease_id}", "anthropic"], order)
         self.assertEqual("complete", self.state.lease_status(lease.lease_id))
+        self.assertEqual(task,
+                         result.attempts[0]["worker_start_invocation_id"])
+        self.assertEqual(lease.lease_id,
+                         result.attempts[0]["reservation_id"])
 
     def test_expired_reservation_never_starts_adapter(self):
         called = []

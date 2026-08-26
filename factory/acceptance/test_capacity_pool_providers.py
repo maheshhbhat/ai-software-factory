@@ -5,6 +5,7 @@ from pathlib import Path
 
 from factory.capacity_pool.providers.cli import (
     InvocationPayload, claude_command, cli_adapter, codex_command, provider_environment,
+    reported_usage,
 )
 
 
@@ -60,6 +61,35 @@ class CapacityProviderTests(unittest.TestCase):
                              budget_units=1, payload="p")
         self.assertEqual("timeout", result.outcome)
         self.assertIsNone(result.consumed_budget_units)
+        self.assertTrue(result.process_started)
+
+    def test_provider_usage_and_exact_cost_are_read_without_pricing(self):
+        stream = ('{"usage":{"input_tokens":12,"output_tokens":3}}\n'
+                  '{"total_cost_usd":0.42}\n')
+        usage, cost = reported_usage(stream)
+        self.assertEqual({"input_tokens": 12, "output_tokens": 3}, usage)
+        self.assertEqual(.42, cost)
+
+        def runner(command, **kwargs):
+            return subprocess.CompletedProcess(command, 0, stream, "")
+        result = cli_adapter(
+            "anthropic", cwd=Path("."), environment={}, runner=runner).run(
+                model="balanced", effort="medium", timeout_seconds=5,
+                budget_units=1, payload="p")
+        self.assertEqual(.42, result.exact_cost_usd)
+        self.assertIsNone(result.dollar_cost_unavailable_reason)
+        self.assertEqual({"input_tokens": 12, "output_tokens": 3}, result.usage)
+
+    def test_missing_executable_is_never_claimed_as_started(self):
+        def runner(*args, **kwargs):
+            raise FileNotFoundError("missing")
+        result = cli_adapter(
+            "openai", cwd=Path("."), environment={}, runner=runner).run(
+                model="terra", effort="medium", timeout_seconds=5,
+                budget_units=1, payload="p")
+        self.assertFalse(result.process_started)
+        self.assertEqual("provider-did-not-report-exact-cost",
+                         result.dollar_cost_unavailable_reason)
 
     def test_provider_environments_do_not_share_credentials(self):
         source = {"PATH": "/bin", "HOME": "/operator", "OPENAI_API_KEY": "openai",

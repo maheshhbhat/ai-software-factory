@@ -45,6 +45,25 @@ def classify_failure(text: str, returncode: int) -> str:
     return "unknown-failure"
 
 
+def reported_usage(output: str) -> tuple[dict | None, float | None]:
+    """Return only provider-reported values; never estimate or price tokens."""
+    usage, exact_cost = None, None
+    for line in output.splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        candidate = event.get("usage")
+        if isinstance(candidate, dict) and candidate:
+            usage = dict(candidate)
+        value = event.get("total_cost_usd")
+        if isinstance(value, (int, float)) and value >= 0:
+            exact_cost = float(value)
+    return usage, exact_cost
+
+
 BASE_ENVIRONMENT = frozenset({"PATH", "LANG", "LC_ALL", "TMPDIR", "SHELL"})
 PROVIDER_ENVIRONMENT = {
     "openai": frozenset({"HOME", "OPENAI_API_KEY", "CODEX_HOME"}),
@@ -133,30 +152,32 @@ def cli_adapter(provider: str, *, cwd: pathlib.Path, environment: dict[str, str]
                             capture_output=True, text=True, timeout=timeout_seconds)
         except FileNotFoundError as exc:
             return AttemptResult("missing-executable", consumed_budget_units=0,
-                                 diagnostic=str(exc)[:500])
+                                 diagnostic=str(exc)[:500], process_started=False,
+                                 dollar_cost_unavailable_reason=
+                                 "provider-did-not-report-exact-cost")
         except subprocess.TimeoutExpired as exc:
             return AttemptResult("timeout", mutation_state=mutation_state(),
-                                 diagnostic=str(exc)[:500])
+                                 diagnostic=str(exc)[:500], process_started=True,
+                                 dollar_cost_unavailable_reason=
+                                 "provider-did-not-report-exact-cost")
+        output = result.stdout or ""
+        usage, exact_cost = reported_usage(output)
         if result.returncode:
             diagnostic = ((result.stderr or "") + "\n" + (result.stdout or ""))[-500:]
-            reported = None
-            for line in (result.stdout or "").splitlines():
-                try:
-                    event = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                value = event.get("total_cost_usd") if isinstance(event, dict) else None
-                if isinstance(value, (int, float)) and value >= 0:
-                    reported = float(value)
             return AttemptResult(classify_failure(diagnostic, result.returncode),
-                                 consumed_budget_units=reported,
-                                 mutation_state=mutation_state(), diagnostic=diagnostic)
-        output = result.stdout or ""
+                                 consumed_budget_units=exact_cost,
+                                 mutation_state=mutation_state(), diagnostic=diagnostic,
+                                 usage=usage, exact_cost_usd=exact_cost,
+                                 dollar_cost_unavailable_reason=(None if exact_cost is not None
+                                     else "provider-did-not-report-exact-cost"))
         if value.output_path is not None and value.output_path.exists():
             written = value.output_path.read_text(encoding="utf-8")
             if written.strip():
                 output = written
-        return AttemptResult("success", output, None)
+        return AttemptResult(
+            "success", output, exact_cost, usage=usage, exact_cost_usd=exact_cost,
+            dollar_cost_unavailable_reason=(None if exact_cost is not None else
+                                             "provider-did-not-report-exact-cost"))
 
     def probe(*, model, timeout_seconds, effort="low"):
         # A minimal claude-fable-5 reply costs ~$0.15, so a 0.1 cap makes the

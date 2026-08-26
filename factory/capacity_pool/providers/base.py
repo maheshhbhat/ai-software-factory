@@ -7,6 +7,13 @@ from dataclasses import dataclass
 from typing import Callable
 
 
+UNPRICED_REASONS = frozenset({
+    "subscription-backed",
+    "prepaid-capacity",
+    "provider-did-not-report-exact-cost",
+})
+
+
 @dataclass(frozen=True)
 class AttemptResult:
     outcome: str
@@ -15,10 +22,19 @@ class AttemptResult:
     mutation_state: str = "none"
     diagnostic: str = ""
     failure_scope: str = "model"
+    process_started: bool = True
+    usage: dict | None = None
+    exact_cost_usd: float | None = None
+    dollar_cost_unavailable_reason: str | None = None
 
     def __post_init__(self):
         if self.failure_scope not in {"model", "provider"}:
             raise ValueError("failure_scope must be model or provider")
+        if self.exact_cost_usd is not None and self.exact_cost_usd < 0:
+            raise ValueError("exact_cost_usd cannot be negative")
+        if (self.dollar_cost_unavailable_reason is not None and
+                self.dollar_cost_unavailable_reason not in UNPRICED_REASONS):
+            raise ValueError("unknown dollar-cost-unavailable reason")
 
     @property
     def succeeded(self) -> bool:
