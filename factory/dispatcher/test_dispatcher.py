@@ -386,13 +386,19 @@ class TestClaimRecovery(unittest.TestCase):
     @patch.object(dp, "fetch_pull_requests",
                   return_value=[{"number": 77, "body": "Story: #10\n"}])
     @patch.object(dp, "fetch_issue")
-    def test_definite_failure_release_refuses_a_linked_pr(self, fetch_issue, pulls, api):
+    def test_definite_failure_with_linked_pr_parks_correction_in_review(self, fetch_issue,
+                                                                        pulls, api):
         fetch_issue.return_value = self.claimed()
         ok, note = dp.release_definite_failure(
             "owner/repo", 10, "token", reason="x", evidence="x")
-        self.assertFalse(ok)
-        self.assertIn("#77", note)
-        api.assert_not_called()
+        self.assertTrue(ok, note)
+        payload = api.call_args_list[-1].kwargs["payload"]
+        self.assertIn("story:in-review", payload["labels"])
+        self.assertNotIn("story:claimed", payload["labels"])
+        self.assertNotIn("story:ready", payload["labels"])
+        comment = api.call_args_list[0].kwargs["payload"]["body"]
+        self.assertIn("PR #77 is preserved", comment)
+        self.assertIn("Attempt is preserved", comment)
 
     @patch.object(dp, "_api")
     @patch.object(dp, "fetch_issue")

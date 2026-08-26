@@ -691,19 +691,23 @@ def release_definite_failure(repo: str, story_number: int, token: str, *,
     linked, error = linked_delivery_prs(story_number, pulls)
     if error:
         return False, error
-    if linked:
-        return False, f"linked delivery PR exists: #{linked[0].get('number')}"
+    correction = linked[0] if linked else None
     heading = "Operator recovery" if operator else "Factory failure recovery"
     provenance = ("This is a human intervention and must not be reported as "
                   "autonomous delivery." if operator else
                   "The poller directly observed the completed non-zero worker exit.")
+    destination = IN_REVIEW if correction else READY
+    correction_note = (f" The existing PR #{correction.get('number')} is preserved; "
+                       "the Story is parked in review until its head changes or a "
+                       "human resolves the findings."
+                       if correction else "")
     comment = (f"## {heading}\n\n"
                "A confirmed worker failure stranded this claim.\n\n"
                f"Reason: {reason}\n\nEvidence: `{evidence}`\n\n"
-               f"The failed Attempt is preserved. {provenance}")
+               f"The failed Attempt is preserved.{correction_note} {provenance}")
     _api(f"https://api.github.com/repos/{repo}/issues/{story_number}/comments",
          token, method="POST", payload={"body": comment})
-    labels = sorted((labels_of(fresh) - {CLAIMED}) | {READY})
+    labels = sorted((labels_of(fresh) - {CLAIMED}) | {destination})
     _api(f"https://api.github.com/repos/{repo}/issues/{story_number}", token,
          method="PATCH", payload={"labels": labels})
     return True, f"confirmed failure released; Attempt preserved; labels {' '.join(labels)}"

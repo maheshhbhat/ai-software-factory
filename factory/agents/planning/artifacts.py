@@ -225,7 +225,7 @@ def parse_envelope(lines: list[str]) -> list[dict]:
 def _story_body(story: dict, project: int, dependencies: list[int],
                 envelope: list[dict]) -> str:
     required = ("title", "spec", "phase", "hazard", "acceptance_criteria",
-                "operating_envelope_ids",
+                "operating_envelope_ids", "operating_envelope_checks",
                 "scope", "spend_cap")
     missing = [field for field in required if field not in story]
     if missing:
@@ -247,8 +247,15 @@ def _story_body(story: dict, project: int, dependencies: list[int],
     if (not isinstance(obligations, list) or len(set(obligations)) != len(obligations)
             or any(item not in known for item in obligations)):
         raise ArtifactError(f"story {story['key']} operating-envelope obligations invalid")
+    checks = story["operating_envelope_checks"]
+    if (not isinstance(checks, dict) or set(checks) != set(obligations)
+            or not all(isinstance(value, str) and value.strip()
+                       for value in checks.values())):
+        raise ArtifactError(
+            f"story {story['key']} operating-envelope checks must exactly match obligations")
     rendered_obligations = ("none" if not obligations else
-                            "\n".join(obligations))
+                            "\n".join(f"{identifier} | STORY CHECK: {checks[identifier]}"
+                                      for identifier in obligations))
     return (f"### Spec\n\n{story['spec']}\n\n### Project\n\n#{project}\n\n"
             f"### Phase\n\n{story['phase']}\n\n### Depends-on\n\n{depends}\n\n"
             f"### Hazard\n\n- [{hazard}] Touches hazard path\n\n"
@@ -415,9 +422,17 @@ def verify(store: Store, trigger: dict, key: str,
         if (not obligations
                 or obligations[0] != f"digest: {expected_envelope_digest}"):
             raise ArtifactError(f"story #{story['number']} operating envelope missing")
-        assigned = obligations[1:]
-        if assigned == ["none"]:
+        assigned_lines = obligations[1:]
+        if assigned_lines == ["none"]:
             assigned = []
+        else:
+            matches = [re.fullmatch(
+                r"(OE-[A-Z0-9-]+) \| STORY CHECK: (.+)", line)
+                       for line in assigned_lines]
+            if any(match is None for match in matches):
+                raise ArtifactError(
+                    f"story #{story['number']} operating envelope obligations do not conform")
+            assigned = [match.group(1) for match in matches if match]
         if (len(set(assigned)) != len(assigned)
                 or any(item not in known_obligations for item in assigned)):
             raise ArtifactError(

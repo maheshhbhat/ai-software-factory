@@ -90,10 +90,13 @@ PROJECT_JSON_SCHEMA = {
                                         "minItems": 1},
                 "operating_envelope_ids": {"type": "array",
                                            "items": {"type": "string"}},
+                "operating_envelope_checks": {"type": "object",
+                    "additionalProperties": {"type": "string", "minLength": 1}},
                 "scope": {"type": "array", "items": {"type": "string"}, "minItems": 1},
                 "spend_cap": {"type": "string"}},
             "required": ["key", "title", "spec", "phase", "depends_on", "hazard",
                          "acceptance_criteria", "operating_envelope_ids",
+                         "operating_envelope_checks",
                          "scope", "spend_cap"]}},
         "expected_bells": {"type": "integer", "minimum": 2},
         "digest": {"type": "string"},
@@ -189,6 +192,13 @@ def validate_output(altitude: Altitude, value: dict) -> dict:
                 raise ContractError("Story operating-envelope obligations are malformed")
             if any(item not in known for item in obligations):
                 raise ContractError("Story references an unknown operating-envelope ID")
+            checks = story.get("operating_envelope_checks")
+            if (not isinstance(checks, dict) or set(checks) != set(obligations)
+                    or not all(isinstance(value, str) and value.strip()
+                               for value in checks.values())):
+                raise ContractError(
+                    "every Story operating-envelope obligation needs exactly one "
+                    "Story-local executable check")
             used.update(obligations)
         if used != known:
             raise ContractError("every operating-envelope ID must belong to a Story")
