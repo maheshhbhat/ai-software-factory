@@ -34,6 +34,24 @@ live adapter probes missing any contract dimension. Exit `0` means all four
 real evidence records passed; exit `1` means at least one failed; exit `2`
 means the bundle itself was absent or malformed.
 
+Run the readiness doctor before starting a mutable poller. Its default
+`rehearsal` mode remains for disposable harnesses and requires an empty
+test-only commitment plus a fresh target. For an approved Project whose planned
+Stories already exist, use the separate fail-closed mode:
+
+```bash
+python3 factory/acceptance/e2e_doctor.py \
+  --mode preplanned --repo owner/product --commitment 59 --project 60
+```
+
+`preplanned` requires clean factory code at the exact local `origin/main`, one
+open Roadmap Commitment containing only the named Project, and an exact match
+between the Project's declared Stories and its open, not-yet-started Story
+issues. It does not use the disposable fresh-file check. Both modes probe real
+capacity, merge controls, worktree creation, poller exclusivity, observability,
+and the normal read-only `poll.sh --dry-run` path before issuing the same
+short-lived receipt.
+
 ## What a scenario is
 
 Three rules, each there because dropping it turns the suite back into unit tests
