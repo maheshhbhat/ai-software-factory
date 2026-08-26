@@ -248,13 +248,19 @@ def _story_body(story: dict, project: int, dependencies: list[int],
             or any(item not in known for item in obligations)):
         raise ArtifactError(f"story {story['key']} operating-envelope obligations invalid")
     checks = story["operating_envelope_checks"]
-    if (not isinstance(checks, dict) or set(checks) != set(obligations)
-            or not all(isinstance(value, str) and value.strip()
-                       for value in checks.values())):
+    check_ids = [item.get("id") for item in checks
+                 if isinstance(item, dict)] if isinstance(checks, list) else []
+    if (not isinstance(checks, list) or len(check_ids) != len(checks)
+            or len(set(check_ids)) != len(check_ids)
+            or set(check_ids) != set(obligations)
+            or any(set(item) != {"id", "check"}
+                   or not isinstance(item["check"], str)
+                   or not item["check"].strip() for item in checks)):
         raise ArtifactError(
             f"story {story['key']} operating-envelope checks must exactly match obligations")
+    checks_by_id = {item["id"]: item["check"] for item in checks}
     rendered_obligations = ("none" if not obligations else
-                            "\n".join(f"{identifier} | STORY CHECK: {checks[identifier]}"
+                            "\n".join(f"{identifier} | STORY CHECK: {checks_by_id[identifier]}"
                                       for identifier in obligations))
     return (f"### Spec\n\n{story['spec']}\n\n### Project\n\n#{project}\n\n"
             f"### Phase\n\n{story['phase']}\n\n### Depends-on\n\n{depends}\n\n"
