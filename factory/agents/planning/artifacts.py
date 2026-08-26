@@ -198,6 +198,11 @@ def envelope_digest(envelope: list[dict]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def risks_digest(value: str) -> str:
+    normalized = "\n".join(line.strip() for line in value.splitlines() if line.strip())
+    return hashlib.sha256(normalized.encode()).hexdigest()
+
+
 def render_envelope(envelope: list[dict]) -> str:
     if not envelope:
         return "None identified."
@@ -293,6 +298,9 @@ def write_project(store: Store, trigger: dict, key: str, output: dict) -> Writte
         raise ArtifactError("expected_bells must include plan approval and acceptance")
     if not isinstance(output["digest"], str) or not output["digest"].strip():
         raise ArtifactError("planning digest must be non-empty")
+    project_risks = output["risks"]
+    if not isinstance(project_risks, str) or not project_risks.strip():
+        raise ArtifactError("project risks / notes must be a non-empty string")
     project_criteria = output["acceptance_criteria"]
     envelope = output["operating_envelope"]
     if (not isinstance(project_criteria, list) or not project_criteria
@@ -304,6 +312,9 @@ def write_project(store: Store, trigger: dict, key: str, output: dict) -> Writte
             r"### Falsifiable acceptance criteria\n\n.*?\n\n### Stories",
             initial_body, flags=re.S):
         raise ArtifactError("project issue has no writable acceptance criteria section")
+    if not re.search(r"### Risks / notes\n\n.*?(?:\n\n### |\Z)",
+                     initial_body, flags=re.S):
+        raise ArtifactError("project issue has no writable Risks / notes section")
     # Validate the complete envelope before the first durable write. Dependency
     # issue numbers are substituted later, but every semantic field is checked now.
     _adr_body(output["adr"])
@@ -353,6 +364,12 @@ def write_project(store: Store, trigger: dict, key: str, output: dict) -> Writte
                           count=1, flags=re.S)
     if count != 1:
         raise ArtifactError("project issue has no writable Expected bells section")
+    body, count = re.subn(
+        r"(### Risks / notes\n\n).*?(\n\n### Roadmap commitment|\Z)",
+        (rf"\g<1><!-- planning-risks:{risks_digest(project_risks)} -->\n"
+         rf"{project_risks}\2"), body, count=1, flags=re.S)
+    if count != 1:
+        raise ArtifactError("project issue has no writable Risks / notes section")
     store.update_issue(trigger["number"], body)
     _comment_reconcile(store, trigger["number"], key, "digest",
                        "## Planning digest\n\n" + output["digest"])
@@ -452,6 +469,15 @@ def verify(store: Store, trigger: dict, key: str,
     bells = section_lines(project.get("body") or "", "Expected bells")
     if len(bells) != 1 or not bells[0].isdigit() or int(bells[0]) < 2:
         raise ArtifactError("project expected-bells count does not conform")
+    durable_risks = section_lines(project.get("body") or "", "Risks / notes")
+    if (len(durable_risks) < 2 or not re.fullmatch(
+            r"<!-- planning-risks:[0-9a-f]{64} -->", durable_risks[0])):
+        raise ArtifactError("project risks / notes lack a durable planning digest")
+    expected_hash = durable_risks[0].removeprefix(
+        "<!-- planning-risks:").removesuffix(" -->")
+    durable_text = "\n".join(durable_risks[1:])
+    if risks_digest(durable_text) != expected_hash:
+        raise ArtifactError("project risks / notes do not match planned output")
     return WrittenPlan(altitude, trigger["number"], adr["number"],
                        tuple(story["number"] for story in stories))
 

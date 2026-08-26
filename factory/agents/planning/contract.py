@@ -31,7 +31,7 @@ REQUIRED_INPUTS = ("trigger", "product", "adrs", "repository", "review_comments"
 CAMPAIGN_KEYS = frozenset({"altitude", "project", "rationale", "risks"})
 PROJECT_KEYS = frozenset({
     "altitude", "acceptance_criteria", "operating_envelope", "adr", "stories",
-    "expected_bells", "digest",
+    "expected_bells", "risks", "digest",
 })
 
 ENVELOPE_CATEGORIES = ("representative-input", "responsiveness",
@@ -103,9 +103,10 @@ PROJECT_JSON_SCHEMA = {
                          "operating_envelope_checks",
                          "scope", "spend_cap"]}},
         "expected_bells": {"type": "integer", "minimum": 2},
+        "risks": {"type": "string", "minLength": 1},
         "digest": {"type": "string"},
     }, "required": ["altitude", "acceptance_criteria", "operating_envelope", "adr",
-                    "stories", "expected_bells", "digest"],
+                    "stories", "expected_bells", "risks", "digest"],
 }
 
 
@@ -166,8 +167,8 @@ def validate_output(altitude: Altitude, value: dict) -> dict:
         raise ContractError(
             f"output altitude {value.get('altitude')!r} does not match trigger "
             f"altitude {altitude.value!r}")
-    forbidden = PROJECT_KEYS - {"altitude"} if altitude is Altitude.CAMPAIGN else {
-        "project", "rationale", "risks",
+    forbidden = PROJECT_KEYS - {"altitude", "risks"} if altitude is Altitude.CAMPAIGN else {
+        "project", "rationale",
     }
     leaked = sorted(forbidden & set(value))
     if leaked:

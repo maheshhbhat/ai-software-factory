@@ -111,6 +111,9 @@ Produce exactly one coherent project plan:
    and an input or observation that would make it fail. Each entry must be atomic
    enough for every assigned Story to satisfy and test it independently. Every ID must be assigned
    to at least one Story; do not invent an envelope entry when the risk is absent.
+   Replace the Project's `Risks / notes` with a non-empty `risks` string that
+   reflects the final plan and all accepted review changes. Do not preserve a
+   stale campaign uncertainty after the ADR or revised plan has settled it.
 4. Post a human-readable digest that explains the ADR, risk order, story phases,
    dependencies, hazards, acceptance criteria, and unresolved choices without
    requiring the reader to reconstruct the plan issue by issue. Every digest
@@ -165,6 +168,7 @@ GitHub numbers—the writer resolves them after issue creation:
     }
   ],
   "expected_bells": 2,
+  "risks": "Final grounded risks, limits, and any choices that remain unresolved.",
   "digest": "## Plan in plain language\n\n...\n\n## How the plan works\n\n```mermaid\nflowchart LR\n  input --> output\n```\n\nText fallback.\n\n## Story dependencies\n\n```mermaid\nflowchart LR\n  story_a --> story_b\n```\n\nText fallback naming every dependency."
 }
 ```
