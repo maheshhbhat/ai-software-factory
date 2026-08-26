@@ -233,13 +233,23 @@ All transitions are effected by editing the single lifecycle label (Phase 1: by 
 | `project:awaiting-ready` | `project:active` | human | approves the criteria; **approval comment posted first** (§5.1) | **yes** `plan-approval` / `decision` | sequencer may mark stories ready |
 | `project:awaiting-ready` | `project:planning` | human | requests changes to the plan | yes `plan-approval` / `decision` (note explains) | planning re-invoked; returns to `awaiting-ready` |
 | `project:active` | `project:awaiting-ready` | human | **criteria amended after approval** — the standing approval is superseded (§5.2) | no (no human bell rung; supersession comment required) | human re-approval gate |
-| `project:active` | `project:awaiting-acceptance` | human (manual in P1) / sequencer | every story reached a terminal success — `story:merged` or `story:completed` | no | human queue |
+| `project:active` | `project:awaiting-acceptance` | human (manual in P1) / sequencer | every story reached a terminal success — `story:merged` or `story:completed`; after readiness promotion, an exact-revision Production Readiness artifact is also `ready` | no | human queue |
 | `project:awaiting-acceptance` | `project:accepted` | human | acceptance comment records **pass for every criterion** (§5.3) | **yes** `acceptance` / `decision` | terminal |
 | `project:awaiting-acceptance` | `project:active` | human | acceptance comment records **any criterion failed** (§5.3) | **yes** `acceptance` / `rescue` or `decision` | new story or re-planning spawned; returns to `awaiting-acceptance` when merged |
 | `project:accepted` | — | — | terminal — issue **closed as completed** (§9.3) | — | — |
 | `project:awaiting-ready` | `project:standing` | human | approves the criteria of a **standing** Project; **approval comment posted first** (§5.1) | **yes** `plan-approval` / `decision` | sequencer may mark stories ready |
 | `project:standing` | `project:awaiting-ready` | human | **criteria amended after approval** — the standing approval is superseded (§5.2) | no (no human bell rung; supersession comment required) | human re-approval gate |
 | `project:standing` | — | — | **no completion edge** — a standing Project never reaches `project:awaiting-acceptance` or `project:accepted` (§4.1.1) | — | — |
+
+Production Readiness is independent of Delivery and Review. For Projects created
+under the operating-envelope contract, the evaluator checks integrated `main`
+and publishes one digest-bound pass/fail result per envelope ID. The artifact is
+bound to the repository, Project, exact commit SHA, timestamps, bounded external
+observations, and the Project envelope digest. In `warning` mode its result is
+recorded but does not change this lifecycle. Promotion to `blocking` is a
+reviewed configuration change; then missing, stale, malformed, `not-ready`, or
+incomplete evidence leaves the Project `project:active`. Projects predating the
+operating-envelope section are not silently retrofitted with this gate.
 
 Both former self-loops (`awaiting-ready → awaiting-ready`, `awaiting-acceptance → awaiting-acceptance`) are replaced by real edges above: a label edit that ends on the same label emits no transition and therefore cannot be routed (`architecture-v2.1.md` §4, "route on transitions, not states").
 

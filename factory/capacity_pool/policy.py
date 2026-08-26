@@ -132,6 +132,9 @@ POLICIES = {
         "bridge", frozenset({"basic-tools"}), Tier.ECONOMY, "low", 300, 1),
     "readiness": WorkloadPolicy(
         "readiness", frozenset({"exact-answer"}), Tier.ECONOMY, "low", 90, 1),
+    "production-readiness": WorkloadPolicy(
+        "production-readiness", frozenset({"code", "reason", "json"}),
+        Tier.BALANCED, "medium", 300, 2),
 }
 
 

@@ -1,3 +1,4 @@
+import io
 import os
 import unittest
 from unittest import mock
@@ -101,6 +102,20 @@ class ProjectCompletionTests(unittest.TestCase):
                   21: story(21, "story:completed")}
         self.assertEqual([10], [d.number for d in sq.plan_project_completion(issues)])
 
+    def test_readiness_is_advisory_until_promoted_then_fail_closed(self):
+        issues = {10: project(stories="#20"),
+                  20: story(20, "story:merged")}
+        issues[10]["body"] += "\n### Operating envelope\n\nNone identified.\n"
+        self.assertEqual([10], [d.number for d in sq.plan_project_completion(
+            issues, readiness_mode="warning")])
+        self.assertEqual([], sq.plan_project_completion(
+            issues, readiness_mode="blocking"))
+        self.assertEqual(sq.Skip.READINESS_MISSING, sq.completion_skip(
+            issues[10], issues, readiness_mode="blocking"))
+        self.assertEqual([10], [d.number for d in sq.plan_project_completion(
+            issues, readiness_mode="blocking",
+            readiness_artifacts={10: {"overall": "ready"}})])
+
     def test_selected_commitment_does_not_complete_another_project(self):
         selected = project(10, stories="#20")
         other = project(11, stories="#21")
@@ -131,6 +146,57 @@ class ProjectCompletionTests(unittest.TestCase):
             self.assertEqual(1, len(sq.run("o/r", "token")))
             self.assertEqual([], sq.run("o/r", "token"))
             self.assertEqual(1, apply.call_count)
+
+    def test_run_evaluates_enveloped_candidate_before_completion(self):
+        issues = {10: project(stories="#20"),
+                  20: story(20, "story:merged")}
+        issues[10]["body"] += "\n### Operating envelope\n\nNone identified.\n"
+        with mock.patch.object(sq, "fetch_all_issues", return_value=issues), \
+             mock.patch.object(sq, "run_production_readiness",
+                               return_value=True) as evaluate, \
+             mock.patch.object(sq, "apply_decision",
+                               return_value=(True, "ok")):
+            decisions = sq.run("o/r", "token")
+        self.assertEqual([10], [item.number for item in decisions])
+        evaluate.assert_called_once_with("o/r", 10, "token")
+
+    def test_dry_run_never_invokes_or_publishes_readiness(self):
+        issues = {10: project(stories="#20"),
+                  20: story(20, "story:merged")}
+        issues[10]["body"] += "\n### Operating envelope\n\nNone identified.\n"
+        with mock.patch.object(sq, "fetch_all_issues", return_value=issues), \
+             mock.patch.object(sq, "run_production_readiness") as evaluate:
+            sq.run("o/r", "token", apply=False)
+        evaluate.assert_not_called()
+
+    def test_warning_mode_evaluator_crash_is_recorded_but_not_a_hidden_gate(self):
+        issues = {10: project(stories="#20"),
+                  20: story(20, "story:merged")}
+        issues[10]["body"] += "\n### Operating envelope\n\nNone identified.\n"
+        with mock.patch.object(sq, "fetch_all_issues", return_value=issues), \
+             mock.patch.object(sq, "run_production_readiness",
+                               side_effect=TimeoutError("bounded timeout")), \
+             mock.patch.object(sq, "apply_decision",
+                               return_value=(True, "ok")), \
+             mock.patch.dict(os.environ,
+                             {"FACTORY_PRODUCTION_READINESS_MODE": "warning"}), \
+             mock.patch("sys.stdout", new_callable=io.StringIO) as output:
+            decisions = sq.run("o/r", "token")
+        self.assertEqual([10], [item.number for item in decisions])
+        self.assertIn("could not evaluate", output.getvalue())
+
+    def test_blocking_mode_rechecks_integrated_revision_before_project_write(self):
+        decision = sq.Decision(10, sq.ACTIVE, sq.AWAITING_ACCEPTANCE, "ready")
+        with mock.patch.object(sq.dispatcher, "fetch_issue",
+                               return_value=project(10, stories="#20")), \
+             mock.patch.object(sq, "_integrated_revision",
+                               return_value="b" * 40), \
+             mock.patch.object(sq.dispatcher, "_api") as api:
+            ok, note = sq.apply_decision(
+                "o/r", decision, "token", required_revision="a" * 40)
+        self.assertFalse(ok)
+        self.assertEqual("integrated revision changed before write", note)
+        api.assert_not_called()
 
 
 class StandingProjectTests(unittest.TestCase):

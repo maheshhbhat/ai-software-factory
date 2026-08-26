@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
+import subprocess
 import sys
 from dataclasses import dataclass
 
@@ -19,6 +21,8 @@ sys.path.insert(0, os.path.join(HERE, "..", "dispatcher"))
 sys.path.insert(0, os.path.join(HERE, "..", "gates"))
 import dispatcher  # noqa: E402
 import merge_gate  # noqa: E402
+import operating_envelope  # noqa: E402
+import production_readiness  # noqa: E402
 
 BLOCKED = "story:blocked"
 READY = "story:ready"
@@ -145,10 +149,13 @@ class Skip:
     STORIES_UNUSABLE = "declared stories missing, empty, or unparseable"
     STORIES_UNFINISHED = "a declared story has not reached terminal success"
     OUTSIDE_COMMITMENT = "project is outside the selected roadmap commitment"
+    READINESS_MISSING = "exact-revision production readiness has not passed"
 
 
 def completion_skip(project: dict, issues: dict[int, dict],
-                    commitment: int | None = None) -> str | None:
+                    commitment: int | None = None, *,
+                    readiness_artifact: dict | None = None,
+                    readiness_mode: str = "warning") -> str | None:
     """The reason this project may not advance, or None if it may.
 
     Each clause tests an independent property of the project, and the two
@@ -174,22 +181,109 @@ def completion_skip(project: dict, issues: dict[int, dict],
                dispatcher.lifecycle_of(issues[story], dispatcher.STORY_LIFECYCLE)
                in dispatcher.TERMINAL_SUCCESS for story in stories):
         return Skip.STORIES_UNFINISHED
+    has_envelope_contract = bool(operating_envelope.section(
+        project.get("body") or "", "Operating envelope"))
+    if (has_envelope_contract and not production_readiness.permits_completion(
+            readiness_artifact, readiness_mode)):
+        return Skip.READINESS_MISSING
     return None
 
 
 def plan_project_completion(issues: dict[int, dict],
-                            commitment: int | None = None) -> list[Decision]:
+                            commitment: int | None = None, *,
+                            readiness_artifacts: dict[int, dict] | None = None,
+                            readiness_mode: str = "warning") -> list[Decision]:
     """Advance only active projects whose declared children all succeeded."""
     return [Decision(number, ACTIVE, AWAITING_ACCEPTANCE,
                      "all declared stories reached terminal success")
             for number in sorted(issues)
-            if completion_skip(issues[number], issues, commitment) is None]
+            if completion_skip(
+                issues[number], issues, commitment,
+                readiness_artifact=(readiness_artifacts or {}).get(number),
+                readiness_mode=readiness_mode) is None]
 
 
 def plan(issues: dict[int, dict], wip_limit: int = dispatcher.WIP_LIMIT,
-         commitment: int | None = None) -> list[Decision]:
-    return (plan_project_completion(issues, commitment)
+         commitment: int | None = None, *,
+         readiness_artifacts: dict[int, dict] | None = None,
+         readiness_mode: str = "warning") -> list[Decision]:
+    return (plan_project_completion(
+                issues, commitment, readiness_artifacts=readiness_artifacts,
+                readiness_mode=readiness_mode)
             + plan_story_readiness(issues, wip_limit, commitment))
+
+
+def _pages(url: str, token: str) -> list[dict]:
+    values, page = [], 1
+    while True:
+        join = "&" if "?" in url else "?"
+        batch = dispatcher._api(f"{url}{join}per_page=100&page={page}", token)
+        if not isinstance(batch, list):
+            raise production_readiness.ReadinessError(
+                "production-readiness comments response is malformed")
+        values.extend(batch)
+        if len(batch) < 100:
+            return values
+        page += 1
+
+
+def blocking_readiness_artifacts(repo: str, token: str,
+                                 issues: dict[int, dict]) -> dict[int, dict]:
+    metadata = dispatcher._api(f"https://api.github.com/repos/{repo}", token)
+    branch = metadata.get("default_branch") if isinstance(metadata, dict) else None
+    if not isinstance(branch, str) or not branch:
+        raise production_readiness.ReadinessError(
+            "production-readiness default branch is unavailable")
+    integrated = dispatcher._api(
+        f"https://api.github.com/repos/{repo}/commits/{branch}", token)
+    revision = integrated.get("sha") if isinstance(integrated, dict) else None
+    if not isinstance(revision, str):
+        raise production_readiness.ReadinessError(
+            "production-readiness integrated revision is unavailable")
+    artifacts = {}
+    for number, project in issues.items():
+        if ("type:project" not in dispatcher.labels_of(project)
+                or dispatcher.lifecycle_of(
+                    project, dispatcher.PROJECT_LIFECYCLE) != ACTIVE
+                or not operating_envelope.section(
+                    project.get("body") or "", "Operating envelope")):
+            continue
+        envelope = operating_envelope.parse_project(project.get("body") or "")
+        comments = _pages(
+            f"https://api.github.com/repos/{repo}/issues/{number}/comments", token)
+        artifact = production_readiness.latest(
+            comments, repo=repo, project=number, revision=revision,
+            envelope=envelope)
+        if artifact is not None:
+            artifacts[number] = artifact
+    return artifacts
+
+
+def run_production_readiness(repo: str, project: int, token: str) -> bool:
+    template = os.environ.get(
+        "FACTORY_PRODUCTION_READINESS_LAUNCH",
+        "python3 factory/agents/readiness/invoke.py --repo {repo} --project {project}")
+    try:
+        command = [item.format(repo=repo, project=project)
+                   for item in shlex.split(template)]
+    except (ValueError, KeyError) as exc:
+        raise production_readiness.ReadinessError(
+            "production-readiness launch configuration is malformed") from exc
+    if not command:
+        raise production_readiness.ReadinessError(
+            "production-readiness launch configuration is empty")
+    env = dict(os.environ)
+    env.setdefault("GITHUB_TOKEN", token)
+    result = subprocess.run(command, cwd=os.path.join(HERE, "..", ".."),
+                            env=env, capture_output=True, text=True, timeout=360)
+    detail = ((result.stdout or "") + "\n" + (result.stderr or "")).strip()[-600:]
+    if result.returncode:
+        print(f"[sequencer] production readiness failed for Project #{project}: "
+              f"{detail}", flush=True)
+        return False
+    print(f"[sequencer] production readiness evaluated Project #{project}: "
+          f"{detail}", flush=True)
+    return True
 
 
 def fetch_all_issues(repo: str, token: str) -> dict[int, dict]:
@@ -211,7 +305,19 @@ def fetch_all_issues(repo: str, token: str) -> dict[int, dict]:
     return issues
 
 
-def apply_decision(repo: str, decision: Decision, token: str) -> tuple[bool, str]:
+def _integrated_revision(repo: str, token: str) -> str | None:
+    metadata = dispatcher._api(f"https://api.github.com/repos/{repo}", token)
+    branch = metadata.get("default_branch") if isinstance(metadata, dict) else None
+    if not isinstance(branch, str) or not branch:
+        return None
+    integrated = dispatcher._api(
+        f"https://api.github.com/repos/{repo}/commits/{branch}", token)
+    revision = integrated.get("sha") if isinstance(integrated, dict) else None
+    return revision if isinstance(revision, str) else None
+
+
+def apply_decision(repo: str, decision: Decision, token: str, *,
+                   required_revision: str | None = None) -> tuple[bool, str]:
     fresh = dispatcher.fetch_issue(repo, decision.number, token)
     if fresh is None:
         return False, "subject disappeared"
@@ -219,6 +325,9 @@ def apply_decision(repo: str, decision: Decision, token: str) -> tuple[bool, str
               else dispatcher.PROJECT_LIFECYCLE)
     if dispatcher.lifecycle_of(fresh, prefix) != decision.current:
         return False, "state changed before write"
+    if (required_revision is not None
+            and _integrated_revision(repo, token) != required_revision):
+        return False, "integrated revision changed before write"
     labels = dispatcher.labels_of(fresh) - {decision.current}
     labels.add(decision.target)
     dispatcher._api(
@@ -230,7 +339,29 @@ def apply_decision(repo: str, decision: Decision, token: str) -> tuple[bool, str
 def run(repo: str, token: str, apply: bool = True,
         wip_limit: int = dispatcher.WIP_LIMIT,
         commitment: int | None = None) -> list[Decision]:
-    decisions = plan(fetch_all_issues(repo, token), wip_limit, commitment)
+    issues = fetch_all_issues(repo, token)
+    readiness_mode = production_readiness.mode()
+    if apply:
+        candidates = plan_project_completion(issues, commitment)
+        for candidate in candidates:
+            project = issues[candidate.number]
+            # Legacy Projects predate the envelope contract. Promotion applies
+            # to newly planned work and never retrofits hidden requirements.
+            if operating_envelope.section(
+                    project.get("body") or "", "Operating envelope"):
+                try:
+                    run_production_readiness(repo, candidate.number, token)
+                except Exception as exc:
+                    # Warning mode is genuinely advisory. Blocking mode still
+                    # fails closed below because no exact ready artifact exists.
+                    print(f"[sequencer] production readiness could not evaluate "
+                          f"Project #{candidate.number}: {type(exc).__name__}: {exc}",
+                          flush=True)
+    artifacts = (blocking_readiness_artifacts(repo, token, issues)
+                 if readiness_mode == "blocking" else {})
+    decisions = plan(issues, wip_limit, commitment,
+                     readiness_artifacts=artifacts,
+                     readiness_mode=readiness_mode)
     applied = []
     for decision in decisions:
         if not apply:
@@ -238,7 +369,13 @@ def run(repo: str, token: str, apply: bool = True,
                   f"{decision.current} -> {decision.target}", flush=True)
             applied.append(decision)
             continue
-        ok, note = apply_decision(repo, decision, token)
+        artifact = artifacts.get(decision.number)
+        required_revision = (artifact.get("revision")
+                             if (readiness_mode == "blocking"
+                                 and decision.target == AWAITING_ACCEPTANCE
+                                 and artifact is not None) else None)
+        ok, note = apply_decision(
+            repo, decision, token, required_revision=required_revision)
         print(f"[sequencer] #{decision.number}: "
               f"{note if ok else 'skipped — ' + note}", flush=True)
         if ok:
