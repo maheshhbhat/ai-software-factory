@@ -10,6 +10,8 @@ class CapacityPolicyTests(unittest.TestCase):
         self.assertEqual(Tier.BALANCED, policy.POLICIES["planning"].request().minimum_tier)
         self.assertEqual(Tier.BALANCED, policy.POLICIES["delivery"].request().minimum_tier)
         self.assertEqual(Tier.BALANCED, policy.POLICIES["review"].request().minimum_tier)
+        self.assertEqual(Tier.BALANCED,
+                         policy.POLICIES["production-readiness"].request().minimum_tier)
         self.assertEqual(Tier.ECONOMY, policy.POLICIES["bridge"].request().minimum_tier)
         self.assertEqual(Tier.ECONOMY, policy.POLICIES["readiness"].request().minimum_tier)
 
