@@ -56,10 +56,22 @@ def obligations(story_body: str, project_body: str) -> list[dict]:
         raise EnvelopeError("Story operating-envelope digest is missing")
     if lines[0].removeprefix("digest: ") != digest(entries):
         raise EnvelopeError("Story operating-envelope digest is stale")
-    identifiers = [] if lines[1:] == ["none"] else lines[1:]
+    raw_obligations = [] if lines[1:] == ["none"] else lines[1:]
+    parsed = []
+    for line in raw_obligations:
+        match = re.fullmatch(r"(OE-[A-Z0-9-]+) \| STORY CHECK: (.+)", line)
+        if match:
+            parsed.append((match.group(1), match.group(2)))
+        else:
+            # Approved Projects created before Story-local checks remain readable.
+            parsed.append((line, None))
+    identifiers = [identifier for identifier, _check in parsed]
     if len(set(identifiers)) != len(identifiers):
         raise EnvelopeError("Story operating-envelope IDs are duplicated")
     by_id = {item["id"]: item for item in entries}
     if any(identifier not in by_id for identifier in identifiers):
         raise EnvelopeError("Story references an unknown operating-envelope ID")
-    return [by_id[identifier] for identifier in identifiers]
+    checks = dict(parsed)
+    return [{**by_id[identifier], **({"story_check": checks[identifier]}
+                                    if checks[identifier] else {})}
+            for identifier in identifiers]

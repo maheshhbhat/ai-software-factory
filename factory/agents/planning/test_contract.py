@@ -92,6 +92,28 @@ Text fallback."""
         with self.assertRaises(contract.ContractError):
             contract.validate_output(contract.Altitude.PROJECT, value)
 
+    def test_every_envelope_assignment_requires_exact_story_local_check(self):
+        story = {"key": "core", "title": "Core", "spec": "bounded",
+                 "phase": "build", "depends_on": [], "hazard": False,
+                 "acceptance_criteria": ["check"],
+                 "operating_envelope_ids": ["OE-BROWSER-1"],
+                 "operating_envelope_checks": {}, "scope": ["src/core.js"],
+                 "spend_cap": "$5 / 60 min"}
+        value = {"altitude": "project", "acceptance_criteria": ["criterion"],
+                 "operating_envelope": [{"id": "OE-BROWSER-1",
+                     "category": "responsiveness", "requirement": "render promptly",
+                     "failure_condition": "browser render exceeds bound"}],
+                 "adr": {}, "stories": [story], "expected_bells": 2,
+                 "digest": self.DIGEST}
+        with self.assertRaisesRegex(contract.ContractError, "Story-local executable"):
+            contract.validate_output(contract.Altitude.PROJECT, value)
+        story["operating_envelope_checks"] = {
+            "OE-BROWSER-1": "browser render exceeds bound"}
+        self.assertIs(value, contract.validate_output(contract.Altitude.PROJECT, value))
+        story["operating_envelope_checks"]["OE-EXTRA"] = "unassigned check"
+        with self.assertRaisesRegex(contract.ContractError, "Story-local executable"):
+            contract.validate_output(contract.Altitude.PROJECT, value)
+
     def test_missing_or_mismatched_output_fails(self):
         with self.assertRaises(contract.ContractError):
             contract.validate_output(contract.Altitude.CAMPAIGN, {"altitude": "campaign"})

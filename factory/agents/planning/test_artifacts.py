@@ -88,9 +88,12 @@ def project_output():
             "alternatives": ["Factory repository"], "consequences": ["Product gate required"]},
             "stories": [{**base, "key": "model", "title": "Model retirement",
                          "operating_envelope_ids": ["OE-SCALE-1"],
+                         "operating_envelope_checks": {
+                             "OE-SCALE-1": "representative model test fails"},
                          "spec": "Calculate a projection.", "depends_on": []},
                         {**base, "key": "ui", "title": "Show retirement",
                          "operating_envelope_ids": [],
+                         "operating_envelope_checks": {},
                          "spec": "Render a projection.", "depends_on": ["model"]}],
             "expected_bells": 2, "digest": """## Plan in plain language
 
@@ -307,7 +310,7 @@ class ProjectTests(unittest.TestCase):
                 story["body"] = story["body"].replace("digest: ", "digest: stale-")
             else:
                 story["body"] = story["body"].replace(
-                    "OE-SCALE-1\n\n### Scope", "OE-UNKNOWN\n\n### Scope")
+                    "OE-SCALE-1 | STORY CHECK:", "OE-UNKNOWN | STORY CHECK:")
             with self.subTest(mutation=mutation), self.assertRaises(
                     artifacts.ArtifactError):
                 artifacts.verify(store, trigger, "v2", contract.Altitude.PROJECT)
