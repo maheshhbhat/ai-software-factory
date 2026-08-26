@@ -31,7 +31,9 @@ def setUpModule():
                           os.path.join(tempfile.gettempdir(), "factory-runtime-test.jsonl"))
 
 
-CANONICAL = "DISPATCH story=#64 project=#55 agent=claude-delivery"
+RESERVATION = "a" * 32
+CANONICAL = ("DISPATCH story=#64 project=#55 agent=claude-delivery "
+             f"reservation={RESERVATION}")
 
 REPORT = f"""Dispatcher — 4 issue(s) considered, WIP 0/2
 
@@ -224,7 +226,8 @@ class TestParsing(unittest.TestCase):
 
     def test_canonical_line_is_parsed(self):
         self.assertEqual(poller.parse_dispatches(REPORT),
-                         [{"story": 64, "project": 55, "agent": "claude-delivery"}])
+                         [{"story": 64, "project": 55, "agent": "claude-delivery",
+                           "reservation": RESERVATION}])
 
     def test_report_without_dispatch_yields_nothing(self):
         quiet = "Dispatcher — 4 issue(s) considered, WIP 2/2\n\nCapacity exhausted"
@@ -232,7 +235,8 @@ class TestParsing(unittest.TestCase):
 
     def test_multiple_dispatches_preserve_order(self):
         text = (f"{CANONICAL}\n"
-                "DISPATCH story=#70 project=#55 agent=claude-delivery")
+                "DISPATCH story=#70 project=#55 agent=claude-delivery "
+                f"reservation={'b' * 32}")
         self.assertEqual([d["story"] for d in poller.parse_dispatches(text)], [64, 70])
 
     def test_near_miss_lines_fail_closed(self):
@@ -275,6 +279,28 @@ class TestWorkerAdapter(unittest.TestCase):
         os.environ["FACTORY_WORKER_CMD"] = "/bin/echo start {story} for {agent} in {project}"
         cmd = poller.worker_command({"story": 64, "project": 55, "agent": "codex-delivery"})
         self.assertEqual(cmd, ["/bin/echo", "start", "64", "for", "codex-delivery", "in", "55"])
+
+    def test_reservation_placeholder_is_forwarded(self):
+        os.environ["FACTORY_WORKER_CMD"] = "/bin/echo {reservation}"
+        cmd = poller.worker_command({"story": 64, "project": 55,
+                                     "agent": "codex-delivery",
+                                     "reservation": RESERVATION})
+        self.assertEqual(cmd, ["/bin/echo", RESERVATION])
+
+    def test_only_unstarted_capacity_is_releasable(self):
+        with tempfile.TemporaryDirectory() as temporary, \
+             mock.patch.dict(os.environ, {"FACTORY_CAPACITY_STATE":
+                                          os.path.join(temporary, "state.sqlite")}):
+            state = poller.CapacityState(os.environ["FACTORY_CAPACITY_STATE"], uri=False)
+            state.mark_healthy("openai", "terra")
+            active = state.reserve("delivery", "openai", "terra", 1,
+                                   ttl_seconds=30)
+            consumed = state.reserve("started", "openai", "terra", 1,
+                                     ttl_seconds=30)
+            state.consume(consumed.lease_id, task_key="started")
+            state.close()
+            self.assertTrue(poller.release_unstarted_reservation(active.lease_id))
+            self.assertFalse(poller.release_unstarted_reservation(consumed.lease_id))
 
     def test_adapter_receives_no_business_context(self):
         """§4: a queue item carries routing metadata and an artifact link, never
@@ -752,7 +778,7 @@ class TestLaunchBoundComesFromTheStory(unittest.TestCase):
         recorded = {}
 
         def recording(specs, story, project, required="delivery",
-                      runner=None, timeout_s=None):
+                      runner=None, timeout_s=None, reservation=""):
             recorded["timeout_s"] = timeout_s
             report = poller.workers.LaunchReport("claude-delivery", "LAUNCHED")
             return report, [report]
@@ -764,7 +790,8 @@ class TestLaunchBoundComesFromTheStory(unittest.TestCase):
             with mock.patch.object(poller.workers, "dispatch_to_worker",
                                    side_effect=recording):
                 poller.wake_worker({"story": 64, "project": 54,
-                                    "agent": "claude-delivery"}, timeout_s=3720)
+                                    "agent": "claude-delivery",
+                                    "reservation": "a" * 32}, timeout_s=3720)
         finally:
             os.environ.clear()
             os.environ.update(env)

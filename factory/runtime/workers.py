@@ -286,7 +286,8 @@ def select(specs: list[WorkerSpec], required: str = "delivery",
 # --------------------------------------------------------------------------
 
 
-def launch_command(spec: WorkerSpec, story: int, project: int) -> list[str]:
+def launch_command(spec: WorkerSpec, story: int, project: int,
+                   reservation: str = "") -> list[str]:
     """Resolve the launch command for one dispatch.
 
     The worker receives routing identity only — story, project, agent. No spec,
@@ -296,6 +297,7 @@ def launch_command(spec: WorkerSpec, story: int, project: int) -> list[str]:
     return [part.replace("{story}", str(story))
                 .replace("{project}", str(project))
                 .replace("{agent}", spec.name)
+                .replace("{reservation}", reservation)
             for part in shlex.split(spec.launch)]
 
 
@@ -351,7 +353,8 @@ def run_observed(cmd, capture_output=True, text=True, timeout=None):
 
 
 def launch(spec: WorkerSpec, story: int, project: int,
-           runner=None, timeout_s: int | None = None) -> LaunchReport:
+           runner=None, timeout_s: int | None = None,
+           reservation: str = "") -> LaunchReport:
     """Hand one Story to one worker.
 
     The distinction that matters: a timeout is `AMBIGUOUS`, not `FAILED`. The
@@ -364,7 +367,7 @@ def launch(spec: WorkerSpec, story: int, project: int,
     failed worker's stdout were discarded, and for a hang that was the half with
     the explanation in it.
     """
-    cmd = launch_command(spec, story, project)
+    cmd = launch_command(spec, story, project, reservation)
     runner = runner or run_observed
     bound = timeout_s or fallback_timeout()
     started = time.monotonic()
@@ -433,7 +436,8 @@ def _stream(value) -> str:
 def dispatch_to_worker(specs: list[WorkerSpec], story: int, project: int,
                        required: str = "delivery",
                        runner=None,
-                       timeout_s: int | None = None) -> tuple[LaunchReport | None, list]:
+                       timeout_s: int | None = None,
+                       reservation: str = "") -> tuple[LaunchReport | None, list]:
     """Give one Story to exactly one worker, or to none.
 
     Returns (successful report or None, the trail of every attempt). The trail is
@@ -450,7 +454,8 @@ def dispatch_to_worker(specs: list[WorkerSpec], story: int, project: int,
         return None, trail
 
     for index, spec in enumerate(eligible):
-        report = launch(spec, story, project, runner=runner, timeout_s=timeout_s)
+        report = launch(spec, story, project, runner=runner, timeout_s=timeout_s,
+                        reservation=reservation)
         trail.append(report)
         remaining = [s.name for s in eligible[index + 1:]]
         if report.launched:

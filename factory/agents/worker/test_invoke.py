@@ -40,6 +40,36 @@ class ParsingTests(unittest.TestCase):
 
 
 class BoundaryTests(unittest.TestCase):
+    def test_default_capacity_state_is_factory_owned_not_product_owned(self):
+        self.assertEqual(invoke.ROOT / "runs" / "capacity-pool.sqlite",
+                         invoke.capacity_state_path({}))
+        self.assertEqual(pathlib.Path("/tmp/shared.sqlite"),
+                         invoke.capacity_state_path(
+                             {"FACTORY_CAPACITY_STATE": "/tmp/shared.sqlite"}))
+
+    def test_cli_refuses_to_bypass_capacity_admission(self):
+        buffer = io.StringIO()
+        with mock.patch.dict(invoke.os.environ, {"GH_TOKEN": "t"}), \
+             mock.patch.object(invoke.sys, "stderr", buffer):
+            code = invoke.main(["--repo", "o/r", "--story", "1"])
+        self.assertEqual(2, code)
+        self.assertIn("admission reservation", buffer.getvalue())
+
+    def test_worker_start_is_durable_and_binds_the_reservation(self):
+        class Client:
+            def __init__(self): self.comments = []
+            def api(self, path, *, method="GET", value=None):
+                self.comments.append(value)
+                return value
+        client = Client()
+        invoke.publish_worker_start(
+            client, repo="Owner/Repo", story=20, version="claim-1",
+            reservation="a" * 32, invocation="delivery:owner/repo:20:1")
+        body = client.comments[0]["body"]
+        self.assertIn(invoke.START_MARKER, body)
+        self.assertIn('"reservation_id": "' + "a" * 32 + '"', body)
+        self.assertIn('"state_version": "claim-1"', body)
+
     def test_private_repository_401_is_a_loud_access_constraint(self):
         denied = invoke.urllib.error.HTTPError("https://api.github.test", 401,
                                                "Unauthorized", {}, None)
@@ -288,7 +318,8 @@ class EngineExplanationTests(unittest.TestCase):
                  return_value=contextlib.nullcontext(pathlib.Path("."))), \
              mock.patch.dict(invoke.os.environ, {"GH_TOKEN": "t"}), \
              mock.patch.object(invoke.sys, "stderr", buffer):
-            code = invoke.main(["--repo", "o/r", "--story", "1"])
+            code = invoke.main(["--repo", "o/r", "--story", "1",
+                                "--reservation", "a" * 32])
         self.assertEqual(1, code)
         self.assertIn("the engine said: cannot write", buffer.getvalue())
 
@@ -301,7 +332,8 @@ class EngineExplanationTests(unittest.TestCase):
                  mock.patch.dict(invoke.os.environ, {"GH_TOKEN": "secret"}), \
                  mock.patch.object(invoke.obs, "operational_log") as log:
                 code = invoke.main(["--repo", "o/r", "--story", "1",
-                                    "--checkout", directory])
+                                    "--checkout", directory,
+                                    "--reservation", "a" * 32])
         self.assertEqual(1, code)
         diagnostics = log.call_args.kwargs["platform_diagnostics"]
         self.assertTrue(diagnostics["git_dir"]["writable_by_access_check"])

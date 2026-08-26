@@ -68,6 +68,7 @@ from datetime import datetime, timezone
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.join(HERE, "..", "dispatcher"))
+sys.path.insert(0, os.path.join(HERE, "..", ".."))
 import completion   # noqa: E402  — post-worker-success transition (#104)
 import continuation  # noqa: E402  — decision-comment consumption (#71)
 import dispatcher   # noqa: E402  — live issue/PR substrate for Phase 4 review routing
@@ -80,6 +81,7 @@ import readiness_receipt  # noqa: E402
 import runlog       # noqa: E402  — operational record (#104)
 import sequencer    # noqa: E402  — dependency/project lifecycle sequencing (#193)
 import workers      # noqa: E402  — standard worker contract (#84)
+from factory.capacity_pool.state import CapacityState  # noqa: E402
 
 DISPATCHER = os.path.join(HERE, "..", "dispatcher", "dispatcher.py")
 
@@ -87,7 +89,9 @@ DISPATCHER = os.path.join(HERE, "..", "dispatcher", "dispatcher.py")
 # strict about every field: this is the one string that crosses the boundary
 # between deciding and doing, so a near-miss must not be read as a dispatch.
 DISPATCH_RE = re.compile(
-    r"^DISPATCH story=#(?P<story>\d+) project=#(?P<project>\d+) agent=(?P<agent>[a-z0-9][a-z0-9-]{2,31})$"
+    r"^DISPATCH story=#(?P<story>\d+) project=#(?P<project>\d+) "
+    r"agent=(?P<agent>[a-z0-9][a-z0-9-]{2,31}) "
+    r"reservation=(?P<reservation>[0-9a-f]{32})$"
 )
 
 DEFAULT_INTERVAL = 60
@@ -212,6 +216,7 @@ def parse_dispatches(stdout: str) -> list[dict]:
             "story": int(match.group("story")),
             "project": int(match.group("project")),
             "agent": match.group("agent"),
+            "reservation": match.group("reservation"),
         })
     return dispatches
 
@@ -253,7 +258,8 @@ def worker_command(dispatch: dict) -> list[str]:
     parts = shlex.split(template)
     return [p.replace("{story}", str(dispatch["story"]))
              .replace("{project}", str(dispatch["project"]))
-             .replace("{agent}", dispatch["agent"]) for p in parts]
+             .replace("{agent}", dispatch["agent"])
+             .replace("{reservation}", dispatch.get("reservation", "")) for p in parts]
 
 
 def story_launch_bound(repo: str, story: int) -> int | None:
@@ -270,6 +276,21 @@ def story_launch_bound(repo: str, story: int) -> int | None:
         return workers.launch_timeout((issue or {}).get("body"))
     except Exception:  # noqa: BLE001 — fallback, never a blocked dispatch
         return None
+
+
+def release_unstarted_reservation(reservation: str) -> bool:
+    """Return true only when durable capacity state proves no model start."""
+    configured = os.environ.get("FACTORY_CAPACITY_STATE", "").strip()
+    root = pathlib.Path(__file__).resolve().parents[2]
+    path = pathlib.Path(configured) if configured else root / "runs" / "capacity-pool.sqlite"
+    state = CapacityState(path, uri=False)
+    try:
+        status = state.lease_status(reservation)
+        if status in {"active", "expired"}:
+            return state.release(reservation)
+        return status == "released"
+    finally:
+        state.close()
 
 
 def wake_worker(dispatch: dict,
@@ -291,7 +312,8 @@ def wake_worker(dispatch: dict,
     specs = workers.configured_workers()
     if specs:
         report, trail = workers.dispatch_to_worker(
-            specs, dispatch["story"], dispatch["project"], timeout_s=timeout_s)
+            specs, dispatch["story"], dispatch["project"],
+            reservation=dispatch["reservation"], timeout_s=timeout_s)
         for entry in trail:
             reason = getattr(entry, "reason", None) or getattr(entry, "result", "")
             print(f"[worker] {entry.worker}: {reason} {entry.detail}".rstrip(), flush=True)
@@ -659,7 +681,11 @@ def poll_once(repo: str, commitment: int, seen: set[int],
                 evidence = os.path.join(os.environ.get("FACTORY_RUN_DIR", "run log"),
                                         "process-events.jsonl")
                 try:
-                    released, detail = dispatcher.release_definite_failure(
+                    unstarted = release_unstarted_reservation(
+                        dispatch["reservation"])
+                    recovery = (dispatcher.release_unstarted_failure
+                                if unstarted else dispatcher.release_definite_failure)
+                    released, detail = recovery(
                         repo, dispatch["story"], token, reason=str(exc), evidence=evidence)
                 except Exception as recovery_error:  # claim remains safe and visible
                     raise exc from recovery_error

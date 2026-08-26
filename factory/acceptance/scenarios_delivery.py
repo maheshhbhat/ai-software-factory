@@ -52,7 +52,7 @@ class WorkerSelectionAndLaunch(Scenario):
         # nothing else the worker could read instead of reading GitHub.
         item = woken[0]
         assert item["story"] == 10 and item["project"] == 901, item
-        assert set(item) == {"story", "project", "agent"}, \
+        assert set(item) == {"story", "project", "agent", "reservation"}, \
             f"the queue item carries more than routing identity: {sorted(item)}"
         self.note(f"the queue item carried routing identity only: {sorted(item)}")
 
@@ -249,14 +249,14 @@ class WorkerFailureAndFailover(Scenario):
                 redirect_stdout(buffer):
             poller.main(["--repo", "o/r", "--commitment", "54", "--once"])
         output = buffer.getvalue()
-        assert "confirmed failure released" in output, output
+        assert "unstarted admission released" in output, output
         assert hub.lifecycle(10) == dispatcher.READY, \
             "a confirmed stopped worker should not hold the ambiguity lease"
-        assert hub.section(10, "Attempt") == "1", \
-            "the failed worker attempt must remain counted"
+        assert hub.section(10, "Attempt") == "0", \
+            "a worker that never started must not consume an Attempt"
         assert hub.state(10) == "open"
-        self.note("every engine failing was loud, woke nobody, and immediately "
-                  "released the claim while preserving the failed attempt")
+        self.note("every engine failing before worker start was loud, woke nobody, "
+                  "and immediately restored both the claim and Attempt")
 
         # Ambiguity must never fall back — two workers on one story is the one
         # outcome worse than none.

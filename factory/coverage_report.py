@@ -108,6 +108,7 @@ ACCEPTANCE = {
     "acceptance/test_planning_capacity_pool.py",
 }
 CAPACITY_POOL_UNIT = {
+    "acceptance/test_capacity_admission.py",
     "acceptance/test_capacity_pool.py",
     "acceptance/test_capacity_pool_executor.py",
     "acceptance/test_capacity_pool_policy.py",
