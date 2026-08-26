@@ -15,11 +15,12 @@ import datetime as dt
 import io
 import os
 import re
+import tempfile
 import unittest
 import urllib.error
 import urllib.parse
 from datetime import datetime, timedelta, timezone
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import dispatcher as dp
 from dispatcher import Reason as R
@@ -394,6 +395,19 @@ class TestClaimRecovery(unittest.TestCase):
         api.assert_not_called()
 
     @patch.object(dp, "_api")
+    @patch.object(dp, "fetch_issue")
+    def test_unstarted_admission_restores_attempt(self, fetch_issue, api):
+        fetch_issue.return_value = self.claimed(attempt="2")
+        ok, note = dp.release_unstarted_failure(
+            "owner/repo", 10, "token", reason="reservation expired",
+            evidence="runs/x/process-events.jsonl")
+        self.assertTrue(ok, note)
+        payload = api.call_args_list[-1].kwargs["payload"]
+        self.assertEqual(
+            "1", dp.merge_gate.parse_section(payload["body"], "Attempt").strip())
+        self.assertIn("story:ready", payload["labels"])
+
+    @patch.object(dp, "_api")
     @patch.object(dp, "fetch_timeline", return_value=[])
     @patch.object(dp, "fetch_issue")
     def test_poison_keeps_attempt_three_and_leaves_the_issue_open(self, fetch_issue,
@@ -413,6 +427,37 @@ class TestClaimRecovery(unittest.TestCase):
 
 
 class TestDispatchLine(unittest.TestCase):
+    @patch.object(dp, "claim")
+    @patch.object(dp.capacity_admission, "reserve", return_value=None)
+    def test_zero_capacity_never_calls_claim(self, reserve, claim):
+        state = Mock()
+        candidate = story(42)
+        candidate["body"] += "\n### Spend cap\n\n$5 / 60 min\n"
+        with patch.object(dp.capacity_admission, "delivery_request",
+                          return_value=object()):
+            ok, reservation, note = dp.admit_and_claim(
+                "owner/repo", candidate, "token", state=state, registry=())
+        self.assertFalse(ok)
+        self.assertIsNone(reservation)
+        self.assertIn("no eligible capacity", note)
+        claim.assert_not_called()
+
+    @patch.object(dp, "claim", return_value=(False, "state changed"))
+    @patch.object(dp.capacity_admission, "reserve",
+                  return_value=dp.capacity_admission.Admission("a" * 32))
+    def test_claim_race_releases_reservation(self, reserve, claim):
+        state = Mock()
+        candidate = story(42)
+        candidate["body"] += "\n### Spend cap\n\n$5 / 60 min\n"
+        with patch.object(dp.capacity_admission, "delivery_request",
+                          return_value=object()):
+            ok, reservation, note = dp.admit_and_claim(
+                "owner/repo", candidate, "token", state=state, registry=())
+        self.assertFalse(ok)
+        self.assertIsNone(reservation)
+        self.assertIn("state changed", note)
+        state.release.assert_called_once_with("a" * 32)
+
     def test_line_carries_identity_only(self):
         line = dp.dispatch_line(42, 901)
         self.assertIn("story=#42", line)
@@ -426,7 +471,7 @@ class TestDispatchLine(unittest.TestCase):
         with patch.dict(os.environ,
                         {"FACTORY_WORKER_ORDER": "codex-delivery"}):
             self.assertEqual(
-                "DISPATCH story=#42 project=#901 agent=codex-delivery",
+                "DISPATCH story=#42 project=#901 agent=codex-delivery reservation=dry-run",
                 dp.dispatch_line(42, 901))
 
     def test_line_refuses_an_invalid_configured_identity(self):
@@ -873,8 +918,17 @@ class TestClosedDependencyThroughTheRealLoadingPath(unittest.TestCase):
     def run_main(self, github, *extra):
         argv = ["--repo", "owner/repo", "--commitment", str(COMMITMENT), *extra]
         out = io.StringIO()
-        with patch.object(dp, "_api", github), \
+        with tempfile.TemporaryDirectory() as temporary, \
+             patch.object(dp, "_api", github), \
+             patch.object(dp.capacity_admission, "reserve",
+                          return_value=dp.capacity_admission.Admission("a" * 32)), \
+             patch.object(dp.capacity_admission, "delivery_request",
+                          return_value=object()), \
+             patch.object(dp.capacity_admission, "delivery_task_key",
+                          return_value="delivery:owner/repo:106:1"), \
              patch.dict("os.environ", {"GITHUB_TOKEN": "t"}, clear=False), \
+             patch.dict("os.environ", {"FACTORY_CAPACITY_STATE":
+                                       os.path.join(temporary, "capacity.sqlite")}), \
              contextlib.redirect_stdout(out):
             code = dp.main(argv)
         self.assertEqual(code, 0, out.getvalue())

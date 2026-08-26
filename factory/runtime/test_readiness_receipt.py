@@ -44,6 +44,10 @@ class ReceiptTests(unittest.TestCase):
                  ({"revision": "b" * 40}, "factory_revision does not match"),
                  ({"environ": {**self.env, "FACTORY_CAPACITY_STATE": "/other/state"}},
                   "configuration_fingerprint does not match"),
+                 ({"environ": {**self.env,
+                                "FACTORY_WORKER_CAPACITY_DELIVERY_LAUNCH":
+                                "/tmp/other-worker"}},
+                  "configuration_fingerprint does not match"),
                  ({"environ": {"FACTORY_WORKER_ORDER": "other"}},
                   "configuration_fingerprint does not match"))
         for change, message in cases:

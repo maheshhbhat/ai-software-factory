@@ -97,6 +97,42 @@ class CapacityStateTests(unittest.TestCase):
             self.state.reserve("task", "openai", "terra", 1, ttl_seconds=5,
                                max_health_age_seconds=30)
 
+    def test_reservation_is_single_use_task_bound_and_releasable_before_start(self):
+        self.state.mark_healthy("openai", "terra")
+        lease = self.state.reserve("delivery:o/r:20:1", "openai", "terra", 1,
+                                   ttl_seconds=5)
+        with self.assertRaisesRegex(RuntimeError, "task does not match"):
+            self.state.consume(lease.lease_id, task_key="delivery:o/r:21:1")
+        consumed = self.state.consume(
+            lease.lease_id, task_key="delivery:o/r:20:1")
+        self.assertEqual("terra", consumed.model)
+        self.assertEqual("consumed", self.state.lease_status(lease.lease_id))
+        with self.assertRaisesRegex(RuntimeError, "not active"):
+            self.state.consume(lease.lease_id, task_key="delivery:o/r:20:1")
+        self.assertFalse(self.state.release(lease.lease_id))
+
+        releasable = self.state.reserve(
+            "delivery:o/r:22:1", "openai", "terra", 1, ttl_seconds=5)
+        self.assertTrue(self.state.release(releasable.lease_id))
+        self.assertEqual("released", self.state.lease_status(releasable.lease_id))
+
+    def test_expired_or_newly_unhealthy_reservation_cannot_be_consumed(self):
+        self.state.mark_healthy("openai", "terra")
+        expired = self.state.reserve("expired", "openai", "terra", 1,
+                                     ttl_seconds=2)
+        self.clock.advance(2)
+        with self.assertRaisesRegex(RuntimeError, "expired"):
+            self.state.consume(expired.lease_id, task_key="expired")
+        self.assertEqual("expired", self.state.lease_status(expired.lease_id))
+
+        self.state.mark_healthy("openai", "terra")
+        unavailable = self.state.reserve("unavailable", "openai", "terra", 1,
+                                         ttl_seconds=2)
+        self.state.mark_failure("openai", "terra", "unavailable")
+        with self.assertRaisesRegex(RuntimeError, "became unavailable"):
+            self.state.consume(unavailable.lease_id, task_key="unavailable")
+        self.assertTrue(self.state.release(unavailable.lease_id))
+
 
 if __name__ == "__main__":
     unittest.main()

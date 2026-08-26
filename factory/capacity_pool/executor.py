@@ -27,11 +27,30 @@ class CapacityExecutor:
 
     def execute(self, *, task_key: str, request: RouteRequest,
                 registry: tuple[ModelCapacity, ...], payload,
-                validate=lambda output: None) -> ExecutionResult:
+                validate=lambda output: None, reservation_id: str | None = None,
+                on_started=lambda lease: None) -> ExecutionResult:
         try:
             plan = route(request, registry)
         except LookupError:
             return self._finish("no-eligible-capacity", "", [], 0.0)
+        reserved = None
+        if reservation_id is not None:
+            try:
+                reserved = self.state.reservation(
+                    reservation_id, task_key=task_key)
+            except CapacityUnavailable as exc:
+                return self._finish("no-eligible-capacity", str(exc)[:500], [], 0.0)
+            matching = [step for step in plan.steps
+                        if (step.provider, step.model) ==
+                        (reserved.provider, reserved.model)]
+            if not matching:
+                return self._finish(
+                    "no-eligible-capacity", "reserved route no longer satisfies policy", [], 0.0)
+            plan = type(plan)(plan.task_type,
+                              tuple(matching + [step for step in plan.steps
+                                                if step not in matching]),
+                              plan.total_timeout_seconds, plan.total_budget_units,
+                              plan.fallback_on, plan.stop_on)
         started, consumed, records = self.monotonic(), 0.0, []
         for index, step in enumerate(plan.steps):
             attempt = None
@@ -48,15 +67,40 @@ class CapacityExecutor:
                               remaining_budget / attempts_left)
             adapter = self.adapters.get(step.provider)
             if adapter is None:
+                if index == 0 and reserved is not None:
+                    self.state.release(reserved.lease_id)
+                    return self._finish(
+                        "start-unavailable", "reserved provider adapter missing",
+                        records, consumed)
                 attempt = AttemptResult("unavailable", diagnostic="provider adapter missing")
             else:
                 try:
-                    lease = self.state.reserve(
-                        task_key, step.provider, step.model, attempt_budget,
-                        ttl_seconds=attempt_time)
+                    if index == 0 and reserved is not None:
+                        lease = self.state.consume(
+                            reserved.lease_id, task_key=task_key)
+                        attempt_budget = min(attempt_budget,
+                                             lease.reserved_budget)
+                        attempt_time = min(
+                            attempt_time,
+                            max(1, int(lease.expires_at - self.state.clock())))
+                        try:
+                            on_started(lease)
+                        except Exception as exc:
+                            self.state.abort_start(lease.lease_id)
+                            return self._finish(
+                                "start-evidence-failed", str(exc)[:500], records,
+                                consumed)
+                    else:
+                        lease = self.state.reserve(
+                            task_key, step.provider, step.model, attempt_budget,
+                            ttl_seconds=attempt_time)
                 except DuplicateTask:
                     return self._finish("duplicate-execution", "", records, consumed)
                 except CapacityUnavailable as exc:
+                    if index == 0 and reserved is not None:
+                        self.state.release(reserved.lease_id)
+                        return self._finish(
+                            "start-unavailable", str(exc)[:500], records, consumed)
                     attempt = AttemptResult("unavailable", diagnostic=str(exc)[:500])
                     lease = None
                     observed_failure = False
@@ -74,7 +118,8 @@ class CapacityExecutor:
                                 if attempt is not None and
                                 attempt.consumed_budget_units is not None
                                 else remaining_budget)
-                    if lease is not None:
+                    if lease is not None and self.state.lease_status(
+                            lease.lease_id) in {"active", "consumed"}:
                         consumed += self.state.reconcile(
                             lease.lease_id, consumed_budget_units=reported)
             record = {"attempt": index + 1, "provider": step.provider,

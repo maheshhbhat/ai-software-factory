@@ -41,6 +41,7 @@ import completion
 import dispatcher
 import poller
 import workers
+from factory.capacity_pool.state import CapacityState
 
 
 def setUpModule():
@@ -73,6 +74,10 @@ none
 ### Attempt
 
 0
+
+### Spend cap
+
+$5 / 30 min
 
 ### Scope
 
@@ -258,6 +263,12 @@ class LifecycleCase(unittest.TestCase):
         # The legacy adapter path: one command, no health probe. The worker
         # contract has its own tests; what this file exercises is the lifecycle.
         os.environ["FACTORY_WORKER_CMD"] = "/usr/bin/true"
+        self._capacity_temp = tempfile.TemporaryDirectory()
+        os.environ["FACTORY_CAPACITY_STATE"] = os.path.join(
+            self._capacity_temp.name, "state.sqlite")
+        state = CapacityState(os.environ["FACTORY_CAPACITY_STATE"], uri=False)
+        state.mark_healthy("openai", "gpt-5.6-terra", "lifecycle-fixture")
+        state.close()
         self._api = mock.patch.object(dispatcher, "_api", self.hub)
         self._api.start()
         # Continuation reads projects at bells through its own client and has
@@ -268,6 +279,7 @@ class LifecycleCase(unittest.TestCase):
     def tearDown(self):
         self._continuation.stop()
         self._api.stop()
+        self._capacity_temp.cleanup()
         os.environ.clear()
         os.environ.update(self._env)
 
@@ -373,7 +385,7 @@ class TestUnprovenWorkKeepsTheOldSafeBehaviour(LifecycleCase):
         self.poll(worker)
         self.assertIn("story:ready", self.hub.labels(STORY))
         self.assertNotIn("story:claimed", self.hub.labels(STORY))
-        self.assertEqual("1", self.hub.section(STORY, "Attempt"))
+        self.assertEqual("0", self.hub.section(STORY, "Attempt"))
         self.assertEqual("open", self.hub.issues[STORY]["state"])
 
 

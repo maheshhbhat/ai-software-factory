@@ -194,11 +194,97 @@ class CapacityState:
         return Lease(lease_id, task_key, provider, model, budget_units,
                      now + ttl_seconds)
 
+    def consume(self, lease_id: str, *, task_key: str) -> Lease:
+        """Atomically turn one unexpired admission reservation into execution.
+
+        The caller supplies the logical task identity so an opaque reservation
+        copied from another Story cannot be used to launch work.
+        """
+        now = self.clock()
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            row = self.connection.execute(
+                "SELECT * FROM leases WHERE lease_id=?", (lease_id,)).fetchone()
+            if not row or row["status"] != "active":
+                raise CapacityUnavailable("capacity reservation is not active")
+            if row["expires_at"] <= now:
+                self.connection.execute(
+                    "UPDATE leases SET status='expired' WHERE lease_id=?", (lease_id,))
+                self.connection.execute("COMMIT")
+                raise CapacityUnavailable("capacity reservation expired")
+            if row["task_key"] != task_key:
+                raise CapacityUnavailable("capacity reservation task does not match")
+            current = self.health(row["provider"], row["model"])
+            provider_health = self.health(row["provider"], "*")
+            if current["state"] != "healthy" or provider_health["state"] not in {
+                    "unknown", "healthy"}:
+                raise CapacityUnavailable(
+                    "reserved capacity became unavailable before start")
+            self.connection.execute(
+                "UPDATE leases SET status='consumed' WHERE lease_id=?", (lease_id,))
+            self.connection.execute("COMMIT")
+        except CapacityUnavailable:
+            if self.connection.in_transaction:
+                self.connection.execute("ROLLBACK")
+            raise
+        except Exception:
+            self.connection.execute("ROLLBACK")
+            raise
+        return Lease(row["lease_id"], row["task_key"], row["provider"],
+                     row["model"], float(row["reserved_budget"]),
+                     float(row["expires_at"]))
+
+    def reservation(self, lease_id: str, *, task_key: str) -> Lease:
+        """Read an active opaque reservation for Capacity Pool internals."""
+        row = self.connection.execute(
+            "SELECT * FROM leases WHERE lease_id=? AND status='active'", (lease_id,)).fetchone()
+        if not row:
+            raise CapacityUnavailable("capacity reservation is not active")
+        if row["task_key"] != task_key:
+            raise CapacityUnavailable("capacity reservation task does not match")
+        if row["expires_at"] <= self.clock():
+            self.connection.execute(
+                "UPDATE leases SET status='expired' WHERE lease_id=?", (lease_id,))
+            raise CapacityUnavailable("capacity reservation expired")
+        return Lease(row["lease_id"], row["task_key"], row["provider"],
+                     row["model"], float(row["reserved_budget"]),
+                     float(row["expires_at"]))
+
+    def active_for_task(self, task_key: str) -> Lease | None:
+        row = self.connection.execute(
+            "SELECT * FROM leases WHERE task_key=? AND status='active' "
+            "ORDER BY expires_at DESC LIMIT 1", (task_key,)).fetchone()
+        if not row or row["expires_at"] <= self.clock():
+            return None
+        return Lease(row["lease_id"], row["task_key"], row["provider"],
+                     row["model"], float(row["reserved_budget"]),
+                     float(row["expires_at"]))
+
+    def abort_start(self, lease_id: str) -> bool:
+        """Undo acquisition only while model start evidence is still absent."""
+        changed = self.connection.execute(
+            "UPDATE leases SET status='released' "
+            "WHERE lease_id=? AND status='consumed'", (lease_id,)).rowcount
+        return changed == 1
+
+    def release(self, lease_id: str) -> bool:
+        """Release only a reservation that has not started execution."""
+        changed = self.connection.execute(
+            "UPDATE leases SET status='released' "
+            "WHERE lease_id=? AND status IN ('active','expired')", (lease_id,)).rowcount
+        return changed == 1
+
+    def lease_status(self, lease_id: str) -> str | None:
+        row = self.connection.execute(
+            "SELECT status FROM leases WHERE lease_id=?", (lease_id,)).fetchone()
+        return row["status"] if row else None
+
     def reconcile(self, lease_id, *, consumed_budget_units):
         if consumed_budget_units < 0:
             raise ValueError("consumption cannot be negative")
         row = self.connection.execute(
-            "SELECT * FROM leases WHERE lease_id=? AND status='active'", (lease_id,)).fetchone()
+            "SELECT * FROM leases WHERE lease_id=? AND status IN ('active','consumed')",
+            (lease_id,)).fetchone()
         if not row:
             raise RuntimeError("lease is not active")
         self.connection.execute("UPDATE leases SET status='complete' WHERE lease_id=?", (lease_id,))

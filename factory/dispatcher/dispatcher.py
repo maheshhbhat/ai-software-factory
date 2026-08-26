@@ -31,6 +31,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import pathlib
 import re
 import sys
 import urllib.error
@@ -40,8 +41,12 @@ from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "gates"))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "runtime"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 import merge_gate  # noqa: E402  — single source of truth for the §9.6 Scope dialect
 import observability as obs  # noqa: E402
+from factory.capacity_pool import admission as capacity_admission  # noqa: E402
+from factory.capacity_pool.policy import resolved_registry  # noqa: E402
+from factory.capacity_pool.state import CapacityState  # noqa: E402
 
 WIP_LIMIT = 2                      # §9.10 — a contract value, not a runtime tweak
 ATTEMPT_MAX = 3                    # §4.3.5 — checked at dispatch time, before incrementing
@@ -704,6 +709,40 @@ def release_definite_failure(repo: str, story_number: int, token: str, *,
     return True, f"confirmed failure released; Attempt preserved; labels {' '.join(labels)}"
 
 
+def release_unstarted_failure(repo: str, story_number: int, token: str, *,
+                              reason: str, evidence: str) -> tuple[bool, str]:
+    """Return an admitted claim whose reserved worker never started.
+
+    Capacity state proves the reservation was not consumed. This is therefore
+    infrastructure admission failure, not a delivery Attempt.
+    """
+    fresh = fetch_issue(repo, story_number, token)
+    if fresh is None or lifecycle_of(fresh, STORY_LIFECYCLE) != CLAIMED:
+        return False, "story is not currently claimed"
+    attempt_raw = (merge_gate.parse_section(
+        fresh.get("body") or "", "Attempt") or "").strip()
+    if not attempt_raw.isdigit() or int(attempt_raw) < 1:
+        return False, f"Attempt cannot be restored: {attempt_raw!r}"
+    body = (fresh.get("body") or "").replace("\r\n", "\n")
+    restored = re.sub(
+        r"(### Attempt\n\n)(\d+)(\n)",
+        lambda match: match.group(1) + str(int(attempt_raw) - 1) + match.group(3),
+        body, count=1)
+    if restored == body:
+        return False, "Attempt section could not be restored"
+    comment = ("## Factory admission recovery\n\n"
+               "The reserved worker did not start. This was not a delivery Attempt.\n\n"
+               f"Reason: {reason}\n\nEvidence: `{evidence}`\n\n"
+               "The claim and Attempt increment were restored.")
+    _api(f"https://api.github.com/repos/{repo}/issues/{story_number}/comments",
+         token, method="POST", payload={"body": comment})
+    labels = sorted((labels_of(fresh) - {CLAIMED}) | {READY})
+    _api(f"https://api.github.com/repos/{repo}/issues/{story_number}", token,
+         method="PATCH", payload={"body": restored, "labels": labels})
+    return True, (f"unstarted admission released; Attempt {attempt_raw} -> "
+                  f"{int(attempt_raw) - 1}; labels {' '.join(labels)}")
+
+
 def poison(repo: str, story: dict, token: str) -> tuple[bool, str]:
     """§4.3.5: the fourth dispatch opportunity does not dispatch; it poisons.
 
@@ -781,12 +820,32 @@ def claim(repo: str, story: dict, token: str) -> tuple[bool, str]:
     return True, f"Attempt {attempt} -> {attempt + 1}; labels {' '.join(labels)}"
 
 
+def admit_and_claim(repo: str, story: dict, token: str, *, state: CapacityState,
+                    registry) -> tuple[bool, str | None, str]:
+    """One bounded admission transaction; route identity remains opaque."""
+    try:
+        admitted = capacity_admission.reserve(
+            task_key=capacity_admission.delivery_task_key(repo, story),
+            request=capacity_admission.delivery_request(story),
+            registry=registry, state=state)
+    except (TypeError, ValueError) as exc:
+        return False, None, f"NOT admitted — {exc}"
+    if admitted is None:
+        return False, None, "NOT admitted — no eligible capacity"
+    ok, note = claim(repo, story, token)
+    if not ok:
+        state.release(admitted.reservation_id)
+        return False, None, f"NOT claimed — {note}"
+    return True, admitted.reservation_id, note
+
+
 # --------------------------------------------------------------------------
 # Dispatch — the relay this increment deletes
 # --------------------------------------------------------------------------
 
 
-def dispatch_line(number: int, project: int | None) -> str:
+def dispatch_line(number: int, project: int | None,
+                  reservation_id: str = "dry-run") -> str:
     """One line per claimed story, on stdout.
 
     The local monitor already turns each stdout line into a notification, so this
@@ -799,7 +858,8 @@ def dispatch_line(number: int, project: int | None) -> str:
     agents = [item.strip() for item in order.split(",") if item.strip()]
     if not agents or not AGENT_ID_RE.fullmatch(agents[0]):
         raise ValueError("FACTORY_WORKER_ORDER has no valid first Agent-ID")
-    return f"DISPATCH story=#{number} project=#{project} agent={agents[0]}"
+    return (f"DISPATCH story=#{number} project=#{project} agent={agents[0]} "
+            f"reservation={reservation_id}")
 
 
 # --------------------------------------------------------------------------
@@ -901,23 +961,34 @@ def main(argv: list[str]) -> int:
     plan = plan_dispatch(stories, projects, args.commitment, args.wip_limit, dependencies)
 
     claimed: list[tuple[int, str]] = []
-    dispatched: list[Decision] = []
+    dispatched: list[tuple[Decision, str]] = []
     if args.claim:
         for decision in plan.decisions:
             if decision.reason == Reason.ATTEMPT_EXHAUSTED:
                 ok, note = poison(args.repo, stories[decision.number], token)
                 recovery_notes.append(f"POISON #{decision.number}: {'APPLIED' if ok else 'SKIP'} {note}")
-        for decision in plan.selected:
-            ok, note = claim(args.repo, stories[decision.number], token)
-            claimed.append((decision.number, note if ok else f"NOT claimed — {note}"))
-            if ok:
-                dispatched.append(decision)
+        configured = os.environ.get("FACTORY_CAPACITY_STATE", "").strip()
+        root = pathlib.Path(__file__).resolve().parents[2]
+        state_path = pathlib.Path(configured) if configured else root / "runs" / "capacity-pool.sqlite"
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state = CapacityState(state_path, uri=False)
+        try:
+            registry = resolved_registry(health=state.health)
+            for decision in plan.selected:
+                story = stories[decision.number]
+                ok, reservation_id, note = admit_and_claim(
+                    args.repo, story, token, state=state, registry=registry)
+                claimed.append((decision.number, note))
+                if ok:
+                    dispatched.append((decision, reservation_id))
+        finally:
+            state.close()
 
     if recovery_notes:
         print("\n".join(recovery_notes))
     print(render(plan, claimed, dry_run=not args.claim))
-    for decision in dispatched:
-        print(dispatch_line(decision.number, decision.project))
+    for decision, reservation_id in dispatched:
+        print(dispatch_line(decision.number, decision.project, reservation_id))
     return 0
 
 

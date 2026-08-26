@@ -513,6 +513,26 @@ A closed issue is never reopened by a component; only a human reopens, which is 
 
 **Duplicate-worker rule.** The claim is the mutex: only `story:ready` is dispatchable, so a claimed story is never dispatched twice. The residual race is a live-but-slow worker whose lease expires and whose story is re-dispatched. Both workers must therefore treat the story state as authoritative at the moment they act: a worker **must** re-read the story before opening its PR and **must abort without opening one** if the story is no longer `story:claimed`, or if it is claimed under a later lease than the one it was dispatched with. The late worker's branch is abandoned; nothing merges.
 
+#### 9.4.2 Capacity admission and worker-start evidence
+
+Delivery admission is ordered: evaluate eligibility without mutation, reserve one
+healthy Capacity Pool route, re-read and claim the Story, then hand the opaque
+reservation ID to the worker. No reservation means no claim and no `Attempt`
+increment. Dispatcher and poller never receive provider or model identity.
+
+The reservation is bound to repository, Story, and next Attempt; it expires and
+is single-use. Claim failure releases it. Before model work, the delivery worker
+atomically consumes it and writes a `factory-worker-start:v1` comment binding
+repository, Story, claimed-state version, reservation ID, invocation ID, and
+start time. An expired, mismatched, unavailable, or reused reservation cannot
+launch.
+
+If durable capacity state proves the reservation was never consumed, a definite
+launch failure returns the Story to `story:ready` and restores the previous
+`Attempt`. Once the reservation is consumed and worker-start evidence exists,
+normal attempt, lease, recovery, and poison rules apply. Ambiguous state never
+authorizes a refund or a second worker.
+
 ### 9.5 PR ↔ Story linkage
 
 A pull request produced by the factory **must** carry, in its body, exactly one line:

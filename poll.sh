@@ -91,7 +91,7 @@ export FACTORY_CAPACITY_ANTHROPIC_ECONOMY_MODEL
 # `### Spend cap` that bounds it. It is not given `--project`, which it does not
 # accept and would exit 2 on.
 if [ -z "$FACTORY_WORKER_CAPACITY_DELIVERY_LAUNCH" ]; then
-  FACTORY_WORKER_CAPACITY_DELIVERY_LAUNCH="python3 factory/agents/worker/invoke.py --repo $FACTORY_REPO --story {story}"
+  FACTORY_WORKER_CAPACITY_DELIVERY_LAUNCH="python3 factory/agents/worker/invoke.py --repo $FACTORY_REPO --story {story} --reservation {reservation}"
 fi
 if [ -z "$FACTORY_WORKER_CAPACITY_DELIVERY_CAPABILITIES" ]; then
   FACTORY_WORKER_CAPACITY_DELIVERY_CAPABILITIES="delivery"

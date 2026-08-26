@@ -27,6 +27,7 @@ from __future__ import annotations
 import io
 import os
 import sys
+import tempfile
 import traceback
 from contextlib import redirect_stdout
 from dataclasses import dataclass, field
@@ -34,6 +35,9 @@ from dataclasses import dataclass, field
 HERE = os.path.dirname(os.path.abspath(__file__))
 for relative in ("..", "../dispatcher", "../runtime", "../gates"):
     sys.path.insert(0, os.path.join(HERE, relative))
+
+from capacity_pool.policy import resolved_registry  # noqa: E402
+from capacity_pool.state import CapacityState  # noqa: E402
 
 
 @dataclass
@@ -83,16 +87,32 @@ class Scenario:
         return buffer.getvalue()
 
     def execute(self) -> Result:
-        try:
-            self.run()
-        except AssertionError as failure:
-            return Result(self.name, self.behaviour, False, self.evidence,
-                          str(failure) or "assertion failed",
-                          traceback.format_exc())
-        except Exception as error:  # noqa: BLE001 — a crash is a failed scenario
-            return Result(self.name, self.behaviour, False, self.evidence,
-                          f"{type(error).__name__}: {error}", traceback.format_exc())
-        return Result(self.name, self.behaviour, True, self.evidence)
+        previous = os.environ.get("FACTORY_CAPACITY_STATE")
+        with tempfile.TemporaryDirectory(prefix="factory-acceptance-capacity-") as temp:
+            os.environ["FACTORY_CAPACITY_STATE"] = os.path.join(temp, "state.sqlite")
+            state = CapacityState(os.environ["FACTORY_CAPACITY_STATE"], uri=False)
+            try:
+                for model in resolved_registry():
+                    if model.available:
+                        state.mark_healthy(model.provider, model.name,
+                                           "acceptance-fixture")
+                try:
+                    self.run()
+                except AssertionError as failure:
+                    return Result(self.name, self.behaviour, False, self.evidence,
+                                  str(failure) or "assertion failed",
+                                  traceback.format_exc())
+                except Exception as error:  # noqa: BLE001 — crash is a failed scenario
+                    return Result(self.name, self.behaviour, False, self.evidence,
+                                  f"{type(error).__name__}: {error}",
+                                  traceback.format_exc())
+                return Result(self.name, self.behaviour, True, self.evidence)
+            finally:
+                state.close()
+                if previous is None:
+                    os.environ.pop("FACTORY_CAPACITY_STATE", None)
+                else:
+                    os.environ["FACTORY_CAPACITY_STATE"] = previous
 
 
 REGISTRY: list[type[Scenario]] = []

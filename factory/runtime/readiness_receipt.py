@@ -21,6 +21,8 @@ CONFIG_NAMES = (
     "FACTORY_CAPACITY_META_EXPERIMENTAL_MODEL",
     "FACTORY_PRODUCTION_READINESS_MODE",
     "FACTORY_PRODUCTION_READINESS_LAUNCH",
+    "FACTORY_WORKER_CAPACITY_DELIVERY_LAUNCH",
+    "FACTORY_WORKER_CAPACITY_DELIVERY_CAPABILITIES",
 )
 CONFIG_DEFAULTS = {
     "FACTORY_WORKER_ORDER": "capacity-delivery",
@@ -31,6 +33,7 @@ CONFIG_DEFAULTS = {
     "FACTORY_PRODUCTION_READINESS_MODE": "warning",
     "FACTORY_PRODUCTION_READINESS_LAUNCH": (
         "python3 factory/agents/readiness/invoke.py --repo {repo} --project {project}"),
+    "FACTORY_WORKER_CAPACITY_DELIVERY_CAPABILITIES": "delivery",
 }
 
 
@@ -51,7 +54,12 @@ def configuration_fingerprint(environ=None) -> str:
     env = os.environ if environ is None else environ
     # poll.sh supplies these defaults before launching the poller. Normalize
     # them here too so doctor and poller bind the same effective configuration.
-    selected = {name: env.get(name) or CONFIG_DEFAULTS.get(name, "")
+    defaults = dict(CONFIG_DEFAULTS)
+    defaults["FACTORY_WORKER_CAPACITY_DELIVERY_LAUNCH"] = (
+        "python3 factory/agents/worker/invoke.py --repo "
+        f"{env.get('FACTORY_REPO', '')} --story {{story}} "
+        "--reservation {reservation}")
+    selected = {name: env.get(name) or defaults.get(name, "")
                 for name in CONFIG_NAMES}
     encoded = json.dumps(selected, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(encoded).hexdigest()

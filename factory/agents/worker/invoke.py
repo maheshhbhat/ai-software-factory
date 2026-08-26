@@ -26,6 +26,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 HERE = pathlib.Path(__file__).resolve().parent
 ROOT = HERE.parents[2]
@@ -36,6 +37,7 @@ import merge_gate  # noqa: E402
 import observability as obs  # noqa: E402
 import runlog  # noqa: E402
 from factory.capacity_pool.executor import CapacityExecutor  # noqa: E402
+from factory.capacity_pool import admission as capacity_admission  # noqa: E402
 from factory.capacity_pool.policy import POLICIES, resolved_registry  # noqa: E402
 from factory.capacity_pool.providers import (  # noqa: E402
     InvocationPayload, cli_adapter, provider_environment,
@@ -48,6 +50,7 @@ DEFAULT_MAX_USD = 40.0
 MARKER = "worker-artifact"
 SECTION = r"^### {name}\s*$\n(.*?)(?=^### |\Z)"
 STORY_LINK = re.compile(r"(?m)^Story: #(\d+)$")
+START_MARKER = "<!-- factory-worker-start:v1 -->"
 
 
 class DeliveryError(RuntimeError):
@@ -205,6 +208,12 @@ def parse_bounds(body: str) -> Bounds:
     return value
 
 
+def capacity_state_path(environ=None) -> pathlib.Path:
+    env = os.environ if environ is None else environ
+    configured = env.get("FACTORY_CAPACITY_STATE", "").strip()
+    return pathlib.Path(configured) if configured else ROOT / "runs" / "capacity-pool.sqlite"
+
+
 def state_version(events: list[dict]) -> str:
     claims = [item for item in events if item.get("event") == "labeled" and
               (item.get("label") or {}).get("name") == "story:claimed"]
@@ -216,6 +225,26 @@ def state_version(events: list[dict]) -> str:
 
 def marker(story: int, version: str) -> str:
     return f"<!-- {MARKER}:{story}:{version} -->"
+
+
+def worker_start_body(*, repo: str, story: int, version: str,
+                      reservation: str, invocation: str) -> str:
+    value = {"schema_version": 1, "repo": repo.lower(), "story": story,
+             "state_version": version, "reservation_id": reservation,
+             "invocation_id": invocation,
+             "started_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")}
+    return START_MARKER + "\n\n```json\n" + json.dumps(
+        value, sort_keys=True) + "\n```"
+
+
+def publish_worker_start(client: GitHub, *, repo: str, story: int, version: str,
+                         reservation: str, invocation: str) -> None:
+    body = worker_start_body(repo=repo, story=story, version=version,
+                             reservation=reservation, invocation=invocation)
+    created = client.api(
+        f"/issues/{story}/comments", method="POST", value={"body": body})
+    if not isinstance(created, dict) or created.get("body") != body:
+        raise DeliveryError("durable worker-start write was not acknowledged")
 
 
 def linked_prs(story: int, pulls: list[dict]) -> list[dict]:
@@ -371,7 +400,8 @@ def read_back_pr(client: GitHub, story_number: int, durable: str,
 def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
             *, timeout: int | None = None, max_usd: float | None = None,
             runner=subprocess.run, client: GitHub | None = None,
-            state: CapacityState | None = None, registry=None) -> Delivery:
+            state: CapacityState | None = None, registry=None,
+            reservation: str | None = None) -> Delivery:
     client = client or GitHub(repo, token)
     metadata = client.api("")  # read preflight before any write
     default = metadata.get("default_branch")
@@ -389,6 +419,9 @@ def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
         raise DeliveryError("effective timeout and spend bounds must be positive")
     events = client.pages(f"/issues/{story_number}/timeline")
     version = state_version(events)
+    task_key = (capacity_admission.delivery_task_key(
+                    repo, story, next_attempt=False)
+                if reservation else f"delivery:{repo}:{story_number}:{version}")
     delivery_trace = obs.story_trace_id(repo, story_number, events)
     durable = marker(story_number, version)
     pulls = linked_prs(story_number, client.pull_requests())
@@ -422,9 +455,7 @@ def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
                       + "\n\n## Invocation input\n\n" + json.dumps(value, indent=2))
             owns_state = state is None
             if state is None:
-                configured = os.environ.get("FACTORY_CAPACITY_STATE", "").strip()
-                state_path = (pathlib.Path(configured) if configured else
-                              checkout / "runs" / "capacity-pool.sqlite")
+                state_path = capacity_state_path()
                 state_path.parent.mkdir(parents=True, exist_ok=True)
                 state = CapacityState(state_path, uri=False)
             try:
@@ -468,10 +499,13 @@ def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
                                   trace_id=delivery_trace, repo=repo,
                                   story=story_number, project=project_number):
                     result = capacity.execute(
-                        task_key=f"delivery:{repo}:{story_number}:{version}",
+                        task_key=task_key,
                         request=request, registry=available,
                         payload=InvocationPayload(prompt, access="workspace-write"),
-                        validate=validate)
+                        validate=validate, reservation_id=reservation,
+                        on_started=(lambda lease: publish_worker_start(
+                            client, repo=repo, story=story_number, version=version,
+                            reservation=lease.lease_id, invocation=task_key)))
                 if result.attempts:
                     final_attempt = result.attempts[-1]
                     runlog.engine_usage(
@@ -531,15 +565,21 @@ def main(argv=None) -> int:
     parser.add_argument("--checkout", default=str(ROOT))
     parser.add_argument("--timeout", type=int)
     parser.add_argument("--max-usd", type=float)
+    parser.add_argument("--reservation")
     args = parser.parse_args(argv)
     token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
     if not token:
         print("delivery failed: no GH_TOKEN/GITHUB_TOKEN", file=sys.stderr)
         return 2
+    if not args.reservation or not re.fullmatch(r"[0-9a-f]{32}", args.reservation):
+        print("delivery failed: a valid admission reservation is required",
+              file=sys.stderr)
+        return 2
     try:
         with checkout_for_repo(args.repo, pathlib.Path(args.checkout)) as checkout:
             result = execute(args.repo, args.story, token, checkout,
-                             timeout=args.timeout, max_usd=args.max_usd)
+                             timeout=args.timeout, max_usd=args.max_usd,
+                             reservation=args.reservation)
     except Exception as exc:
         obs.operational_log("ERROR", "delivery worker failed", exc=exc,
                             component="delivery-worker", operation="delivery",
