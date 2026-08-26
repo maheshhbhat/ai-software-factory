@@ -90,6 +90,8 @@ Produce exactly one coherent project plan:
      secrets/credential, dependency, CI/workflow, IAM, migration, destructive,
      branch-protection, factory-spec, or factory-gate path;
    - falsifiable acceptance criteria and machine-readable scope paths;
+   - an `operating_envelope_ids` list naming every Project operating-envelope
+     obligation it implements or verifies; use an empty list only when none apply;
    - attempt `0` and a per-invocation spend cap defaulting to exactly
      `$5 / 60 min`; use another bounded value only when the approved planning
      input explicitly requires it.
@@ -97,6 +99,11 @@ Produce exactly one coherent project plan:
    complete proposed behavior and every accepted review change, then update the
    project with story references and an expected-bells count. The checklist is
    what the owner signs; it must not contradict or omit a material Story outcome.
+   Also define one structured `operating_envelope` entry for each identified
+   representative-scale, responsiveness, live-provider, work-bound, or graceful-
+   degradation risk. Each entry needs a stable `OE-*` ID, a concrete requirement,
+   and an input or observation that would make it fail. Every ID must be assigned
+   to at least one Story; do not invent an envelope entry when the risk is absent.
 4. Post a human-readable digest that explains the ADR, risk order, story phases,
    dependencies, hazards, acceptance criteria, and unresolved choices without
    requiring the reader to reconstruct the plan issue by issue. Every digest
@@ -118,6 +125,14 @@ GitHub numbers—the writer resolves them after issue creation:
 {
   "altitude": "project",
   "acceptance_criteria": ["owner-signable falsifiable project criterion"],
+  "operating_envelope": [
+    {
+      "id": "OE-SCALE-1",
+      "category": "representative-input",
+      "requirement": "Concrete supported input and expected behavior",
+      "failure_condition": "Concrete observation that fails the requirement"
+    }
+  ],
   "adr": {
     "title": "decision title",
     "context": "facts and forces",
@@ -134,6 +149,7 @@ GitHub numbers—the writer resolves them after issue creation:
       "depends_on": [],
       "hazard": false,
       "acceptance_criteria": ["falsifiable check"],
+      "operating_envelope_ids": ["OE-SCALE-1"],
       "scope": ["one/bare/path/**"],
       "spend_cap": "$5 / 60 min"
     }

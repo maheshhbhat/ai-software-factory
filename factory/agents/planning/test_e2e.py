@@ -13,7 +13,7 @@ import artifacts
 import contract
 import invoke
 from test_artifacts import FakeStore, campaign_output, project_output
-from test_invoke import Result
+from test_invoke import Result, capacity
 
 
 class GitHubFixture(FakeStore):
@@ -58,6 +58,7 @@ class GitHubFixture(FakeStore):
 class PlanningE2E(unittest.TestCase):
     def setUp(self):
         self.store = GitHubFixture()
+        self.capacity_state, self.capacity_registry = capacity()
         self.command = mock.patch.dict(
             os.environ, {"FACTORY_PLANNING_MODEL_CMD": "model {input_file} {max_usd}"})
         self.command.start()
@@ -67,10 +68,13 @@ class PlanningE2E(unittest.TestCase):
     def tearDown(self):
         self.client.stop()
         self.command.stop()
+        self.capacity_state.close()
 
     def execute(self, number, output, runner=None):
         runner = runner or mock.Mock(return_value=Result(stdout=json.dumps(output)))
-        return invoke.execute("product/repo", number, "token", 30, 2.0, runner=runner)
+        return invoke.execute("product/repo", number, "token", 30, 2.0, runner=runner,
+                              state=self.capacity_state,
+                              registry=self.capacity_registry)
 
     def key(self, number):
         feedback = invoke.review_comments(self.store, number)

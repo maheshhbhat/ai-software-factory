@@ -31,6 +31,7 @@ from factory.capacity_pool.providers import (  # noqa: E402
     provider_environment,
 )
 from factory.capacity_pool.state import CapacityState  # noqa: E402
+from factory.runtime import operating_envelope  # noqa: E402
 
 class ReviewError(RuntimeError):
     """A review could not be delivered.
@@ -237,6 +238,8 @@ def execute(repo: str, pull_number: int, token: str, *, client=None,
                         client.pages(f"/pulls/{pull_number}/files")],
               "story_spec": story.get("body", ""),
               "project_criteria": criteria(project.get("body", "")),
+              "operating_envelope_obligations": operating_envelope.obligations(
+                  story.get("body", ""), project.get("body", "")),
               "adrs": [{"number": x.get("number"), "title": x.get("title"),
                         "body": x.get("body")} for x in adrs]}
     with tempfile.TemporaryDirectory(prefix=f"factory-review-{pull_number}-{target.head[:8]}-") as temp:

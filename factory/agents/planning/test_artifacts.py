@@ -60,7 +60,9 @@ def project_issue(number=10):
     return {"number": number, "labels": ["type:project", "project:active"],
             "body": ("### Falsifiable acceptance criteria\n\n"
                      "- [ ] Original criterion\n\n"
-                     "### Stories\n\n_No response_\n\n### Expected bells\n\n2\n\n"
+                     "### Stories\n\n_No response_\n\n"
+                     "### Operating envelope\n\n_No response_\n\n"
+                     "### Expected bells\n\n2\n\n"
                      "### Risks / notes\n\nNone\n")}
 
 
@@ -77,12 +79,18 @@ def project_output():
             "scope": ["src/model/**"], "acceptance_criteria": ["Example passes"]}
     return {"altitude": "project",
             "acceptance_criteria": ["A verified projection is returned or refusal is explicit"],
+            "operating_envelope": [{"id": "OE-SCALE-1",
+                "category": "representative-input",
+                "requirement": "A representative retirement input completes",
+                "failure_condition": "The representative input does not complete"}],
             "adr": {"title": "Artifact ownership",
             "context": "Product stories belong with code.", "decision": "Write product artifacts here.",
             "alternatives": ["Factory repository"], "consequences": ["Product gate required"]},
             "stories": [{**base, "key": "model", "title": "Model retirement",
+                         "operating_envelope_ids": ["OE-SCALE-1"],
                          "spec": "Calculate a projection.", "depends_on": []},
                         {**base, "key": "ui", "title": "Show retirement",
+                         "operating_envelope_ids": [],
                          "spec": "Render a projection.", "depends_on": ["model"]}],
             "expected_bells": 2, "digest": """## Plan in plain language
 
@@ -196,6 +204,9 @@ class ProjectTests(unittest.TestCase):
         dependent = store.get_issue(13)
         self.assertIn("### Depends-on\n\n#12", dependent["body"])
         self.assertIn("phase:build", dependent["labels"])
+        self.assertIn("digest: ", dependent["body"])
+        self.assertIn("OE-SCALE-1", store.get_issue(12)["body"])
+        self.assertIn("OE-SCALE-1 | representative-input", store.get_issue(10)["body"])
         self.assertIn(
             "- [ ] A verified projection is returned or refusal is explicit",
             store.get_issue(10)["body"])
@@ -283,6 +294,22 @@ class ProjectTests(unittest.TestCase):
             else:
                 story["labels"].append("hazard")
             with self.subTest(mutation=mutation), self.assertRaises(artifacts.ArtifactError):
+                artifacts.verify(store, trigger, "v2", contract.Altitude.PROJECT)
+
+    def test_readback_rejects_stale_or_unknown_envelope_obligation(self):
+        for mutation in ("digest", "unknown"):
+            store = FakeStore([project_issue()])
+            trigger = store.get_issue(10)
+            written = artifacts.write(store, trigger, "v2", project_output())
+            story = next(item for item in store.issues
+                         if item["number"] == written.stories[0])
+            if mutation == "digest":
+                story["body"] = story["body"].replace("digest: ", "digest: stale-")
+            else:
+                story["body"] = story["body"].replace(
+                    "OE-SCALE-1\n\n### Scope", "OE-UNKNOWN\n\n### Scope")
+            with self.subTest(mutation=mutation), self.assertRaises(
+                    artifacts.ArtifactError):
                 artifacts.verify(store, trigger, "v2", contract.Altitude.PROJECT)
 
 

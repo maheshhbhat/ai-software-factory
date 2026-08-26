@@ -14,4 +14,10 @@ Do not call GitHub, alter files, commit, push, approve, merge, or change labels.
 An approval is advisory routing evidence under the accepted shared-credential
 ADR; it is not a trusted merge-gate input.
 
+The input includes `operating_envelope_obligations`. For every listed ID,
+identify an executable observation that would fail the requirement and evaluate
+the exact pull-request head against it. Static inspection alone cannot approve a
+runtime responsiveness, representative-scale, or live-provider obligation. Name
+the ID in every related finding.
+
 Review the supplied material directly. Do not delegate or spawn subagents.

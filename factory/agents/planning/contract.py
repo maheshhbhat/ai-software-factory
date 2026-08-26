@@ -30,8 +30,12 @@ REQUIRED_INPUTS = ("trigger", "product", "adrs", "repository", "review_comments"
 
 CAMPAIGN_KEYS = frozenset({"altitude", "project", "rationale", "risks"})
 PROJECT_KEYS = frozenset({
-    "altitude", "acceptance_criteria", "adr", "stories", "expected_bells", "digest",
+    "altitude", "acceptance_criteria", "operating_envelope", "adr", "stories",
+    "expected_bells", "digest",
 })
+
+ENVELOPE_CATEGORIES = ("representative-input", "responsiveness",
+                       "external-provider", "work-bound", "degradation")
 
 CAMPAIGN_JSON_SCHEMA = {
     "type": "object", "additionalProperties": False,
@@ -57,6 +61,14 @@ PROJECT_JSON_SCHEMA = {
         "altitude": {"type": "string", "const": "project"},
         "acceptance_criteria": {"type": "array", "items": {"type": "string"},
                                 "minItems": 1},
+        "operating_envelope": {"type": "array", "items": {
+            "type": "object", "additionalProperties": False,
+            "properties": {
+                "id": {"type": "string", "pattern": "^OE-[A-Z0-9-]+$"},
+                "category": {"type": "string", "enum": list(ENVELOPE_CATEGORIES)},
+                "requirement": {"type": "string", "minLength": 1},
+                "failure_condition": {"type": "string", "minLength": 1}},
+            "required": ["id", "category", "requirement", "failure_condition"]}},
         "adr": {"type": "object", "additionalProperties": False,
                 "properties": {key: ({"type": "string"} if key in
                                       {"title", "context", "decision"} else
@@ -76,14 +88,17 @@ PROJECT_JSON_SCHEMA = {
                 "hazard": {"type": "boolean"},
                 "acceptance_criteria": {"type": "array", "items": {"type": "string"},
                                         "minItems": 1},
+                "operating_envelope_ids": {"type": "array",
+                                           "items": {"type": "string"}},
                 "scope": {"type": "array", "items": {"type": "string"}, "minItems": 1},
                 "spend_cap": {"type": "string"}},
             "required": ["key", "title", "spec", "phase", "depends_on", "hazard",
-                         "acceptance_criteria", "scope", "spend_cap"]}},
+                         "acceptance_criteria", "operating_envelope_ids",
+                         "scope", "spend_cap"]}},
         "expected_bells": {"type": "integer", "minimum": 2},
         "digest": {"type": "string"},
-    }, "required": ["altitude", "acceptance_criteria", "adr", "stories",
-                    "expected_bells", "digest"],
+    }, "required": ["altitude", "acceptance_criteria", "operating_envelope", "adr",
+                    "stories", "expected_bells", "digest"],
 }
 
 
@@ -153,6 +168,30 @@ def validate_output(altitude: Altitude, value: dict) -> dict:
             f"{altitude.value} output contains other-altitude artifacts: "
             f"{', '.join(leaked)}")
     if altitude is Altitude.PROJECT:
+        envelope = value.get("operating_envelope")
+        stories = value.get("stories")
+        if not isinstance(envelope, list) or not isinstance(stories, list):
+            raise ContractError("project operating envelope and stories must be arrays")
+        identifiers = [item.get("id") for item in envelope if isinstance(item, dict)]
+        if len(identifiers) != len(envelope) or len(set(identifiers)) != len(identifiers):
+            raise ContractError("operating envelope IDs must be unique objects")
+        for item in envelope:
+            if (not re.fullmatch(r"OE-[A-Z0-9-]+", item.get("id") or "") or
+                    item.get("category") not in ENVELOPE_CATEGORIES or
+                    not all(isinstance(item.get(field), str) and item[field].strip()
+                            for field in ("requirement", "failure_condition"))):
+                raise ContractError("operating envelope entry is malformed")
+        known = set(identifiers)
+        used = set()
+        for story in stories:
+            obligations = story.get("operating_envelope_ids") if isinstance(story, dict) else None
+            if not isinstance(obligations, list) or len(set(obligations)) != len(obligations):
+                raise ContractError("Story operating-envelope obligations are malformed")
+            if any(item not in known for item in obligations):
+                raise ContractError("Story references an unknown operating-envelope ID")
+            used.update(obligations)
+        if used != known:
+            raise ContractError("every operating-envelope ID must belong to a Story")
         digest = value.get("digest")
         if not isinstance(digest, str):
             raise ContractError("project digest must be a string")

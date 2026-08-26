@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import io
+import inspect
 import tempfile
 import unittest
 import urllib.error
@@ -44,6 +45,41 @@ Selected (claimed, in order): #64
 
 
 class TestParsing(unittest.TestCase):
+    def test_singleton_refuses_same_key_and_releases_on_close(self):
+        with tempfile.TemporaryDirectory() as root:
+            first = poller.acquire_poller_lock("o/r", 45, root)
+            with self.assertRaises(poller.PollerAlreadyRunning):
+                poller.acquire_poller_lock("o/r", 45, root)
+            other = poller.acquire_poller_lock("o/r", 46, root)
+            other.close()
+            first.close()
+            replacement = poller.acquire_poller_lock("o/r", 45, root)
+            replacement.close()
+
+    def test_live_main_blocks_before_cycle_without_receipt(self):
+        output = io.StringIO()
+        with mock.patch.object(poller, "acquire_poller_lock") as lock, \
+             mock.patch.object(poller, "cycle") as cycle, \
+             mock.patch.object(poller.readiness_receipt, "factory_revision",
+                               return_value="a" * 40), \
+             mock.patch.dict(os.environ, {"GH_TOKEN": "token"}, clear=True), \
+             redirect_stdout(output):
+            lock.return_value.close.return_value = None
+            code = poller.main(["--repo", "o/r", "--commitment", "45", "--once"])
+        self.assertEqual(78, code)
+        self.assertIn("doctor readiness receipt refused", output.getvalue())
+        cycle.assert_not_called()
+
+    def test_dry_run_does_not_require_receipt(self):
+        with mock.patch.object(poller, "acquire_poller_lock") as lock, \
+             mock.patch.object(poller, "run_loop", return_value=0) as run, \
+             mock.patch.dict(os.environ, {"GH_TOKEN": "token"}, clear=True):
+            lock.return_value.close.return_value = None
+            code = poller.main(["--repo", "o/r", "--commitment", "45",
+                                "--once", "--dry-run"])
+        self.assertEqual(0, code)
+        run.assert_called_once()
+
     def test_idle_interval_doubles_to_a_five_minute_cap(self):
         self.assertEqual(30, poller.adaptive_interval(15, 15, False))
         self.assertEqual(300, poller.adaptive_interval(15, 240, False))
@@ -504,10 +540,9 @@ class TestNoLocalAuthority(unittest.TestCase):
     state is a convenience and must never decide what may run."""
 
     def test_seen_set_is_not_persisted_anywhere(self):
-        with open(poller.__file__, encoding="utf-8") as handle:
-            source = handle.read()
+        source = inspect.getsource(poller.poll_once)
         for persistence in ("open(", "json.dump", "sqlite", ".write(", "pickle"):
-            self.assertNotIn(persistence, source.split('"""', 2)[-1],
+            self.assertNotIn(persistence, source,
                              f"runtime must not persist local state ({persistence})")
 
     def test_restart_with_empty_state_redispatches_nothing_extra(self):

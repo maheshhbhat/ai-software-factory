@@ -8,6 +8,7 @@ import os
 import pathlib
 import subprocess
 import sys
+import tempfile
 import unittest
 from unittest import mock
 
@@ -31,6 +32,38 @@ class RecordingRunner:
 
 
 class SafetyTests(unittest.TestCase):
+    def test_successful_main_writes_scoped_receipt(self):
+        checks = [doctor.Check("probe", True, "answered")]
+        with tempfile.TemporaryDirectory() as root:
+            path = pathlib.Path(root) / "ready.json"
+            with mock.patch.object(doctor, "Doctor") as doctor_class, \
+                 mock.patch.object(doctor.readiness_receipt, "factory_revision",
+                                   return_value="a" * 40):
+                doctor_class.return_value.run.return_value = checks
+                doctor_class.return_value.env = {
+                    "FACTORY_WORKER_ORDER": "capacity-delivery"}
+                code = doctor.main(["--repo", "owner/repo", "--project", "47",
+                                    "--commitment", "45", "--target", "app.js",
+                                    "--receipt", str(path)])
+            self.assertEqual(0, code)
+            self.assertTrue(path.is_file())
+            value = doctor.readiness_receipt.validate(
+                path, repo="owner/repo", commitment=45, revision="a" * 40,
+                environ={"FACTORY_WORKER_ORDER": "capacity-delivery"})
+            self.assertEqual(47, value["project"])
+
+    def test_failed_main_does_not_write_receipt(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = pathlib.Path(root) / "ready.json"
+            with mock.patch.object(doctor, "Doctor") as doctor_class:
+                doctor_class.return_value.run.return_value = [
+                    doctor.Check("probe", False, "failed")]
+                code = doctor.main(["--repo", "owner/repo", "--project", "47",
+                                    "--commitment", "45", "--target", "app.js",
+                                    "--receipt", str(path)])
+            self.assertEqual(1, code)
+            self.assertFalse(path.exists())
+
     def test_mutating_commands_are_refused_before_the_runner(self):
         runner = RecordingRunner()
         value = doctor.Doctor("owner/repo", 400, commitment=384,

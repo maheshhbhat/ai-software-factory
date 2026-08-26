@@ -4,8 +4,9 @@
 This command may read GitHub, inspect local processes, and run ``poll.sh`` with
 ``--dry-run``.  It creates and removes one temporary detached Git worktree and
 starts the configured real worker engine with a harmless read-only prompt.
-It never creates, edits, labels, comments on, or closes a GitHub artifact and
-never pushes.
+Its only write is a short-lived local readiness receipt after every check
+passes. It never creates, edits, labels, comments on, or closes a GitHub
+artifact and never pushes.
 """
 
 from __future__ import annotations
@@ -27,6 +28,7 @@ RUNTIME = ROOT / "factory" / "runtime"
 sys.path.insert(0, str(RUNTIME))
 sys.path.insert(0, str(ROOT))
 import observability as obs  # noqa: E402
+import readiness_receipt  # noqa: E402
 import status as live_status  # noqa: E402
 from factory.capacity_pool.policy import resolved_registry  # noqa: E402
 from factory.capacity_pool.providers import cli_adapter, provider_environment  # noqa: E402
@@ -388,15 +390,29 @@ def main(argv=None) -> int:
     parser.add_argument("--project", required=True, type=int)
     parser.add_argument("--commitment", required=True, type=int)
     parser.add_argument("--target", required=True)
+    parser.add_argument("--receipt",
+                        help="readiness receipt path (default: scoped temp path)")
     args = parser.parse_args(argv)
     if args.project <= 0:
         parser.error("--project must be positive")
     if args.commitment <= 0:
         parser.error("--commitment must be positive")
-    checks = Doctor(args.repo, args.project, commitment=args.commitment,
-                    target=args.target).run()
+    instance = Doctor(args.repo, args.project, commitment=args.commitment,
+                      target=args.target)
+    checks = instance.run()
     print(render(checks))
-    return 0 if all(item.passed for item in checks) else 1
+    if not all(item.passed for item in checks):
+        return 1
+    path = (pathlib.Path(args.receipt) if args.receipt else
+            readiness_receipt.default_path(args.repo, args.commitment))
+    payload = readiness_receipt.issue(
+        path, repo=args.repo, commitment=args.commitment, project=args.project,
+        target=args.target, revision=readiness_receipt.factory_revision(ROOT),
+        environ=instance.env,
+        checks=[{"name": row.name, "passed": row.passed, "detail": row.detail}
+                for row in checks])
+    print(f"RECEIPT  {path} — expires_at={payload['expires_at']}")
+    return 0
 
 
 if __name__ == "__main__":

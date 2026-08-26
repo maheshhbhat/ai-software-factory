@@ -9,6 +9,7 @@ are never treated as proof.
 from __future__ import annotations
 
 import json
+import hashlib
 import re
 import urllib.parse
 import urllib.request
@@ -127,6 +128,7 @@ def _project_body(project: dict, commitment: int) -> str:
             "### Falsifiable acceptance criteria\n\n"
             + "\n".join(f"- [ ] {item}" for item in criteria)
             + "\n\n### Stories\n\n_No response_\n\n"
+            "### Operating envelope\n\n_No response_\n\n"
             f"### Expected bells\n\n{project['expected_bells']}\n\n"
             f"### Risks / notes\n\n{project.get('risks', 'None identified.')}\n\n"
             f"### Roadmap commitment\n\n#{commitment}\n")
@@ -191,8 +193,39 @@ def _validate_story_graph(stories: list[dict]) -> list[str]:
     return order
 
 
-def _story_body(story: dict, project: int, dependencies: list[int]) -> str:
+def envelope_digest(envelope: list[dict]) -> str:
+    encoded = json.dumps(envelope, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def render_envelope(envelope: list[dict]) -> str:
+    if not envelope:
+        return "None identified."
+    return "\n".join(
+        f"- {item['id']} | {item['category']} | {item['requirement']} | "
+        f"FAIL WHEN: {item['failure_condition']}" for item in envelope)
+
+
+def parse_envelope(lines: list[str]) -> list[dict]:
+    if lines == ["None identified."]:
+        return []
+    parsed = []
+    for line in lines:
+        match = re.fullmatch(
+            r"- (OE-[A-Za-z0-9][A-Za-z0-9_-]*) \| ([a-z-]+) \| (.+) \| "
+            r"FAIL WHEN: (.+)", line)
+        if not match:
+            raise ArtifactError("project operating envelope does not conform")
+        parsed.append({"id": match.group(1), "category": match.group(2),
+                       "requirement": match.group(3),
+                       "failure_condition": match.group(4)})
+    return parsed
+
+
+def _story_body(story: dict, project: int, dependencies: list[int],
+                envelope: list[dict]) -> str:
     required = ("title", "spec", "phase", "hazard", "acceptance_criteria",
+                "operating_envelope_ids",
                 "scope", "spend_cap")
     missing = [field for field in required if field not in story]
     if missing:
@@ -209,11 +242,20 @@ def _story_body(story: dict, project: int, dependencies: list[int]) -> str:
         raise ArtifactError(f"story {story['key']} scope must be bare paths")
     if bool(story["hazard"]) != any(scope_is_hazard(path) for path in scope):
         raise ArtifactError(f"story {story['key']} hazard flag does not match scope")
+    known = {item["id"] for item in envelope}
+    obligations = story["operating_envelope_ids"]
+    if (not isinstance(obligations, list) or len(set(obligations)) != len(obligations)
+            or any(item not in known for item in obligations)):
+        raise ArtifactError(f"story {story['key']} operating-envelope obligations invalid")
+    rendered_obligations = ("none" if not obligations else
+                            "\n".join(obligations))
     return (f"### Spec\n\n{story['spec']}\n\n### Project\n\n#{project}\n\n"
             f"### Phase\n\n{story['phase']}\n\n### Depends-on\n\n{depends}\n\n"
             f"### Hazard\n\n- [{hazard}] Touches hazard path\n\n"
             "### Attempt\n\n0\n\n"
             f"### Spend cap\n\n{story['spend_cap']}\n\n"
+            "### Operating-envelope obligations\n\n"
+            f"digest: {envelope_digest(envelope)}\n{rendered_obligations}\n\n"
             "### Scope\n\n" + "\n".join(scope) + "\n\n"
             "### Acceptance notes\n\n"
             + "\n".join(f"- {item}" for item in criteria) + "\n")
@@ -239,6 +281,7 @@ def write_project(store: Store, trigger: dict, key: str, output: dict) -> Writte
     if not isinstance(output["digest"], str) or not output["digest"].strip():
         raise ArtifactError("planning digest must be non-empty")
     project_criteria = output["acceptance_criteria"]
+    envelope = output["operating_envelope"]
     if (not isinstance(project_criteria, list) or not project_criteria
             or any(not isinstance(item, str) or not item.strip()
                    for item in project_criteria)):
@@ -252,7 +295,7 @@ def write_project(store: Store, trigger: dict, key: str, output: dict) -> Writte
     # issue numbers are substituted later, but every semantic field is checked now.
     _adr_body(output["adr"])
     for story in output["stories"]:
-        _story_body(story, trigger["number"], [1] * len(story["depends_on"]))
+        _story_body(story, trigger["number"], [1] * len(story["depends_on"]), envelope)
     existing_story_keys = {match.group(1) for item in store.list_issues("all")
                            if (match := re.search(
                                rf"<!-- {MARKER}:{trigger['number']}:[^\n]*:project:prompt-[^\n]*:story:([^ ]+) -->",
@@ -272,7 +315,7 @@ def write_project(store: Store, trigger: dict, key: str, output: dict) -> Writte
             labels.append("hazard")
         created[story_key] = _issue_reconcile(
             store, trigger["number"], key, f"story:{story_key}", f"[Story] {story['title']}",
-            _story_body(story, trigger["number"], dep_numbers), labels)
+            _story_body(story, trigger["number"], dep_numbers, envelope), labels)
 
     live = store.get_issue(trigger["number"])
     body = live.get("body") or ""
@@ -282,8 +325,13 @@ def write_project(store: Store, trigger: dict, key: str, output: dict) -> Writte
         rf"\g<1>{criteria_lines}\2", body, count=1, flags=re.S)
     if count != 1:
         raise ArtifactError("project issue has no writable acceptance criteria section")
+    body, count = re.subn(
+        r"(### Operating envelope\n\n).*?(\n\n### Expected bells)",
+        rf"\g<1>{render_envelope(envelope)}\2", body, count=1, flags=re.S)
+    if count != 1:
+        raise ArtifactError("project issue has no writable Operating envelope section")
     story_lines = "\n".join(f"#{created[item]['number']}" for item in order)
-    body, count = re.subn(r"(### Stories\n\n).*?(\n\n### Expected bells)",
+    body, count = re.subn(r"(### Stories\n\n).*?(\n\n### Operating envelope)",
                           rf"\g<1>{story_lines}\2", body, count=1, flags=re.S)
     if count != 1:
         raise ArtifactError("project issue has no writable Stories section")
@@ -335,6 +383,11 @@ def verify(store: Store, trigger: dict, key: str,
         raise ArtifactError("project read-back missing ADR, stories, or digest")
     if "type:adr" not in set(adr.get("labels") or []):
         raise ArtifactError("ADR label does not conform")
+    project = store.get_issue(trigger["number"])
+    envelope = parse_envelope(section_lines(project.get("body") or "",
+                                            "Operating envelope"))
+    expected_envelope_digest = envelope_digest(envelope)
+    known_obligations = {item["id"] for item in envelope}
     numbers = {story["number"] for story in stories}
     for story in stories:
         labels = set(story.get("labels") or [])
@@ -357,7 +410,18 @@ def verify(store: Store, trigger: dict, key: str,
             raise ArtifactError(f"story #{story['number']} attempt does not start at zero")
         if not section_lines(story.get("body") or "", "Acceptance notes"):
             raise ArtifactError(f"story #{story['number']} acceptance criteria missing")
-    project = store.get_issue(trigger["number"])
+        obligations = section_lines(story.get("body") or "",
+                                    "Operating-envelope obligations")
+        if (not obligations
+                or obligations[0] != f"digest: {expected_envelope_digest}"):
+            raise ArtifactError(f"story #{story['number']} operating envelope missing")
+        assigned = obligations[1:]
+        if assigned == ["none"]:
+            assigned = []
+        if (len(set(assigned)) != len(assigned)
+                or any(item not in known_obligations for item in assigned)):
+            raise ArtifactError(
+                f"story #{story['number']} operating envelope obligations do not conform")
     criteria = section_lines(project.get("body") or "", "Falsifiable acceptance criteria")
     if not criteria or any(not item.startswith("- [ ] ") for item in criteria):
         raise ArtifactError("project acceptance criteria do not conform")
