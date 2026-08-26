@@ -6,7 +6,7 @@ attempts to obtain a qualifying repeat exposed a live-data defect, a
 realistic-scale performance defect, and runtime controls that can turn lack of
 capacity into poisoned work. Rung 3 must not start until the bounded changes in
 `factory/spec/phase5-pre-rung3-improvement-plan.md` are implemented and a fresh,
-independent Rung 2 project passes.
+independent **comparable-difficulty** Rung 2 project passes.
 
 ## What was measured
 
@@ -193,17 +193,21 @@ Every finding uses one of the required classifications: `product-specific`,
   to emit either an exact cost or an explicit reason and independently
   reproducible usage fields.
 - **Classification:** `factory-systemic`.
-- **General lesson:** a lower bound is honest, but it cannot support the Rung 3
-  cost kill criterion.
+- **General lesson:** a lower bound is honest, but it cannot support reliable
+  efficiency comparison by itself. Subscription-backed capacity may also have
+  no provider-exposed per-invocation dollar price.
 - **Factory change:** every adapter emits a terminal usage receipt. Exact vendor
-  cost is preferred; otherwise token/tool usage and a named unavailable reason
-  are mandatory. The reporter remains fail-closed and never converts a lower
-  bound into an exact cost.
-- **Regression/evaluation proof:** mixed priced and unpriced invocations keep
-  cost unavailable; complete receipts deterministically reproduce cost per
-  accepted Story; a missing receipt fails measurement integrity.
-- **Rung 3 validation:** the fresh Rung 2 repeat must report exact cost per
-  accepted Story or fail measurement integrity before Rung 3.
+  cost is required when the provider exposes it; otherwise reproducible
+  token/tool/capacity usage plus a named reason that dollar cost is unavailable
+  is mandatory. The reporter must never fabricate a dollar equivalent.
+- **Regression/evaluation proof:** every invocation must have a reproducible
+  usage receipt; exact cost is reproduced when fully available, while
+  subscription/prepaid/unpriced routes report normalized usage plus the named
+  unavailability reason. A missing usage receipt fails measurement integrity.
+- **Rung 3 validation:** the fresh Rung 2 repeat must report complete normalized
+  usage per accepted Story for all routes and exact dollar cost per accepted
+  Story only where provider pricing is available; missing reproducible usage
+  fails measurement integrity before Rung 3.
 
 ### F9 — retries and worker outcomes were not diagnostically separated
 
