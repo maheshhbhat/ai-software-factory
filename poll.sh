@@ -68,6 +68,25 @@ if [ -z "$FACTORY_WORKER_ORDER" ]; then
 fi
 export FACTORY_WORKER_ORDER
 
+# Capacity Pool model identifiers for the registry's placeholder slots. The
+# registry ships these slots disabled because provider/model names are data
+# that must never be invented; each identifier below was verified by a live
+# adapter probe answering CAPACITY_OK before it was written here (2026-08-25).
+# The slots stay excluded from routing until the doctor also records a
+# successful probe in the capacity state store.
+if [ -z "$FACTORY_CAPACITY_OPENAI_SPARK_MODEL" ]; then
+  FACTORY_CAPACITY_OPENAI_SPARK_MODEL="gpt-5.3-codex-spark"
+fi
+if [ -z "$FACTORY_CAPACITY_ANTHROPIC_BALANCED_MODEL" ]; then
+  FACTORY_CAPACITY_ANTHROPIC_BALANCED_MODEL="claude-sonnet-5"
+fi
+if [ -z "$FACTORY_CAPACITY_ANTHROPIC_ECONOMY_MODEL" ]; then
+  FACTORY_CAPACITY_ANTHROPIC_ECONOMY_MODEL="claude-haiku-4-5-20251001"
+fi
+export FACTORY_CAPACITY_OPENAI_SPARK_MODEL
+export FACTORY_CAPACITY_ANTHROPIC_BALANCED_MODEL
+export FACTORY_CAPACITY_ANTHROPIC_ECONOMY_MODEL
+
 # `invoke.py` reads the Story from the substrate itself, including the
 # `### Spend cap` that bounds it. It is not given `--project`, which it does not
 # accept and would exit 2 on.
