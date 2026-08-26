@@ -48,6 +48,10 @@ class TestParsing(unittest.TestCase):
     def test_singleton_refuses_same_key_and_releases_on_close(self):
         with tempfile.TemporaryDirectory() as root:
             first = poller.acquire_poller_lock("o/r", 45, root)
+            first.seek(0)
+            diagnostic = first.read()
+            self.assertIn("started_at=", diagnostic)
+            self.assertIn("repo=o/r", diagnostic)
             with self.assertRaises(poller.PollerAlreadyRunning):
                 poller.acquire_poller_lock("o/r", 45, root)
             other = poller.acquire_poller_lock("o/r", 46, root)

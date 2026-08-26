@@ -121,7 +121,10 @@ def acquire_poller_lock(repo: str, commitment: int,
         handle.close()
         raise PollerAlreadyRunning(holder) from exc
     handle.seek(0); handle.truncate()
-    handle.write(f"pid={os.getpid()} repo={repo} commitment={commitment}\n")
+    started_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    handle.write(
+        f"pid={os.getpid()} started_at={started_at} "
+        f"repo={readiness_receipt.canonical_repo(repo)} commitment={commitment}\n")
     handle.flush(); os.fsync(handle.fileno())
     return handle
 

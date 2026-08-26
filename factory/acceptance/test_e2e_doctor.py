@@ -237,6 +237,15 @@ class GitHubChecks(unittest.TestCase):
 
 
 class LocalChecks(unittest.TestCase):
+    def setUp(self):
+        self.capacity_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.capacity_directory.cleanup)
+        self.capacity_path = str(
+            pathlib.Path(self.capacity_directory.name) / "capacity.sqlite")
+
+    def environment(self):
+        return {"PATH": "/bin", "FACTORY_CAPACITY_STATE": self.capacity_path}
+
     def test_every_configured_capacity_is_probed_independently(self):
         calls = []
         def respond(args, **_):
@@ -244,18 +253,30 @@ class LocalChecks(unittest.TestCase):
             return completed(args, stdout="CAPACITY_OK")
         value = doctor.Doctor(
             "owner/repo", 400, commitment=384, target="product.js",
-            environ={"PATH": "/bin"},
+            environ=self.environment(),
             runner=respond)
         value.worker_engine_start()
         # One probe per registry entry that is enabled without environment
         # configuration — count it from the registry itself so adding a model
         # does not silently rot this test.
-        enabled = [item for item in doctor.resolved_registry({"PATH": "/bin"})
+        enabled = [item for item in doctor.resolved_registry(self.environment())
                    if item.available]
         probes = [row for row in value.checks if row.name.startswith("capacity probe")]
         self.assertEqual(len(enabled), len(probes))
         self.assertTrue(all(row.passed for row in probes))
         self.assertEqual(len(enabled), len(calls))
+        persisted = doctor.CapacityState(self.capacity_path, uri=False)
+        try:
+            self.assertTrue(all(
+                persisted.health(item.provider, item.name)["state"] == "healthy"
+                for item in enabled))
+            worker_view = doctor.resolved_registry(
+                self.environment(), health=persisted.health)
+            self.assertEqual(
+                {item.name for item in enabled},
+                {item.name for item in worker_view if item.available})
+        finally:
+            persisted.close()
 
     def test_one_provider_success_does_not_hide_another_failure(self):
         count = 0
@@ -266,7 +287,7 @@ class LocalChecks(unittest.TestCase):
         runner = RecordingRunner()
         value = doctor.Doctor(
             "owner/repo", 400, commitment=384, target="product.js",
-            environ={"PATH": "/bin"}, runner=respond)
+            environ=self.environment(), runner=respond)
         value.worker_engine_start()
         probes = [row for row in value.checks if row.name.startswith("capacity probe")]
         self.assertTrue(probes[0].passed)
@@ -276,7 +297,7 @@ class LocalChecks(unittest.TestCase):
         prompt_echo = completed([], stdout="Reply exactly CAPACITY_OK")
         value = doctor.Doctor(
             "owner/repo", 400, commitment=384, target="product.js",
-            environ={"PATH": "/bin"}, runner=lambda args, **kwargs: prompt_echo)
+            environ=self.environment(), runner=lambda args, **kwargs: prompt_echo)
         value.worker_engine_start()
         self.assertFalse(value.checks[-1].passed)
 

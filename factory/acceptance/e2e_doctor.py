@@ -137,7 +137,10 @@ class Doctor:
         """Probe every configured capacity independently and persist the result."""
         configured = [item for item in resolved_registry(self.env) if item.available]
         state_path = self.env.get("FACTORY_CAPACITY_STATE", "").strip()
-        state = CapacityState(state_path, uri=False) if state_path else CapacityState()
+        state_path = pathlib.Path(state_path) if state_path else \
+            ROOT / "runs" / "capacity-pool.sqlite"
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state = CapacityState(state_path, uri=False)
         try:
             for item in configured:
                 adapter = cli_adapter(

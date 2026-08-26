@@ -42,6 +42,8 @@ class ReceiptTests(unittest.TestCase):
                  ({"repo": "other/repo"}, "repo does not match"),
                  ({"commitment": 46}, "commitment does not match"),
                  ({"revision": "b" * 40}, "factory_revision does not match"),
+                 ({"environ": {**self.env, "FACTORY_CAPACITY_STATE": "/other/state"}},
+                  "configuration_fingerprint does not match"),
                  ({"environ": {"FACTORY_WORKER_ORDER": "other"}},
                   "configuration_fingerprint does not match"))
         for change, message in cases:
