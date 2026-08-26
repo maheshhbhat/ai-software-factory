@@ -94,6 +94,19 @@ class ReadinessInvokeTests(unittest.TestCase):
         self.assertEqual("replay", second["status"])
         self.assertEqual(1, len(self.client.comments))
 
+    def test_network_is_enabled_only_for_declared_external_provider_checks(self):
+        output = pathlib.Path("out.json")
+        ordinary = invoke.payload(self.client.project, [{
+            "id": "OE-SCALE", "category": "representative-input",
+            "requirement": "Support $1M", "failure_condition": "blocks",
+        }], SHA, output)
+        live = invoke.payload(self.client.project, [{
+            "id": "OE-LIVE", "category": "external-provider",
+            "requirement": "Read current provider", "failure_condition": "stale",
+        }], SHA, output)
+        self.assertFalse(ordinary.network_access)
+        self.assertTrue(live.network_access)
+
     def test_stale_or_incomplete_model_output_writes_nothing(self):
         def bad_runner(command, **kwargs):
             prompt = " ".join(command)

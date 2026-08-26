@@ -102,7 +102,10 @@ def payload(project: dict, envelope: list[dict], revision: str,
     prompt = (HERE.joinpath("prompt.md").read_text(encoding="utf-8")
               + f"\n\nWrite the JSON outcome to: {output}\n\nInput: "
               + json.dumps(fields, sort_keys=True))
+    needs_live_network = any(
+        item.get("category") == "external-provider" for item in envelope)
     return InvocationPayload(prompt, access="workspace-write",
+                             network_access=needs_live_network,
                              allowed_tools=("Read", "Bash", "Write"),
                              disallowed_tools=("Agent",))
 
