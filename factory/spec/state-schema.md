@@ -533,6 +533,25 @@ launch failure returns the Story to `story:ready` and restores the previous
 normal attempt, lease, recovery, and poison rules apply. Ambiguous state never
 authorizes a refund or a second worker.
 
+#### 9.4.3 Invocation outcomes and usage receipts
+
+Every admitted provider attempt produces exactly one `capacity.route.attempt`
+record. It has a unique `invocation_id`, the reservation ID and durable
+worker-start invocation ID when Delivery supplied them, and exactly one terminal
+outcome: `launch-failed`, `started-mid-work-failed`, `limit-stopped`,
+`validation-failed`, or `completed`. A route rejected before any provider
+attempt has the final outcome `not-admitted` and no fabricated attempt record.
+Provider-specific reasons remain separate routing data; they cannot replace or
+collapse the stage outcome.
+
+Each attempt record carries a usage receipt. Provider-reported usage is copied
+without pricing it. Exact dollar cost is present only when the provider reports
+that value. Otherwise the receipt names why dollar cost is unavailable and
+records the reconciled reservation charge as normalized capacity units. The
+units are an admission-accounting measure, not dollars. A retry receives its
+own invocation ID, outcome, and receipt; no receipt may be reused across
+attempts.
+
 ### 9.5 PR ↔ Story linkage
 
 A pull request produced by the factory **must** carry, in its body, exactly one line:
