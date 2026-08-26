@@ -11,6 +11,7 @@ import pathlib
 import json
 import os
 import subprocess
+import tempfile
 from dataclasses import dataclass
 
 from .base import AttemptResult, ProviderAdapter
@@ -98,14 +99,15 @@ def cli_adapter(provider: str, *, cwd: pathlib.Path, environment: dict[str, str]
     if provider not in {"anthropic", "openai"}:
         raise ValueError(f"unsupported provider adapter: {provider}")
 
-    def invoke(*, model, effort, timeout_seconds, budget_units, payload):
+    def invoke(*, model, effort, timeout_seconds, budget_units, payload,
+               working_directory=None):
         value = payload if isinstance(payload, InvocationPayload) else InvocationPayload(str(payload))
         command = (claude_command(model=model, effort=effort, payload=value,
                                   budget_units=budget_units)
                    if provider == "anthropic"
                    else codex_command(model=model, effort=effort, payload=value))
         try:
-            result = runner(command, cwd=str(cwd), env=environment,
+            result = runner(command, cwd=str(working_directory or cwd), env=environment,
                             capture_output=True, text=True, timeout=timeout_seconds)
         except FileNotFoundError as exc:
             return AttemptResult("missing-executable", consumed_budget_units=0,
@@ -138,9 +140,19 @@ def cli_adapter(provider: str, *, cwd: pathlib.Path, environment: dict[str, str]
         # A minimal claude-fable-5 reply costs ~$0.15, so a 0.1 cap makes the
         # probe fail on budget with valid credentials — indistinguishable in
         # the health store from an auth failure.
-        result = invoke(model=model, effort=effort, timeout_seconds=timeout_seconds,
-                        budget_units=0.5,
-                        payload=InvocationPayload("Reply exactly CAPACITY_OK"))
+        #
+        # The probe must not inherit repository instructions: run from a
+        # neutral temporary directory. A probe launched from the factory
+        # checkout loads the repo's CLAUDE.md/AGENTS.md, and an engine
+        # following those rules can refuse to echo the token as a
+        # fake-pass request (observed live, 2026-08-25). skip_git_repo_check
+        # keeps the Codex adapter working outside a repository.
+        with tempfile.TemporaryDirectory() as neutral:
+            result = invoke(model=model, effort=effort,
+                            timeout_seconds=timeout_seconds,
+                            budget_units=0.5, working_directory=neutral,
+                            payload=InvocationPayload("Reply exactly CAPACITY_OK",
+                                                      skip_git_repo_check=True))
         def exact(value):
             if value == "CAPACITY_OK":
                 return True
