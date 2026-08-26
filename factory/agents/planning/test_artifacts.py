@@ -96,7 +96,9 @@ def project_output():
                          "operating_envelope_ids": [],
                          "operating_envelope_checks": [],
                          "spec": "Render a projection.", "depends_on": ["model"]}],
-            "expected_bells": 2, "digest": """## Plan in plain language
+            "expected_bells": 2,
+            "risks": "Final risk: incorrect deterministic projection.",
+            "digest": """## Plan in plain language
 
 Build the model, then show it.
 
@@ -234,11 +236,36 @@ class ProjectTests(unittest.TestCase):
         self.assertIn("- [ ] No unverified portfolio is returned", body)
         self.assertNotIn("A verified projection is returned or refusal is explicit", body)
 
+    def test_project_revision_replaces_stale_risks_in_place(self):
+        store = FakeStore([project_issue()])
+        trigger = store.get_issue(10)
+        first = artifacts.write(store, trigger, "v2", project_output())
+        revised = project_output()
+        revised["risks"] = "Settled risk: browser rendering must remain deterministic."
+
+        second = artifacts.write(store, trigger, "v3", revised)
+
+        self.assertEqual(first.project, second.project)
+        body = store.get_issue(10)["body"]
+        self.assertIn(revised["risks"], body)
+        self.assertNotIn("### Risks / notes\n\nNone\n", body)
+        self.assertEqual(second, artifacts.verify(
+            store, trigger, "v3", contract.Altitude.PROJECT))
+
     def test_empty_project_criteria_write_nothing(self):
         store = FakeStore([project_issue()])
         output = project_output()
         output["acceptance_criteria"] = []
         with self.assertRaisesRegex(artifacts.ArtifactError, "acceptance criteria"):
+            artifacts.write(store, store.get_issue(10), "v2", output)
+        self.assertEqual(1, len(store.issues))
+        self.assertEqual({}, store.comments)
+
+    def test_empty_project_risks_write_nothing(self):
+        store = FakeStore([project_issue()])
+        output = project_output()
+        output["risks"] = "  "
+        with self.assertRaisesRegex(artifacts.ArtifactError, "risks / notes"):
             artifacts.write(store, store.get_issue(10), "v2", output)
         self.assertEqual(1, len(store.issues))
         self.assertEqual({}, store.comments)
@@ -315,6 +342,19 @@ class ProjectTests(unittest.TestCase):
             with self.subTest(mutation=mutation), self.assertRaises(
                     artifacts.ArtifactError):
                 artifacts.verify(store, trigger, "v2", contract.Altitude.PROJECT)
+
+    def test_readback_rejects_risks_changed_after_planning(self):
+        store = FakeStore([project_issue()])
+        trigger = store.get_issue(10)
+        artifacts.write(store, trigger, "v2", project_output())
+        project = store.get_issue(10)
+        project["body"] = project["body"].replace(
+            "Final risk: incorrect deterministic projection.",
+            "Contradictory stale risk.")
+        store.update_issue(10, project["body"])
+
+        with self.assertRaisesRegex(artifacts.ArtifactError, "do not match"):
+            artifacts.verify(store, trigger, "v2", contract.Altitude.PROJECT)
 
 
 if __name__ == "__main__":

@@ -101,7 +101,7 @@ Text fallback."""
     def test_project_schema_excludes_campaign_proposal(self):
         value = {"altitude": "project", "acceptance_criteria": ["criterion"],
                  "operating_envelope": [], "adr": {}, "stories": [],
-                 "expected_bells": 2, "digest": self.DIGEST}
+                 "expected_bells": 2, "risks": "risk", "digest": self.DIGEST}
         self.assertIs(value, contract.validate_output(contract.Altitude.PROJECT, value))
         value["project"] = {}
         with self.assertRaises(contract.ContractError):
@@ -119,7 +119,7 @@ Text fallback."""
                      "category": "responsiveness", "requirement": "render promptly",
                      "failure_condition": "browser render exceeds bound"}],
                  "adr": {}, "stories": [story], "expected_bells": 2,
-                 "digest": self.DIGEST}
+                 "risks": "risk", "digest": self.DIGEST}
         with self.assertRaisesRegex(contract.ContractError, "Story-local executable"):
             contract.validate_output(contract.Altitude.PROJECT, value)
         story["operating_envelope_checks"] = [{
@@ -142,7 +142,7 @@ Text fallback."""
     def test_project_digest_requires_plain_language_and_two_diagrams(self):
         value = {"altitude": "project", "acceptance_criteria": ["criterion"],
                  "operating_envelope": [], "adr": {}, "stories": [],
-                 "expected_bells": 2, "digest": "plan"}
+                 "expected_bells": 2, "risks": "risk", "digest": "plan"}
         with self.assertRaisesRegex(contract.ContractError, "Plan in plain language"):
             contract.validate_output(contract.Altitude.PROJECT, value)
 
@@ -155,7 +155,7 @@ Text fallback."""
         ):
             value = {"altitude": "project", "acceptance_criteria": ["criterion"],
                      "operating_envelope": [], "adr": {}, "stories": [],
-                     "expected_bells": 2, "digest": digest}
+                     "expected_bells": 2, "risks": "risk", "digest": digest}
             with self.subTest(section=missing), self.assertRaisesRegex(
                     contract.ContractError, f"{missing!r} lacks a textual fallback"):
                 contract.validate_output(contract.Altitude.PROJECT, value)
@@ -166,7 +166,7 @@ Text fallback."""
             "```text\nnot prose\n```\n\n## Story dependencies")
         value = {"altitude": "project", "acceptance_criteria": ["criterion"],
                  "operating_envelope": [], "adr": {}, "stories": [],
-                 "expected_bells": 2, "digest": digest}
+                 "expected_bells": 2, "risks": "risk", "digest": digest}
         with self.assertRaisesRegex(contract.ContractError,
                                     "How the plan works.*textual fallback"):
             contract.validate_output(contract.Altitude.PROJECT, value)
