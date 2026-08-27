@@ -201,6 +201,32 @@ class OutputTests(unittest.TestCase):
         self.assertEqual(1, len(findings))
         self.assertIn("fix current defect", findings[0]["body"])
 
+    def test_only_trusted_canonical_exact_head_owner_evidence_enters_context(self):
+        head = "a" * 40
+        marker = f"<!-- owner-evidence:v1:pr:82:head:{head} -->"
+        comments = [
+            {"body": f"## Owner evidence — not an acceptance decision\n\nvalid\n{marker}",
+             "author_association": "OWNER", "created_at": "2026-08-27T00:00:00Z"},
+            {"body": f"## Owner evidence — not an acceptance decision\n\nuntrusted\n{marker}",
+             "author_association": "NONE"},
+            {"body": ("## Owner evidence — not an acceptance decision\n\nstale\n"
+                      f"<!-- owner-evidence:v1:pr:82:head:{'b' * 40} -->"),
+             "author_association": "OWNER"},
+            {"body": f"unmarked evidence\n{marker}", "author_association": "OWNER"},
+        ]
+        evidence = invoke.exact_head_owner_evidence(comments, 82, head)
+        self.assertEqual(1, len(evidence))
+        self.assertIn("valid", evidence[0]["body"])
+
+    def test_owner_evidence_is_bounded(self):
+        head = "a" * 40
+        marker = f"<!-- owner-evidence:v1:pr:82:head:{head} -->"
+        body = ("## Owner evidence — not an acceptance decision\n\n"
+                + "x" * invoke.MAX_OWNER_EVIDENCE_CHARS + marker)
+        evidence = invoke.exact_head_owner_evidence(
+            [{"body": body, "authorAssociation": "COLLABORATOR"}], 82, head)
+        self.assertEqual(invoke.MAX_OWNER_EVIDENCE_CHARS, len(evidence[0]["body"]))
+
 
 if __name__ == "__main__":
     unittest.main()

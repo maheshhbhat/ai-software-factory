@@ -16,6 +16,7 @@ import urllib.error
 import urllib.request
 
 DEFAULT_REVIEW_TIMEOUT = 180
+MAX_OWNER_EVIDENCE_CHARS = 8_000
 
 HERE = pathlib.Path(__file__).resolve().parent
 ROOT = HERE.parents[2]
@@ -307,6 +308,27 @@ def prior_review_findings(comments: list[dict]) -> list[dict]:
     ]
 
 
+def exact_head_owner_evidence(comments: list[dict], pull_number: int,
+                              head: str) -> list[dict]:
+    """Return only trusted, canonical evidence bound to this PR head."""
+    marker = re.compile(
+        rf"<!-- owner-evidence:v1:pr:{pull_number}:head:{re.escape(head)} -->")
+    trusted = {"OWNER", "COLLABORATOR"}
+    evidence = []
+    for item in comments:
+        body = item.get("body") or ""
+        association = (item.get("author_association")
+                       or item.get("authorAssociation") or "").upper()
+        if (association in trusted
+                and body.startswith("## Owner evidence — not an acceptance decision")
+                and marker.search(body)):
+            evidence.append({
+                "body": body[:MAX_OWNER_EVIDENCE_CHARS],
+                "created_at": item.get("created_at") or item.get("createdAt"),
+            })
+    return evidence
+
+
 def parse_result(path: pathlib.Path, head: str) -> dict:
     try:
         value = json.loads(path.read_text())
@@ -355,6 +377,8 @@ def execute(repo: str, pull_number: int, token: str, *, client=None,
             if "type:adr" in {label.get("name") for label in x.get("labels", [])}]
     check_state = normalized_checks(client.api(f"/commits/{target.head}/check-runs"))
     prior_findings = prior_review_findings(comments)
+    owner_evidence = exact_head_owner_evidence(
+        comments, pull_number, target.head)
     fields = {"head": target.head,
               "diff": [{"filename": x.get("filename"), "status": x.get("status"),
                          "patch": x.get("patch", "")} for x in
@@ -371,6 +395,7 @@ def execute(repo: str, pull_number: int, token: str, *, client=None,
               },
               "trusted_checks": check_state,
               "prior_findings": prior_findings,
+              "owner_evidence": owner_evidence,
               "operating_envelope_obligations": operating_envelope.obligations(
                   story.get("body", ""), project.get("body", "")),
               "adrs": [{"number": x.get("number"), "title": x.get("title"),

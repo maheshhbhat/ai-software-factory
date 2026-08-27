@@ -164,8 +164,8 @@ class ReviewAcceptanceTests(unittest.TestCase):
         self.assertEqual(first["status"], "approval")
         self.assertEqual(set(self.serialized),
                          {"head", "diff", "story_spec", "project_criteria", "adrs",
-                          "operating_envelope_obligations", "project_plan",
-                          "trusted_checks", "prior_findings"})
+                      "operating_envelope_obligations", "project_plan",
+                      "trusted_checks", "prior_findings", "owner_evidence"})
         self.assertEqual(SHA, self.serialized["head"])
         stories = self.serialized["project_plan"]["stories"]
         self.assertEqual([214, 215, 216], [item["number"] for item in stories])
