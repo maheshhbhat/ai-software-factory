@@ -107,6 +107,14 @@ he does, the first version was wrong.
 - **Name what is broken; skip what is fine.** Two bad items out of sixteen means
   two short paragraphs.
 - **End with his choice**, stated as a choice.
+- **Give every number a plain-language meaning.** Never leave an issue, Project,
+  Story, PR, commit, count, duration, percentage, or measurement as a bare
+  number. Put a short label or explanation beside it: “PR #589 — the closed-PR
+  filter fix” and “69 tests passed — the complete poller suite.” The text must
+  say what the number identifies or measures and, when relevant, why it matters.
+  Do not merely spell the digits out in words. Keep required machine-readable
+  lines and markers exact; put their explanation immediately before or after
+  them instead of changing the protocol syntax.
 
 A correct answer he cannot read is an answer that did not arrive. This applies to
 every reply, not just reviews.

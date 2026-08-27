@@ -30,5 +30,12 @@ active between heartbeats. Do not call a
 run successful until `evidence.json` says `passed: true`; inspect and explain a
 failed reason instead.
 
+Give every number a plain-language meaning in the report. Pair each Story, PR,
+commit, count, duration, cost, percentage, or measurement with text saying what
+it identifies or measures and why it matters when that is not obvious. Do not
+emit a bare identifier or metric, and do not treat spelling digits as words as
+an explanation. Preserve exact machine-readable records; add the explanation
+to the human-facing report rather than rewriting protocol data.
+
 When a human decision follows, apply the repository's bell-check skill to the
 durable evidence before recommending approval.

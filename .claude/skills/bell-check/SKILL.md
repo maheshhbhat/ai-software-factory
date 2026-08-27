@@ -77,6 +77,12 @@ author of the code.
 * **No section references unless asked.** Write "the rules say a project can't
   be accepted until every story is done", not "§4.1 line 231".
 * **Quote the evidence inline** — the timestamp, the file line, the exact string.
+* **Explain every number beside it.** Label what each issue, Project, Story, PR,
+  commit, count, duration, percentage, or measurement means. Write “PR #589 —
+  the closed-PR filter fix,” not just “#589.” Write “two failed criteria out of
+  sixteen total criteria,” not an unexplained ratio. Spelling digits as words is
+  not an explanation. Preserve exact machine-readable decision lines and
+  markers; explain their numbers in adjacent prose instead of altering them.
 * **End with the decision they face**, stated as a choice, not a recommendation
   dressed as a fact.
 
