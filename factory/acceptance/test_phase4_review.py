@@ -16,6 +16,7 @@ SPEC.loader.exec_module(invoke)
 from factory.capacity_pool.router import ModelCapacity, Tier
 from factory.capacity_pool.state import CapacityState
 from factory.runtime import poller as runtime_poller
+from factory.runtime import review_link as runtime_review_link
 
 
 SHA = "a" * 40
@@ -110,6 +111,24 @@ class ReviewAcceptanceTests(unittest.TestCase):
             frozenset({"code", "reason", "json"}))
         self.state.mark_healthy("openai", "review-test", "acceptance-fixture")
         self.addCleanup(self.state.close)
+
+    def test_review_scope_follows_the_authorized_commitment_chain(self):
+        def labels(*values):
+            return [{"name": value} for value in values]
+
+        issues = {
+            60: {"number": 60, "body": "### Roadmap commitment\n\n#59\n",
+                 "labels": labels("type:project", "project:active")},
+            63: {"number": 63, "body": "### Project\n\n#60\n",
+                 "labels": labels("type:story", "story:in-review")},
+            67: {"number": 67, "body": "### Roadmap commitment\n\n#66\n",
+                 "labels": labels("type:project", "project:active")},
+            71: {"number": 71, "body": "### Project\n\n#67\n",
+                 "labels": labels("type:story", "story:in-review")},
+        }
+        self.assertEqual(
+            {63}, runtime_review_link.authorized_story_numbers(issues, 59),
+            "Commitment 59 may review Project 60 Story 63, not Project 67 Story 71")
 
     def fake_subprocess(self, cmd, **kwargs):
         cwd = pathlib.Path(kwargs["cwd"])

@@ -395,7 +395,8 @@ def complete_story(dispatch: dict, report, claim: bool) -> None:
               + (f" — {outcome.detail}" if outcome.detail else ""), flush=True)
 
 
-def run_review_link(repo: str, claim: bool = True) -> list:
+def run_review_link(repo: str, claim: bool = True,
+                    commitment: int | None = None) -> list:
     """Turn a delivery pull request into the lifecycle transitions it implies.
 
     Kept in its own module for the same reason continuation and completion are:
@@ -405,7 +406,7 @@ def run_review_link(repo: str, claim: bool = True) -> list:
     transitions mechanical at all.
     """
     token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or ""
-    return review_link.run(repo, token, apply=claim)
+    return review_link.run(repo, token, apply=claim, commitment=commitment)
 
 
 def review_targets(pulls: list[dict], issues: dict[int, dict],
@@ -547,10 +548,23 @@ def hydrate_review_pulls(repo: str, pulls: list[dict], token: str) -> list[dict]
     return hydrated
 
 
-def run_phase4_reviews(repo: str, apply: bool = True) -> list[review_route.ReviewTarget]:
+def run_phase4_reviews(repo: str, apply: bool = True,
+                       commitment: int | None = None) -> list[review_route.ReviewTarget]:
     token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or ""
-    issues = dispatcher.fetch_issues(repo, token)
-    pulls = hydrate_review_pulls(repo, dispatcher.fetch_pull_requests(repo, token), token)
+    all_issues = dispatcher.fetch_issues(repo, token)
+    allowed = (review_link.authorized_story_numbers(all_issues, commitment)
+               if commitment is not None else set(all_issues))
+    issues = {number: issue for number, issue in all_issues.items() if number in allowed}
+    all_pulls = dispatcher.fetch_pull_requests(repo, token)
+    pulls = []
+    for pull in all_pulls:
+        try:
+            story = review_route.story_number(pull)
+        except review_route.RouteError:
+            continue
+        if story in issues:
+            pulls.append(pull)
+    pulls = hydrate_review_pulls(repo, pulls, token)
     comments = {number: dispatcher._api(
         f"https://api.github.com/repos/{repo}/issues/{number}/comments?per_page=100", token)
                 for number in issues}
@@ -662,10 +676,12 @@ def poll_once(repo: str, commitment: int, seen: set[int],
                                 repo=repo, commitment=commitment)
             return None
 
-    isolated("review-link", lambda: run_review_link(repo, claim))
+    isolated("review-link", lambda: run_review_link(
+        repo, claim, commitment=commitment))
 
     if os.environ.get("FACTORY_PHASE4_REVIEWS") == "1":
-        isolated("independent-review", lambda: run_phase4_reviews(repo, claim))
+        isolated("independent-review", lambda: run_phase4_reviews(
+            repo, claim, commitment=commitment))
 
     # A decision consumed now can unblock work the same cycle. Isolated: a
     # continuation failure must not stop already-authorized work from
