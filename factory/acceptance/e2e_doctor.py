@@ -3,9 +3,9 @@
 
 The default ``rehearsal`` mode preserves the strict empty test-commitment and
 fresh-target checks used by the fixture harness.  ``preplanned`` mode is for a
-real Project whose Stories already exist: it requires clean merged factory
-code and proves that the commitment contains exactly that Project and the
-Project contains exactly its declared, not-yet-started Stories.
+real Project whose Stories already exist but have not started. ``resume`` is
+for an approved Project after a human-authorized rescue: it preserves completed
+Stories and proves that exactly one rescued Story is ready to continue.
 
 This command may read GitHub, inspect local processes, and run ``poll.sh`` with
 ``--dry-run``.  It creates and removes one temporary detached Git worktree and
@@ -62,8 +62,8 @@ class Check:
 class Doctor:
     def __init__(self, repo: str, project: int, *, commitment: int, target: str,
                  mode: str = "rehearsal", environ=None, runner=None):
-        if mode not in {"rehearsal", "preplanned"}:
-            raise ValueError("mode must be 'rehearsal' or 'preplanned'")
+        if mode not in {"rehearsal", "preplanned", "resume"}:
+            raise ValueError("mode must be 'rehearsal', 'preplanned', or 'resume'")
         self.repo, self.project = repo, project
         self.commitment, self.target = commitment, target
         self.mode = mode
@@ -197,7 +197,7 @@ class Doctor:
           repository(owner:$owner,name:$name){isPrivate viewerPermission autoMergeAllowed
             project:issue(number:$project){number state body labels(first:20){nodes{name}}}
             commitment:issue(number:$commitment){number state body labels(first:20){nodes{name}}}
-            issues(first:100,states:OPEN){nodes{number body labels(first:20){nodes{name}}}
+            issues(first:100,states:[OPEN,CLOSED]){nodes{number state body labels(first:20){nodes{name}}}
               pageInfo{hasNextPage}}
             defaultBranchRef{branchProtectionRule{requiresStatusChecks requiredStatusCheckContexts}}
           }
@@ -235,7 +235,8 @@ class Doctor:
                      (rest.stderr or rest.stdout).strip()[:300]))
         project = repo.get("project") or {}
         labels = {item["name"] for item in (project.get("labels") or {}).get("nodes", [])}
-        allowed_project_states = ({"project:active"} if self.mode == "preplanned"
+        allowed_project_states = ({"project:active"}
+                                  if self.mode in {"preplanned", "resume"}
                                   else {"project:awaiting-ready", "project:active"})
         project_ok = (project.get("state") == "OPEN" and "type:project" in labels and
                       len({x for x in labels if x.startswith("project:")}) == 1 and
@@ -293,21 +294,84 @@ class Doctor:
                     r"(?m)^\s*#(\d+)\s*$",
                     stories_match.group(1) if stories_match else ""))
             story_nodes = [item for item in nodes if item.get("number") in declared_stories]
-            allowed_story_states = {"story:blocked", "story:ready"}
-            lifecycle_ok = all(
-                len({label for label in issue_labels(item)
-                     if label.startswith("story:")}) == 1 and
-                bool(issue_labels(item) & allowed_story_states)
-                for item in story_nodes)
+            lifecycle_by_number = {}
+            dependency_by_number = {}
+            topology_ok = True
+            for item in story_nodes:
+                lifecycle = {label for label in issue_labels(item)
+                             if label.startswith("story:")}
+                if len(lifecycle) != 1:
+                    topology_ok = False
+                    continue
+                lifecycle_by_number[item["number"]] = next(iter(lifecycle))
+                dependency_match = re.search(
+                    r"(?ms)^### Depends-on\s*$\n(.*?)(?=^### |\Z)",
+                    item.get("body") or "")
+                dependency_lines = [line.strip() for line in
+                                    (dependency_match.group(1).splitlines()
+                                     if dependency_match else []) if line.strip()]
+                if dependency_lines == ["none"]:
+                    dependencies = []
+                elif dependency_lines and all(
+                        re.fullmatch(r"#[1-9][0-9]*", line)
+                        for line in dependency_lines):
+                    dependencies = [int(line[1:]) for line in dependency_lines]
+                else:
+                    if self.mode == "resume":
+                        topology_ok = False
+                    dependencies = []
+                dependency_by_number[item["number"]] = dependencies
+            declared_set = set(declared_stories)
+            if (self.mode == "resume" and any(
+                    not set(deps) <= declared_set
+                    for deps in dependency_by_number.values())):
+                topology_ok = False
+            visiting, visited = set(), set()
+
+            def visit(number):
+                nonlocal topology_ok
+                if number in visiting:
+                    topology_ok = False
+                    return
+                if number in visited:
+                    return
+                visiting.add(number)
+                for dependency in dependency_by_number.get(number, []):
+                    visit(dependency)
+                visiting.discard(number)
+                visited.add(number)
+
+            if self.mode == "resume":
+                for number in declared_stories:
+                    visit(number)
+            if self.mode == "preplanned":
+                allowed_story_states = {"story:blocked", "story:ready"}
+                lifecycle_ok = (topology_ok and all(
+                    state in allowed_story_states
+                    for state in lifecycle_by_number.values()))
+                isolation_name = "isolated preplanned Project"
+            else:
+                ready = [number for number, state in lifecycle_by_number.items()
+                         if state == "story:ready"]
+                completed = {number for number, state in lifecycle_by_number.items()
+                             if state == "story:completed"}
+                lifecycle_ok = (topology_ok and bool(completed) and len(ready) == 1
+                    and all(state in {"story:completed", "story:ready", "story:blocked"}
+                            for state in lifecycle_by_number.values())
+                    and all((next(item for item in story_nodes
+                                  if item["number"] == number).get("state") == "CLOSED")
+                            == (state == "story:completed")
+                            for number, state in lifecycle_by_number.items())
+                    and set(dependency_by_number.get(ready[0], [])) <= completed)
+                isolation_name = "isolated resumed Project"
             isolated = (not truncated and commitment_projects == [self.project]
                         and bool(declared_stories)
                         and existing_stories == declared_stories
                         and len(story_nodes) == len(declared_stories)
                         and lifecycle_ok)
-            isolation_name = "isolated preplanned Project"
         details = (f"projects={commitment_projects}; stories={existing_stories}"
                    + ("; open issue inventory exceeds 100" if truncated else ""))
-        if self.mode == "preplanned":
+        if self.mode in {"preplanned", "resume"}:
             details += f"; declared={declared_stories}"
         self.record(isolation_name, isolated, details)
         protection = ((repo.get("defaultBranchRef") or {}).get("branchProtectionRule") or {})
@@ -445,8 +509,10 @@ def render(checks: list[Check], *, mode: str = "rehearsal") -> str:
     lines = [f"{'PASS' if item.passed else 'FAIL'}  {item.name} — {item.detail}"
              for item in checks]
     failures = sum(not item.passed for item in checks)
-    ready = ("READY — approved preplanned Project may enter delivery"
-             if mode == "preplanned" else "READY — no E2E artifacts were created")
+    ready = ({
+        "preplanned": "READY — approved preplanned Project may enter delivery",
+        "resume": "READY — approved rescued Project may resume delivery",
+    }.get(mode, "READY — no E2E artifacts were created"))
     lines.append(ready if failures == 0 else
                  f"BLOCKED — fix {failures} failure(s) before delivery")
     return "\n".join(lines)
@@ -458,7 +524,7 @@ def main(argv=None) -> int:
     parser.add_argument("--project", required=True, type=int)
     parser.add_argument("--commitment", required=True, type=int)
     parser.add_argument("--target", default="")
-    parser.add_argument("--mode", choices=("rehearsal", "preplanned"),
+    parser.add_argument("--mode", choices=("rehearsal", "preplanned", "resume"),
                         default="rehearsal")
     parser.add_argument("--receipt",
                         help="readiness receipt path (default: scoped temp path)")

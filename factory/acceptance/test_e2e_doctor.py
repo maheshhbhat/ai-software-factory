@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import pathlib
@@ -127,6 +128,93 @@ class SafetyTests(unittest.TestCase):
 
 
 class GitHubChecks(unittest.TestCase):
+    @staticmethod
+    def resumed_payload():
+        project_body = ("### Stories\n\n#69\n#70\n#71\n\n"
+                        "### Roadmap commitment\n\n#66\n")
+        return {"data":{"repository":{"isPrivate":False,"viewerPermission":"ADMIN",
+          "autoMergeAllowed":True,
+          "project":{"number":67,"state":"OPEN","body":project_body,
+                     "labels":{"nodes":[{"name":"type:project"},{"name":"project:active"}]}},
+          "commitment":{"number":66,"state":"OPEN","body":"real product outcome",
+                        "labels":{"nodes":[{"name":"type:roadmap-commitment"}]}},
+          "issues":{"nodes":[
+              {"number":67,"state":"OPEN","body":"### Roadmap commitment\n\n#66\n",
+               "labels":{"nodes":[{"name":"type:project"}]}},
+              {"number":69,"state":"CLOSED",
+               "body":"### Project\n\n#67\n\n### Depends-on\n\nnone\n",
+               "labels":{"nodes":[{"name":"type:story"},{"name":"story:completed"}]}},
+              {"number":70,"state":"OPEN",
+               "body":"### Project\n\n#67\n\n### Depends-on\n\n#69\n",
+               "labels":{"nodes":[{"name":"type:story"},{"name":"story:ready"}]}},
+              {"number":71,"state":"OPEN",
+               "body":"### Project\n\n#67\n\n### Depends-on\n\n#70\n",
+               "labels":{"nodes":[{"name":"type:story"},{"name":"story:blocked"}]}}],
+              "pageInfo":{"hasNextPage":False}},
+          "defaultBranchRef":{"branchProtectionRule":{
+              "requiredStatusCheckContexts":["merge-gate"]}}},
+          "rateLimit":{"remaining":4999,"resetAt":"later"}}}
+
+    @staticmethod
+    def github_runner(payload):
+        def respond(args, **_):
+            if "issues?state=open" in args[-1]:
+                return completed(args, stdout="[]")
+            if args[-1].endswith("/rulesets"):
+                return completed(args, stdout="[]")
+            return completed(args, stdout=json.dumps(payload))
+        return respond
+
+    def test_resume_mode_accepts_exact_completed_ready_blocked_topology(self):
+        value = doctor.Doctor(
+            "owner/repo", 67, commitment=66, target="", mode="resume",
+            environ={"PATH":"/bin"}, runner=self.github_runner(self.resumed_payload()))
+        value.token = "token"; value.github()
+        self.assertTrue(all(check.passed for check in value.checks), value.checks)
+        check = next(row for row in value.checks
+                     if row.name == "isolated resumed Project")
+        self.assertIn("stories=[69, 70, 71]", check.detail)
+
+    def test_preplanned_mode_still_rejects_started_resume_topology(self):
+        value = doctor.Doctor(
+            "owner/repo", 67, commitment=66, target="", mode="preplanned",
+            environ={"PATH":"/bin"}, runner=self.github_runner(self.resumed_payload()))
+        value.token = "token"; value.github()
+        check = next(row for row in value.checks
+                     if row.name == "isolated preplanned Project")
+        self.assertFalse(check.passed)
+
+    def test_resume_mode_fails_closed_for_incomplete_or_invalid_topology(self):
+        variants = {}
+        missing = self.resumed_payload()
+        missing["data"]["repository"]["issues"]["nodes"] = [
+            item for item in missing["data"]["repository"]["issues"]["nodes"]
+            if item["number"] != 69]
+        variants["missing completed Story"] = missing
+        two_ready = self.resumed_payload()
+        two_ready["data"]["repository"]["issues"]["nodes"][3]["labels"]["nodes"][1]["name"] = "story:ready"
+        variants["two ready Stories"] = two_ready
+        open_completed = self.resumed_payload()
+        open_completed["data"]["repository"]["issues"]["nodes"][1]["state"] = "OPEN"
+        variants["completed Story left open"] = open_completed
+        unmet = self.resumed_payload()
+        unmet["data"]["repository"]["issues"]["nodes"][2]["body"] = \
+            "### Project\n\n#67\n\n### Depends-on\n\n#71\n"
+        variants["ready dependency is not completed"] = unmet
+        cyclic = copy.deepcopy(unmet)
+        cyclic["data"]["repository"]["issues"]["nodes"][3]["body"] = \
+            "### Project\n\n#67\n\n### Depends-on\n\n#70\n"
+        variants["cyclic dependencies"] = cyclic
+        for name, payload in variants.items():
+            with self.subTest(name=name):
+                value = doctor.Doctor(
+                    "owner/repo", 67, commitment=66, target="", mode="resume",
+                    environ={"PATH":"/bin"}, runner=self.github_runner(payload))
+                value.token = "token"; value.github()
+                check = next(row for row in value.checks
+                             if row.name == "isolated resumed Project")
+                self.assertFalse(check.passed)
+
     def test_preplanned_mode_requires_exact_declared_unstarted_stories(self):
         project_body = """### Stories
 
