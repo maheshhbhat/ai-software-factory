@@ -202,6 +202,16 @@ class ReviewAcceptanceTests(unittest.TestCase):
         self.assertIn(new_head, merge.call_args.args[0])
         self.assertNotIn("--auto", merge.call_args.args[0])
 
+    def test_merged_pr_legacy_auto_merge_payload_is_ignored(self):
+        """Regression: merged Project #60 PR #65 retains this payload."""
+        merged = {"number": 65, "state": "closed", "merged": True,
+                  "body": "Story: #62\n",
+                  "auto_merge": {"enabled_by": {"login": "factory"}}}
+        with mock.patch.object(runtime_poller.subprocess, "run") as command:
+            self.assertEqual(set(), runtime_poller.disable_legacy_auto_merge(
+                "owner/private", [merged]))
+        command.assert_not_called()
+
     def test_findings_are_bound_to_head_and_return_story_ready(self):
         def findings(cmd, **kwargs):
             invoke.staging_outcome_path(pathlib.Path(kwargs["cwd"]).parent).write_text(json.dumps(

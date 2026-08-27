@@ -173,11 +173,15 @@ class TestParsing(unittest.TestCase):
         run.assert_not_called()
 
     def test_legacy_auto_merge_is_disabled(self):
-        pulls = [{"number": 9, "body": "Story: #11\n",
+        pulls = [{"number": 9, "state": "open", "body": "Story: #11\n",
                   "auto_merge": {"enabled_by": {"login": "factory"}}},
-                 {"number": 10, "body": "Story: #12\n", "auto_merge": None},
-                 {"number": 13, "body": "ordinary PR",
-                  "auto_merge": {"enabled_by": {"login": "human"}}}]
+                 {"number": 10, "state": "open", "body": "Story: #12\n",
+                  "auto_merge": None},
+                 {"number": 13, "state": "open", "body": "ordinary PR",
+                  "auto_merge": {"enabled_by": {"login": "human"}}},
+                 {"number": 65, "state": "closed", "merged": True,
+                  "body": "Story: #62\n",
+                  "auto_merge": {"enabled_by": {"login": "factory"}}}]
         completed = __import__("subprocess").CompletedProcess([], 0, "disabled", "")
         with mock.patch.object(poller.subprocess, "run", return_value=completed) as run:
             self.assertEqual({9}, poller.disable_legacy_auto_merge("o/r", pulls))
