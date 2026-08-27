@@ -143,7 +143,7 @@ class GitHubChecks(unittest.TestCase):
                "labels":{"nodes":[{"name":"type:project"}]}},
               {"number":69,"state":"CLOSED",
                "body":"### Project\n\n#67\n\n### Depends-on\n\nnone\n",
-               "labels":{"nodes":[{"name":"type:story"},{"name":"story:completed"}]}},
+               "labels":{"nodes":[{"name":"type:story"},{"name":"story:merged"}]}},
               {"number":70,"state":"OPEN",
                "body":"### Project\n\n#67\n\n### Depends-on\n\n#69\n",
                "labels":{"nodes":[{"name":"type:story"},{"name":"story:ready"}]}},
@@ -165,7 +165,7 @@ class GitHubChecks(unittest.TestCase):
             return completed(args, stdout=json.dumps(payload))
         return respond
 
-    def test_resume_mode_accepts_exact_completed_ready_blocked_topology(self):
+    def test_resume_mode_accepts_exact_merged_ready_blocked_topology(self):
         value = doctor.Doctor(
             "owner/repo", 67, commitment=66, target="", mode="resume",
             environ={"PATH":"/bin"}, runner=self.github_runner(self.resumed_payload()))
@@ -174,6 +174,18 @@ class GitHubChecks(unittest.TestCase):
         check = next(row for row in value.checks
                      if row.name == "isolated resumed Project")
         self.assertIn("stories=[69, 70, 71]", check.detail)
+
+    def test_resume_mode_accepts_no_deliverable_terminal_success(self):
+        payload = self.resumed_payload()
+        payload["data"]["repository"]["issues"]["nodes"][1]["labels"]["nodes"][1]["name"] = \
+            "story:completed"
+        value = doctor.Doctor(
+            "owner/repo", 67, commitment=66, target="", mode="resume",
+            environ={"PATH":"/bin"}, runner=self.github_runner(payload))
+        value.token = "token"; value.github()
+        check = next(row for row in value.checks
+                     if row.name == "isolated resumed Project")
+        self.assertTrue(check.passed, value.checks)
 
     def test_preplanned_mode_still_rejects_started_resume_topology(self):
         value = doctor.Doctor(
@@ -196,7 +208,10 @@ class GitHubChecks(unittest.TestCase):
         variants["two ready Stories"] = two_ready
         open_completed = self.resumed_payload()
         open_completed["data"]["repository"]["issues"]["nodes"][1]["state"] = "OPEN"
-        variants["completed Story left open"] = open_completed
+        variants["terminal-success Story left open"] = open_completed
+        closed_blocked = self.resumed_payload()
+        closed_blocked["data"]["repository"]["issues"]["nodes"][3]["state"] = "CLOSED"
+        variants["nonterminal Story closed"] = closed_blocked
         unmet = self.resumed_payload()
         unmet["data"]["repository"]["issues"]["nodes"][2]["body"] = \
             "### Project\n\n#67\n\n### Depends-on\n\n#71\n"
