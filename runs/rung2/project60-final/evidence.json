@@ -1,0 +1,51 @@
+{
+  "repository": "maheshhbhat/income-portfolio-analyzer",
+  "commitment": 59,
+  "project": 60,
+  "project_ref": "maheshhbhat/income-portfolio-analyzer#60",
+  "product_outcome": "accepted",
+  "stories": [
+    {"number": 62, "merged": true, "poisoned": true, "human_recovery": true, "pull_request": 65},
+    {"number": 63, "merged": true, "poisoned": false, "human_recovery": false, "pull_request": 81},
+    {"number": 64, "merged": true, "poisoned": false, "human_recovery": true, "pull_request": 82}
+  ],
+  "decisions": [
+    {"bell_type": "plan-approval", "result": "approved", "timestamp": "2026-08-26T20:34:51Z", "comment": 5430791982},
+    {"bell_type": "poison-rescue", "result": "approved", "timestamp": "2026-08-27T12:58:18Z", "story": 62, "comment": 5439472906},
+    {"bell_type": "acceptance", "result": "pass", "timestamp": "2026-08-27T16:51:43Z", "comment": 5442383049}
+  ],
+  "operator_actions": [
+    {"action": "stale-correction-claim recovery", "story": 62, "timestamp": "2026-08-27T04:07:27Z", "classification": "operation", "comment": 5434245027},
+    {"action": "bounded retry authorization", "story": 62, "timestamp": "2026-08-27T12:16:23Z", "classification": "operation", "comment": 5438982313},
+    {"action": "exact-head lifecycle repair", "story": 62, "timestamp": "2026-08-27T14:50:25Z", "classification": "operation", "comment": 5440885717},
+    {"action": "owner Chrome verification", "story": 64, "timestamp": "2026-08-27T16:16:01Z", "classification": "operation", "comment": 5441968647},
+    {"action": "exact-head evidence refresh", "story": 64, "timestamp": "2026-08-27T16:30:40Z", "classification": "operation", "commit": "94fd70b7c1cb90a2c593356831b7adc8bddf4efd"},
+    {"action": "correct owner evidence transcription", "story": 64, "timestamp": "2026-08-27T16:43:06Z", "classification": "operation", "comment": 5442281842}
+  ],
+  "quality_observations": [],
+  "acceptance": {
+    "criteria": [
+      {"criterion": "Using only the illustrative curated securities, a browser submission of one valid retirement input set displays deterministic steady and product-owned early-downturn projections, each with ending balance, depletion timing or full-horizon status, and year-by-year results.", "result": "pass"},
+      {"criterion": "The early-downturn scenario keeps the steady allocation and yield, reduces that allocation’s blended annual growth rate by exactly 20 percentage points in year 1 only, and uses the unadjusted steady blended yield and growth rates in years 2 through the selected horizon; the page visibly discloses this as an illustrative deterministic assumption, not a forecast or financial advice.", "result": "pass"},
+      {"criterion": "In an owner-performed Google Chrome click-and-render run using a $1,000,000 portfolio, 30-year horizon, and 3% inflation, both scenario tables, the illustrative/non-advice disclosures, elapsed time of 1 second or less, invalid-input refusal with cleared output, and zero page-console errors are recorded.", "result": "pass"},
+      {"criterion": "Repeated calls with identical valid inputs return identical scenario results; all allocation amounts use supplied curated securities only and sum exactly in integer cents.", "result": "pass"},
+      {"criterion": "Invalid or unsupported scenario input returns an actionable refusal and leaves no previous comparison summary, scenario value, or scenario table visible.", "result": "pass"},
+      {"criterion": "The representative $1,000,000, 30-year, 3% calculation and rendering completes within 1 second in the documented owner Chrome measurement, and calculation work is bounded by horizon years and curated-security count rather than portfolio cents.", "result": "pass"},
+      {"criterion": "Existing steady-projection behavior remains covered by regression tests; this delivery changes no provider refresh, infrastructure, database, dependency, workflow, credential, telemetry, factory artifact, or CI behavior.", "result": "pass"},
+      {"criterion": "Comparable-difficulty record: Project #60 has three planned Stories (#62–#64), matching failed Project #47’s three approved delivery Stories (#49–#51) before corrective Story #58. Both add a pure calculation engine, connect it to the browser, render allocation/projection-derived results, preserve integer-cent and curated-security limits, and require regression plus real Chrome verification. Both exercise $1,000,000, 30 years, and 3% inflation in real Chrome. Project #47’s failed acceptance evidence in comments 5426602811 and 5426620130 records the missing effective realistic response bound and freeze; Project #60 retains comparable scope while adding the explicit one-second and horizon/security-count bound.", "result": "pass"}
+    ]
+  },
+  "thresholds": {
+    "autonomy_minimum": 0.75,
+    "relay_maximum": 0,
+    "escaped_defects_maximum": 0
+  },
+  "sources": [
+    "GitHub Project #60 and Stories #62-#64 timelines and comments",
+    "Product PRs #65, #81, and #82 checks, commits, reviews, and merge records",
+    "Project #60 observability fragments preserved under /private/tmp during the run",
+    "factory/touchlog/touchlog.jsonl",
+    "owner Chrome evidence comment 5442281842 on Story #64",
+    "Project #60 acceptance comment 5442383049"
+  ]
+}

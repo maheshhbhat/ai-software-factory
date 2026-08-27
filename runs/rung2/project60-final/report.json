@@ -1,0 +1,186 @@
+{
+  "commitment": 59,
+  "kpis": {
+    "acceptance_catches": {
+      "count": 0,
+      "criteria": []
+    },
+    "autonomy": {
+      "autonomous_stories": 1,
+      "autonomous_story_numbers": [
+        63
+      ],
+      "definition": "merged without human recovery or human code intervention",
+      "non_autonomous_story_numbers": [
+        62,
+        64
+      ],
+      "rate": 0.3333333333333333,
+      "stories": 3
+    },
+    "cycle_time": {
+      "end": "2026-08-27T16:51:43Z",
+      "seconds": 73012.0,
+      "start": "2026-08-26T20:34:51Z"
+    },
+    "engine_usage_cost": {
+      "by_engine": {
+        "gpt-5.4": {
+          "input_tokens": 4585919,
+          "invocations": 12,
+          "output_tokens": 54477,
+          "reported_invocations": 12,
+          "unreported_invocations": 0
+        },
+        "gpt-5.6-terra": {
+          "input_tokens": 82124,
+          "invocations": 2,
+          "output_tokens": 1355,
+          "reported_invocations": 2,
+          "unreported_invocations": 0
+        }
+      },
+      "cost_per_accepted_story_usd": "unavailable",
+      "cost_status": "lower-bound",
+      "known_reported_cost_per_accepted_story_usd": 0.0,
+      "known_reported_cost_usd": 0.0
+    },
+    "escaped_defects": {
+      "count": 0,
+      "observations": []
+    },
+    "human_touches": {
+      "by_classification": {
+        "decision": 2,
+        "rescue": 1
+      },
+      "canonical_bells": 3,
+      "operator_actions": [
+        {
+          "action": "stale-correction-claim recovery",
+          "classification": "operation",
+          "comment": 5434245027,
+          "story": 62,
+          "timestamp": "2026-08-27T04:07:27Z"
+        },
+        {
+          "action": "bounded retry authorization",
+          "classification": "operation",
+          "comment": 5438982313,
+          "story": 62,
+          "timestamp": "2026-08-27T12:16:23Z"
+        },
+        {
+          "action": "exact-head lifecycle repair",
+          "classification": "operation",
+          "comment": 5440885717,
+          "story": 62,
+          "timestamp": "2026-08-27T14:50:25Z"
+        },
+        {
+          "action": "owner Chrome verification",
+          "classification": "operation",
+          "comment": 5441968647,
+          "story": 64,
+          "timestamp": "2026-08-27T16:16:01Z"
+        },
+        {
+          "action": "exact-head evidence refresh",
+          "classification": "operation",
+          "commit": "94fd70b7c1cb90a2c593356831b7adc8bddf4efd",
+          "story": 64,
+          "timestamp": "2026-08-27T16:30:40Z"
+        },
+        {
+          "action": "correct owner evidence transcription",
+          "classification": "operation",
+          "comment": 5442281842,
+          "story": 64,
+          "timestamp": "2026-08-27T16:43:06Z"
+        }
+      ],
+      "records": [
+        {
+          "actor": "@maheshhbhat",
+          "bell_type": "poison-rescue",
+          "classification": "rescue",
+          "note": "Mahesh authorized first poison rescue for Story #62 in session after correcting misassigned OE-RESP-1 and OE-DEGRADE-1; decision-comment:5439472906; marker=poison-rescue:income-portfolio-analyzer:62:first",
+          "project": "maheshhbhat/income-portfolio-analyzer#60",
+          "seconds_spent": 0,
+          "story": "maheshhbhat/income-portfolio-analyzer#62",
+          "timestamp": "2026-08-27T13:01:31.820106Z"
+        },
+        {
+          "actor": "@maheshhbhat",
+          "bell_type": "plan-approval",
+          "classification": "decision",
+          "note": "Transcribed during bounded Project #60 measurement closeout from the already-existing GitHub plan-approval decision; duration unmeasured; decision-comment:5430791982; source=https://github.com/maheshhbhat/income-portfolio-analyzer/issues/60#issuecomment-5430791982",
+          "project": "maheshhbhat/income-portfolio-analyzer#60",
+          "seconds_spent": 0,
+          "story": null,
+          "timestamp": "2026-08-26T20:34:51Z"
+        },
+        {
+          "actor": "@maheshhbhat",
+          "bell_type": "acceptance",
+          "classification": "decision",
+          "note": "Transcribed during bounded Project #60 measurement closeout from the already-existing GitHub acceptance decision; duration unmeasured; acceptance-comment:5442383049; source=https://github.com/maheshhbhat/income-portfolio-analyzer/issues/60#issuecomment-5442383049",
+          "project": "maheshhbhat/income-portfolio-analyzer#60",
+          "seconds_spent": 0,
+          "story": null,
+          "timestamp": "2026-08-27T16:51:43Z"
+        }
+      ],
+      "relay": 0
+    },
+    "poison_rate": {
+      "poisoned_stories": 1,
+      "rate": 0.3333333333333333,
+      "stories": 3,
+      "story_numbers": [
+        62
+      ]
+    },
+    "worker_attempts_retry_rate": {
+      "attempts": 8,
+      "attempts_by_story": {
+        "62": 4,
+        "63": 1,
+        "64": 3
+      },
+      "attempts_per_story": 2.6666666666666665,
+      "retries": 5,
+      "retry_share_of_attempts": 0.625,
+      "stories": 3
+    }
+  },
+  "measurement_integrity": {
+    "findings": [],
+    "passed": true
+  },
+  "product_outcome": "accepted",
+  "project": 60,
+  "report_phase": "final",
+  "repository": "maheshhbhat/income-portfolio-analyzer",
+  "rung": 2,
+  "rung_verdict": "FAIL",
+  "schema_version": 1,
+  "sources": [
+    "GitHub Project #60 and Stories #62-#64 timelines and comments",
+    "Product PRs #65, #81, and #82 checks, commits, reviews, and merge records",
+    "Project #60 observability fragments preserved under /private/tmp during the run",
+    "factory/touchlog/touchlog.jsonl",
+    "owner Chrome evidence comment 5442281842 on Story #64",
+    "Project #60 acceptance comment 5442383049"
+  ],
+  "threshold_results": {
+    "autonomy": false,
+    "escaped_defects": true,
+    "relay": true
+  },
+  "thresholds": {
+    "autonomy_minimum": 0.75,
+    "escaped_defects_maximum": 0,
+    "relay_maximum": 0
+  }
+}
