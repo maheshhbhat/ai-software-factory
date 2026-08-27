@@ -47,12 +47,25 @@ class FakeGitHub:
         if path == "/issues/215":
             return self.story()
         if path == "/issues/212":
-            return {"number": 212, "body": "### Falsifiable acceptance criteria\n\n- approved\n",
+            return {"number": 212, "title": "Comparison Project", "state": "open",
+                    "body": ("### Goal\n\nCompare scenarios.\n\n"
+                             "### Falsifiable acceptance criteria\n\n"
+                             "- exact labels\n- owner Chrome after all PRs merge\n"),
                     "labels": [{"name": "project:active"}]}
+        if path == f"/commits/{self.head}/check-runs":
+            return {"check_runs": [
+                {"name": "tests", "status": "completed", "conclusion": "success",
+                 "details_url": "https://checks.test/tests"},
+                {"name": "merge-gate", "status": "completed", "conclusion": "success",
+                 "details_url": "https://checks.test/gate"},
+            ]}
         raise AssertionError((path, method))
 
     def story(self):
-        return {"number": 215, "body": "### Project\n\n#212\n",
+        return {"number": 215, "title": "Render exact labels", "state": "open",
+                "body": ("### Project\n\n#212\n\n### Phase\n\nbuild\n\n"
+                         "### Depends-on\n\n#214\n\n### Acceptance notes\n\n"
+                         "- Render exactly 2%, 3%, and 4%.\n"),
                 "labels": [{"name": x} for x in sorted(self.story_labels)]}
 
     def pages(self, path):
@@ -64,8 +77,24 @@ class FakeGitHub:
         if path == "/pulls/9/files":
             return [{"filename": "code.py", "status": "modified", "patch": "+safe"}]
         if path == "/issues?state=all":
-            return [{"number": 1, "title": "ADR", "body": "decision",
-                     "labels": [{"name": "type:adr"}]}]
+            return [
+                {"number": 1, "title": "ADR", "body": "decision", "state": "open",
+                 "labels": [{"name": "type:adr"}]},
+                {"number": 214, "title": "Calculate", "state": "closed",
+                 "body": ("### Project\n\n#212\n\n### Phase\n\nbuild\n\n"
+                          "### Depends-on\n\nnone\n"),
+                 "labels": [{"name": "type:story"}, {"name": "story:completed"}]},
+                self.story(),
+                {"number": 216, "title": "Owner Chrome assurance", "state": "open",
+                 "body": ("### Project\n\n#212\n\n### Phase\n\nhardening\n\n"
+                          "### Depends-on\n\n#215\n\n### Acceptance notes\n\n"
+                          "- Owner records Chrome evidence after all PRs merge.\n"),
+                 "labels": [{"name": "type:story"}, {"name": "story:blocked"}]},
+                {"number": 999, "title": "Unrelated Project Story", "state": "open",
+                 "body": ("### Project\n\n#998\n\n### Phase\n\nbuild\n\n"
+                          "### Depends-on\n\nnone\n"),
+                 "labels": [{"name": "type:story"}]},
+            ]
         raise AssertionError(path)
 
 
@@ -115,8 +144,18 @@ class ReviewAcceptanceTests(unittest.TestCase):
         self.assertEqual(first["status"], "approval")
         self.assertEqual(set(self.serialized),
                          {"head", "diff", "story_spec", "project_criteria", "adrs",
-                          "operating_envelope_obligations"})
+                          "operating_envelope_obligations", "project_plan",
+                          "trusted_checks", "prior_findings"})
         self.assertEqual(SHA, self.serialized["head"])
+        stories = self.serialized["project_plan"]["stories"]
+        self.assertEqual([214, 215, 216], [item["number"] for item in stories])
+        self.assertEqual(["completed", "current", "future"],
+                         [item["relation"] for item in stories])
+        self.assertIn("exactly 2%, 3%, and 4%", stories[1]["body"])
+        self.assertIn("Owner records Chrome evidence", stories[2]["body"])
+        self.assertNotIn("Unrelated Project Story", json.dumps(self.serialized))
+        self.assertEqual(["merge-gate", "tests"],
+                         [item["name"] for item in self.serialized["trusted_checks"]])
         self.assertEqual(self.workspace_entries, ["repo", "reviewer-home"])
         self.assertNotIn("worker", json.dumps(self.serialized).lower())
         self.assertEqual(self.deliver()["status"], "replay")
