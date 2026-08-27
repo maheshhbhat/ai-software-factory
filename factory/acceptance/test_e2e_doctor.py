@@ -151,6 +151,7 @@ class GitHubChecks(unittest.TestCase):
                "body":"### Project\n\n#67\n\n### Depends-on\n\n#70\n",
                "labels":{"nodes":[{"name":"type:story"},{"name":"story:blocked"}]}}],
               "pageInfo":{"hasNextPage":False}},
+          "pullRequests":{"nodes":[]},
           "defaultBranchRef":{"branchProtectionRule":{
               "requiredStatusCheckContexts":["merge-gate"]}}},
           "rateLimit":{"remaining":4999,"resetAt":"later"}}}
@@ -201,6 +202,50 @@ class GitHubChecks(unittest.TestCase):
         isolation = next(row for row in check.checks
                          if row.name == "isolated resumed Project")
         self.assertTrue(isolation.passed, check.checks)
+
+    def test_resume_mode_accepts_project_60_review_only_recovery(self):
+        payload = self.resumed_payload()
+        current = payload["data"]["repository"]["issues"]["nodes"][2]
+        current["labels"]["nodes"][1]["name"] = "story:in-review"
+        payload["data"]["repository"]["pullRequests"]["nodes"] = [{
+            "number": 81, "state": "OPEN", "isDraft": False,
+            "body": "Story: #70\n\n<!-- worker-artifact -->"}]
+        value = doctor.Doctor(
+            "owner/repo", 67, commitment=66, target="", mode="resume",
+            environ={"PATH":"/bin"}, runner=self.github_runner(payload))
+        value.token = "token"; value.github()
+        isolation = next(row for row in value.checks
+                         if row.name == "isolated resumed Project")
+        self.assertTrue(isolation.passed, value.checks)
+
+    def test_resume_mode_rejects_unsafe_review_only_pull_request_evidence(self):
+        variants = {}
+        for name, pulls in {
+            "missing pull request": [],
+            "draft pull request": [{"number":81, "state":"OPEN", "isDraft":True,
+                                    "body":"Story: #70\n"}],
+            "wrong Story link": [{"number":81, "state":"OPEN", "isDraft":False,
+                                  "body":"Story: #71\n"}],
+            "duplicate linked pull requests": [
+                {"number":81, "state":"OPEN", "isDraft":False,
+                 "body":"Story: #70\n"},
+                {"number":82, "state":"OPEN", "isDraft":False,
+                 "body":"Story: #70\n"}],
+        }.items():
+            payload = self.resumed_payload()
+            payload["data"]["repository"]["issues"]["nodes"][2][
+                "labels"]["nodes"][1]["name"] = "story:in-review"
+            payload["data"]["repository"]["pullRequests"]["nodes"] = pulls
+            variants[name] = payload
+        for name, payload in variants.items():
+            with self.subTest(name=name):
+                value = doctor.Doctor(
+                    "owner/repo", 67, commitment=66, target="", mode="resume",
+                    environ={"PATH":"/bin"}, runner=self.github_runner(payload))
+                value.token = "token"; value.github()
+                isolation = next(row for row in value.checks
+                                 if row.name == "isolated resumed Project")
+                self.assertFalse(isolation.passed)
 
     def test_preplanned_mode_still_rejects_started_resume_topology(self):
         value = doctor.Doctor(
