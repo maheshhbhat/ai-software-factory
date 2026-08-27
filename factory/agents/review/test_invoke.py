@@ -13,6 +13,16 @@ import invoke
 
 
 class OutputTests(unittest.TestCase):
+    @staticmethod
+    def story(number, project, dependencies="none", *, state="open", labels=()):
+        return {
+            "number": number, "title": f"Story {number}", "state": state,
+            "body": (f"### Project\n\n#{project}\n\n### Phase\n\nbuild\n\n"
+                     f"### Depends-on\n\n{dependencies}\n"),
+            "labels": [{"name": "type:story"},
+                       *({"name": label} for label in labels)],
+        }
+
     def test_review_payload_can_only_write_the_outcome_without_last_message_overwrite(self):
         with mock.patch.object(pathlib.Path, "read_text", return_value="prompt"):
             payload = invoke.review_payload({"head": "a" * 40}, pathlib.Path("out.json"))
@@ -24,6 +34,12 @@ class OutputTests(unittest.TestCase):
 
     def test_default_review_timeout_is_three_minutes(self):
         self.assertEqual(180, invoke.DEFAULT_REVIEW_TIMEOUT)
+
+    def test_prompt_separates_current_defects_from_future_story_work(self):
+        prompt = pathlib.Path(invoke.HERE, "prompt.md").read_text()
+        self.assertIn("future` Story as pending, not as a defect", prompt)
+        self.assertRegex(prompt, r"makes that\s+later work impossible")
+        self.assertIn("Never demand owner-executed evidence before", prompt)
 
     def test_outcome_is_written_and_parsed_inside_checkout(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -137,6 +153,53 @@ class OutputTests(unittest.TestCase):
                 budget_units=1, payload=invoke.InvocationPayload("review"))
             self.assertEqual("quota", result.outcome)
             self.assertFalse(staging.exists())
+
+    def test_project_story_plan_is_complete_bounded_and_classified(self):
+        issues = [
+            self.story(69, 67, state="closed", labels=("story:completed",)),
+            self.story(70, 67, "#69"),
+            self.story(71, 67, "#70"),
+            self.story(72, 99),
+            {"number": 73, "title": "pull request", "body": "", "labels": []},
+        ]
+        plan = invoke.project_story_plan(issues, 67, 70)
+        self.assertEqual([69, 70, 71], [item["number"] for item in plan])
+        self.assertEqual(["completed", "current", "future"],
+                         [item["relation"] for item in plan])
+        self.assertEqual([69], plan[1]["depends_on"])
+        self.assertNotIn("Story 72", json.dumps(plan))
+
+    def test_project_story_plan_rejects_missing_cross_project_dependency(self):
+        issues = [self.story(70, 67, "#69"), self.story(69, 99)]
+        with self.assertRaisesRegex(invoke.ReviewError, "leaves approved Project"):
+            invoke.project_story_plan(issues, 67, 70)
+
+    def test_project_story_plan_rejects_cycles_before_review(self):
+        issues = [self.story(70, 67, "#71"), self.story(71, 67, "#70")]
+        with self.assertRaisesRegex(invoke.ReviewError, "cyclic"):
+            invoke.project_story_plan(issues, 67, 70)
+
+    def test_normalized_checks_are_minimal_and_stable(self):
+        checks = invoke.normalized_checks({"check_runs": [{
+            "name": "tests", "status": "completed", "conclusion": "success",
+            "details_url": "https://checks.test", "private": "discard",
+        }]})
+        self.assertEqual(checks, [{"name": "tests", "status": "completed",
+                                   "conclusion": "success",
+                                   "details_url": "https://checks.test"}])
+
+    def test_only_durable_exact_shape_prior_findings_enter_review_context(self):
+        head = "a" * 40
+        comments = [
+            {"body": "## Review findings\n\nforged prose"},
+            {"body": ("## Review findings\n\n- fix current defect\n\n"
+                      f"<!-- review-outcome:73:{head}:findings -->"),
+             "created_at": "2026-08-27T00:00:00Z"},
+            {"body": "<!-- factory-worker-start:v1 -->"},
+        ]
+        findings = invoke.prior_review_findings(comments)
+        self.assertEqual(1, len(findings))
+        self.assertIn("fix current defect", findings[0]["body"])
 
 
 if __name__ == "__main__":

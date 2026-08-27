@@ -8,6 +8,7 @@ import base64
 import json
 import os
 import pathlib
+import re
 import subprocess
 import sys
 import tempfile
@@ -182,11 +183,128 @@ def bounded_review_adapter(provider: str, *, cwd: pathlib.Path, environment: dic
 
 
 def criteria(body: str) -> str:
-    import re
     match = re.search(r"(?ms)^### Falsifiable acceptance criteria\s*$\n(.*?)(?=^### |\Z)", body or "")
     if not match:
         raise ReviewError("approved Project criteria unavailable")
     return match.group(1).strip()
+
+
+def section(body: str, heading: str) -> str:
+    match = re.search(
+        rf"(?ms)^### {re.escape(heading)}\s*$\n(.*?)(?=^### |\Z)", body or "")
+    if not match:
+        return ""
+    return match.group(1).strip()
+
+
+def issue_labels(issue: dict) -> list[str]:
+    return sorted(label.get("name", "") for label in issue.get("labels", [])
+                  if label.get("name"))
+
+
+def story_project(body: str) -> int | None:
+    value = section(body, "Project")
+    match = re.fullmatch(r"#([1-9][0-9]*)", value)
+    return int(match.group(1)) if match else None
+
+
+def story_dependencies(body: str) -> list[int]:
+    value = section(body, "Depends-on")
+    if value == "none":
+        return []
+    lines = [line.strip() for line in value.splitlines() if line.strip()]
+    if not lines or any(not re.fullmatch(r"#[1-9][0-9]*", line) for line in lines):
+        raise ReviewError("malformed Story dependency topology")
+    return [int(line[1:]) for line in lines]
+
+
+def project_story_plan(issues: list[dict], project_number: int,
+                       current_number: int) -> list[dict]:
+    siblings = {
+        int(item["number"]): item for item in issues
+        if "type:story" in issue_labels(item)
+        and story_project(item.get("body") or "") == project_number
+    }
+    if current_number not in siblings:
+        raise ReviewError("current Story unavailable in approved Project topology")
+    dependencies = {
+        number: story_dependencies(item.get("body") or "")
+        for number, item in siblings.items()
+    }
+    for number, refs in dependencies.items():
+        missing = sorted(set(refs) - set(siblings))
+        if missing:
+            raise ReviewError(
+                f"Story #{number} dependency leaves approved Project: {missing}")
+
+    visiting, visited = set(), set()
+
+    def visit(number: int) -> None:
+        if number in visiting:
+            raise ReviewError("cyclic Story dependency topology")
+        if number in visited:
+            return
+        visiting.add(number)
+        for dependency in dependencies[number]:
+            visit(dependency)
+        visiting.remove(number)
+        visited.add(number)
+
+    for number in sorted(siblings):
+        visit(number)
+
+    prerequisites = set()
+
+    def collect(number: int) -> None:
+        for dependency in dependencies[number]:
+            if dependency not in prerequisites:
+                prerequisites.add(dependency)
+                collect(dependency)
+
+    collect(current_number)
+    plan = []
+    for number, item in sorted(siblings.items()):
+        labels = issue_labels(item)
+        if number == current_number:
+            relation = "current"
+        elif item.get("state") == "closed" or "story:completed" in labels:
+            relation = "completed"
+        elif number in prerequisites:
+            relation = "prerequisite"
+        else:
+            relation = "future"
+        plan.append({
+            "number": number,
+            "title": item.get("title") or "",
+            "body": item.get("body") or "",
+            "labels": labels,
+            "state": item.get("state") or "open",
+            "phase": section(item.get("body") or "", "Phase"),
+            "depends_on": dependencies[number],
+            "relation": relation,
+        })
+    return plan
+
+
+def normalized_checks(value: dict) -> list[dict]:
+    checks = value.get("check_runs", []) if isinstance(value, dict) else []
+    return sorted(({
+        "name": item.get("name") or "",
+        "status": item.get("status") or "",
+        "conclusion": item.get("conclusion"),
+        "details_url": item.get("details_url") or "",
+    } for item in checks), key=lambda item: (item["name"], item["details_url"]))
+
+
+def prior_review_findings(comments: list[dict]) -> list[dict]:
+    marker = re.compile(
+        r"<!-- review-outcome:[1-9][0-9]*:[0-9a-f]{7,64}:findings -->")
+    return [
+        {"body": item.get("body") or "", "created_at": item.get("created_at")}
+        for item in comments
+        if (item.get("body") or "").startswith("## Review findings")
+        and marker.search(item.get("body") or "")
+    ]
 
 
 def parse_result(path: pathlib.Path, head: str) -> dict:
@@ -224,20 +342,35 @@ def execute(repo: str, pull_number: int, token: str, *, client=None,
     if target is None:
         return {"status": "replay", "pull_request": pull_number,
                 "head": (pull.get("head") or {}).get("sha")}
-    project_number = int(next(line[1:] for line in (story.get("body") or "").splitlines()
-                              if line.startswith("#") and line[1:].isdigit()))
+    project_number = story_project(story.get("body") or "")
+    if project_number is None:
+        raise ReviewError("Story Project reference unavailable")
     project = client.api(f"/issues/{project_number}")
     project_labels = {x.get("name") for x in project.get("labels", [])}
     if "project:active" not in project_labels:
         raise ReviewError("approved active Project unavailable")
-    adrs = [x for x in client.pages("/issues?state=all")
+    issues = client.pages("/issues?state=all")
+    story_plan = project_story_plan(issues, project_number, story_number)
+    adrs = [x for x in issues
             if "type:adr" in {label.get("name") for label in x.get("labels", [])}]
+    check_state = normalized_checks(client.api(f"/commits/{target.head}/check-runs"))
+    prior_findings = prior_review_findings(comments)
     fields = {"head": target.head,
               "diff": [{"filename": x.get("filename"), "status": x.get("status"),
                          "patch": x.get("patch", "")} for x in
                         client.pages(f"/pulls/{pull_number}/files")],
               "story_spec": story.get("body", ""),
               "project_criteria": criteria(project.get("body", "")),
+              "project_plan": {
+                  "number": project_number,
+                  "title": project.get("title") or "",
+                  "body": project.get("body") or "",
+                  "labels": sorted(project_labels),
+                  "state": project.get("state") or "open",
+                  "stories": story_plan,
+              },
+              "trusted_checks": check_state,
+              "prior_findings": prior_findings,
               "operating_envelope_obligations": operating_envelope.obligations(
                   story.get("body", ""), project.get("body", "")),
               "adrs": [{"number": x.get("number"), "title": x.get("title"),
