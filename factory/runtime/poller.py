@@ -483,6 +483,8 @@ def disable_legacy_auto_merge(repo: str, pulls: list[dict], *, apply=True) -> se
     """Remove sticky auto-merge left by factory versions before Story #586."""
     disabled = set()
     for pull in pulls:
+        if (pull.get("state") or "").lower() != "open":
+            continue
         if not review_route.LINK.findall(
                 (pull.get("body") or "").replace("\r\n", "\n")):
             continue
