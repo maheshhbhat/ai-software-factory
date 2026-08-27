@@ -38,5 +38,8 @@ topology as the delivery boundary:
 `trusted_checks` are evidence of the exact head's automated gates, not proof of
 requirements they do not exercise. `prior_findings` may identify an unresolved
 current defect, but re-evaluate the exact head rather than repeating a comment.
+`owner_evidence` contains trusted factual observations bound by the wrapper to
+this exact pull request and head. Evaluate that evidence against the requirement.
+It is not a Project acceptance decision and must never be treated as one.
 
 Review the supplied material directly. Do not delegate or spawn subagents.
