@@ -288,11 +288,16 @@ class TestClaimRecovery(unittest.TestCase):
         self.assertEqual((decision.action, decision.reason),
                          ("in-review", "MERGED_DELIVERY_PR"))
 
-    def test_open_linked_pr_prevents_expiry(self):
+    def test_project60_stale_claim_with_open_pr_returns_to_review(self):
         pr = {"number": 77, "body": "Story: #10\n", "state": "open", "merged_at": None}
         decision = self.decide(timeline=[self.event(500)], prs=[pr])
         self.assertEqual((decision.action, decision.reason),
-                         ("none", "LINKED_PR_EXISTS"))
+                         ("in-review", "CLAIM_LEASE_EXPIRED_WITH_PR"))
+
+    def test_fresh_claim_with_open_pr_is_left_for_live_worker(self):
+        pr = {"number": 77, "body": "Story: #10\n", "state": "open", "merged_at": None}
+        decision = self.decide(timeline=[self.event(59)], prs=[pr])
+        self.assertEqual((decision.action, decision.reason), ("none", "CLAIM_FRESH"))
 
     def test_ambiguous_downstream_evidence_fails_closed(self):
         prs = [{"number": n, "body": "Story: #10\n", "state": "closed"} for n in (70, 71)]

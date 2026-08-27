@@ -5,8 +5,9 @@ The default ``rehearsal`` mode preserves the strict empty test-commitment and
 fresh-target checks used by the fixture harness.  ``preplanned`` mode is for a
 real Project whose Stories already exist but have not started. ``resume`` is
 for an approved Project after a human-authorized recovery: it preserves any
-completed Stories and proves that exactly one recovered Story is ready to
-continue, including recovery during the first Story.
+completed Stories and proves that exactly one Story is ready to continue, in
+review, or holds an expired claim that the poller's existing lease recovery can
+reconcile. A fresh claim is refused because its worker may still be running.
 
 This command may read GitHub, inspect local processes, and run ``poll.sh`` with
 ``--dry-run``.  It creates and removes one temporary detached Git worktree and
@@ -29,6 +30,7 @@ import sys
 import tempfile
 import time
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 RUNTIME = ROOT / "factory" / "runtime"
@@ -198,7 +200,7 @@ class Doctor:
           repository(owner:$owner,name:$name){isPrivate viewerPermission autoMergeAllowed
             project:issue(number:$project){number state body labels(first:20){nodes{name}}}
             commitment:issue(number:$commitment){number state body labels(first:20){nodes{name}}}
-            issues(first:100,states:[OPEN,CLOSED]){nodes{number state body labels(first:20){nodes{name}}}
+            issues(first:100,states:[OPEN,CLOSED]){nodes{number state updatedAt body labels(first:20){nodes{name}}}
               pageInfo{hasNextPage}}
             pullRequests(first:100,states:OPEN){nodes{number state body isDraft}}
             defaultBranchRef{branchProtectionRule{requiresStatusChecks requiredStatusCheckContexts}}
@@ -357,10 +359,22 @@ class Doctor:
                          if state == "story:ready"]
                 in_review = [number for number, state in lifecycle_by_number.items()
                              if state == "story:in-review"]
+                claimed = [number for number, state in lifecycle_by_number.items()
+                           if state == "story:claimed"]
+                stale_claimed = []
+                for number in claimed:
+                    item = next(row for row in story_nodes if row["number"] == number)
+                    try:
+                        updated = datetime.fromisoformat(
+                            (item.get("updatedAt") or "").replace("Z", "+00:00"))
+                        if datetime.now(timezone.utc) - updated >= timedelta(minutes=60):
+                            stale_claimed.append(number)
+                    except (TypeError, ValueError):
+                        pass
                 terminal_successes = {"story:merged", "story:completed"}
                 completed = {number for number, state in lifecycle_by_number.items()
                              if state in terminal_successes}
-                active = ready + in_review
+                active = ready + in_review + stale_claimed
                 review_pr_ok = True
                 if len(in_review) == 1:
                     story_number = in_review[0]
@@ -374,7 +388,8 @@ class Doctor:
                 lifecycle_ok = (topology_ok and len(active) == 1
                     and not (ready and in_review)
                     and all(state in terminal_successes |
-                            {"story:ready", "story:in-review", "story:blocked"}
+                            {"story:ready", "story:in-review", "story:blocked"} |
+                            ({"story:claimed"} if stale_claimed == claimed else set())
                             for state in lifecycle_by_number.values())
                     and all((next(item for item in story_nodes
                                   if item["number"] == number).get("state") == "CLOSED")

@@ -122,6 +122,7 @@ Text fallback."""
                  "risks": "risk", "digest": self.DIGEST}
         with self.assertRaisesRegex(contract.ContractError, "Story-local executable"):
             contract.validate_output(contract.Altitude.PROJECT, value)
+        story["title"] = "Browser core"
         story["operating_envelope_checks"] = [{
             "id": "OE-BROWSER-1", "check": "browser render exceeds bound"}]
         self.assertIs(value, contract.validate_output(contract.Altitude.PROJECT, value))
@@ -129,6 +130,34 @@ Text fallback."""
             "id": "OE-EXTRA", "check": "unassigned check"})
         with self.assertRaisesRegex(contract.ContractError, "Story-local executable"):
             contract.validate_output(contract.Altitude.PROJECT, value)
+
+    def test_project60_core_story_cannot_own_browser_wide_obligations(self):
+        story = {"key": "scenario_engine", "title": "Scenario engine",
+                 "spec": "Build a pure deterministic calculation API.",
+                 "phase": "build", "depends_on": [], "hazard": False,
+                 "acceptance_criteria": ["pure calculation tests pass"],
+                 "operating_envelope_ids": ["OE-RESP-1", "OE-DEGRADE-1"],
+                 "operating_envelope_checks": [
+                     {"id": "OE-RESP-1", "check": "Chrome render exceeds one second"},
+                     {"id": "OE-DEGRADE-1", "check": "invalid page leaves stale UI visible"}],
+                 "scope": ["src/scenario-engine.js"], "spend_cap": "$5 / 60 min"}
+        value = {"altitude": "project", "acceptance_criteria": ["criterion"],
+                 "operating_envelope": [
+                     {"id": "OE-RESP-1", "category": "responsiveness",
+                      "requirement": "browser renders within one second",
+                      "failure_condition": "Chrome render exceeds one second"},
+                     {"id": "OE-DEGRADE-1", "category": "degradation",
+                      "requirement": "invalid browser input clears stale output",
+                      "failure_condition": "page leaves stale output visible"}],
+                 "adr": {}, "stories": [story], "expected_bells": 2,
+                 "risks": "risk", "digest": self.DIGEST}
+        with self.assertRaisesRegex(contract.ContractError, "cannot verify browser"):
+            contract.validate_output(contract.Altitude.PROJECT, value)
+
+        story["title"] = "Browser scenario assurance"
+        story["spec"] = "Exercise the browser page and its rendered UI."
+        story["scope"] = ["src/browser-app.js"]
+        self.assertIs(value, contract.validate_output(contract.Altitude.PROJECT, value))
 
     def test_missing_or_mismatched_output_fails(self):
         with self.assertRaises(contract.ContractError):

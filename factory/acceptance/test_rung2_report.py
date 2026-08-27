@@ -88,6 +88,23 @@ class Rung2ReportTests(unittest.TestCase):
         self.assertEqual("PASS", result["rung_verdict"])
         self.assertTrue(result["measurement_integrity"]["passed"])
 
+    def test_governance_does_not_reduce_autonomy_but_recovery_does(self):
+        values = fixture()
+        for story in values[0]["stories"]:
+            story["human_recovery"] = False
+            story["poisoned"] = False
+        values[0]["operator_actions"] = [
+            {"action": "owner Chrome observation", "classification": "governance",
+             "story": 23},
+            {"action": "manual stale-worker repair", "classification": "recovery",
+             "story": 20},
+        ]
+        result = report.build(*values)
+        self.assertEqual([21, 22, 23],
+                         result["kpis"]["autonomy"]["autonomous_story_numbers"])
+        self.assertEqual([20],
+                         result["kpis"]["autonomy"]["non_autonomous_story_numbers"])
+
     def test_cli_accepts_multiple_run_fragments_and_is_deterministic(self):
         evidence, process, telemetry, touches = fixture()
         with tempfile.TemporaryDirectory() as temp:

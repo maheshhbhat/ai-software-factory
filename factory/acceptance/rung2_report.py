@@ -12,6 +12,7 @@ from factory.acceptance import rung1_report as shared
 
 UNAVAILABLE = shared.UNAVAILABLE
 STORY_BELLS = ("plan-approval", "poison-rescue", "acceptance")
+AUTONOMY_BREAKING_ACTIONS = {"recovery", "code-intervention"}
 
 
 def unavailable(reason):
@@ -71,13 +72,18 @@ def build(evidence, process, telemetry, touches):
     retries = max(0, attempts - len(numbers))
 
     recovered = {row.get("number") for row in stories if row.get("human_recovery")}
+    recovered.update(
+        row.get("story") for row in actions
+        if row.get("classification") in AUTONOMY_BREAKING_ACTIONS
+        and row.get("story") in numbers)
     autonomous = numbers - recovered
     autonomy = {
         "autonomous_stories": len(autonomous), "stories": len(numbers),
         "rate": len(autonomous) / len(numbers) if numbers else UNAVAILABLE,
         "autonomous_story_numbers": sorted(autonomous),
         "non_autonomous_story_numbers": sorted(recovered),
-        "definition": "merged without human recovery or human code intervention",
+        "definition": ("merged without human recovery or human code intervention; "
+                       "required governance is measured separately"),
     }
 
     poisoned_numbers = {row.get("number") for row in stories if row.get("poisoned")}
