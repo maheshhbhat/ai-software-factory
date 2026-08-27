@@ -200,6 +200,7 @@ class Doctor:
             commitment:issue(number:$commitment){number state body labels(first:20){nodes{name}}}
             issues(first:100,states:[OPEN,CLOSED]){nodes{number state body labels(first:20){nodes{name}}}
               pageInfo{hasNextPage}}
+            pullRequests(first:100,states:OPEN){nodes{number state body isDraft}}
             defaultBranchRef{branchProtectionRule{requiresStatusChecks requiredStatusCheckContexts}}
           }
           rateLimit{remaining resetAt}
@@ -354,17 +355,33 @@ class Doctor:
             else:
                 ready = [number for number, state in lifecycle_by_number.items()
                          if state == "story:ready"]
+                in_review = [number for number, state in lifecycle_by_number.items()
+                             if state == "story:in-review"]
                 terminal_successes = {"story:merged", "story:completed"}
                 completed = {number for number, state in lifecycle_by_number.items()
                              if state in terminal_successes}
-                lifecycle_ok = (topology_ok and len(ready) == 1
-                    and all(state in terminal_successes | {"story:ready", "story:blocked"}
+                active = ready + in_review
+                review_pr_ok = True
+                if len(in_review) == 1:
+                    story_number = in_review[0]
+                    linked = [pull for pull in (repo.get("pullRequests") or {}).get("nodes", [])
+                              if pull.get("state") == "OPEN"
+                              and not pull.get("isDraft")
+                              and re.findall(r"(?m)^Story: #([1-9][0-9]*)\s*$",
+                                             pull.get("body") or "")
+                              == [str(story_number)]]
+                    review_pr_ok = len(linked) == 1
+                lifecycle_ok = (topology_ok and len(active) == 1
+                    and not (ready and in_review)
+                    and all(state in terminal_successes |
+                            {"story:ready", "story:in-review", "story:blocked"}
                             for state in lifecycle_by_number.values())
                     and all((next(item for item in story_nodes
                                   if item["number"] == number).get("state") == "CLOSED")
                             == (state in terminal_successes)
                             for number, state in lifecycle_by_number.items())
-                    and set(dependency_by_number.get(ready[0], [])) <= completed)
+                    and set(dependency_by_number.get(active[0], [])) <= completed
+                    and review_pr_ok)
                 isolation_name = "isolated resumed Project"
             isolated = (not truncated and commitment_projects == [self.project]
                         and bool(declared_stories)
