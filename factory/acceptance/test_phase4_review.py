@@ -15,6 +15,7 @@ invoke = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(invoke)
 from factory.capacity_pool.router import ModelCapacity, Tier
 from factory.capacity_pool.state import CapacityState
+from factory.runtime import poller as runtime_poller
 
 
 SHA = "a" * 40
@@ -177,6 +178,29 @@ class ReviewAcceptanceTests(unittest.TestCase):
         with self.assertRaisesRegex(invoke.ReviewError, "stale-head"):
             self.deliver(stale)
         self.assertEqual(self.client.writes, [])
+
+    def test_reviewed_old_head_cannot_merge_new_head(self):
+        """Regression: Project #60 Story #62 escaped this exact boundary."""
+        old_head = "a" * 40
+        new_head = "b" * 40
+        pull = {"number": 9, "mergeable_state": "clean",
+                "head": {"sha": new_head}}
+        old_approval = {
+            "body": f"<!-- review-outcome:9:{old_head}:approval -->"}
+        new_approval = {
+            "body": f"<!-- review-outcome:9:{new_head}:approval -->"}
+        with mock.patch.object(runtime_poller.subprocess, "run") as merge:
+            self.assertFalse(runtime_poller.route_merge(
+                "owner/private", pull, [old_approval]))
+            merge.assert_not_called()
+        completed = subprocess.CompletedProcess([], 0, "merged", "")
+        with mock.patch.object(runtime_poller.subprocess, "run",
+                               return_value=completed) as merge:
+            self.assertTrue(runtime_poller.route_merge(
+                "owner/private", pull, [old_approval, new_approval]))
+        self.assertIn("--match-head-commit", merge.call_args.args[0])
+        self.assertIn(new_head, merge.call_args.args[0])
+        self.assertNotIn("--auto", merge.call_args.args[0])
 
     def test_findings_are_bound_to_head_and_return_story_ready(self):
         def findings(cmd, **kwargs):

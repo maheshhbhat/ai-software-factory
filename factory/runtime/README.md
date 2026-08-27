@@ -497,6 +497,16 @@ latest durable `story:claimed` timestamp. The dispatcher, poller, delivery
 worker, independent reviewer, and merge gate re-derive that same ID from GitHub;
 no in-memory handoff is required.
 
+### Exact-head merge routing
+
+The poller never enables persistent GitHub auto-merge for a factory delivery.
+After independent review approves the current head and GitHub reports required
+checks green, it requests a squash merge with `--match-head-commit HEAD_SHA`.
+That comparison is enforced by GitHub at the merge write: if any rebase or push
+changed the head, the merge is rejected and the new head requires a new review.
+If checks are still pending, the PR stays open and a later poll retries. The
+poller also disables legacy auto-merge settings before routing open factory PRs.
+
 A factory-launched worker used to be observable only through whatever `[worker]`
 line reached stdout, and `workers.launch` kept a *launched* worker's stdout and
 a *failed* worker's stderr — so for any run that hung, the one channel with the
