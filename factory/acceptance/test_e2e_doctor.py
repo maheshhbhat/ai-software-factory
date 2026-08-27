@@ -187,6 +187,21 @@ class GitHubChecks(unittest.TestCase):
                      if row.name == "isolated resumed Project")
         self.assertTrue(check.passed, value.checks)
 
+    def test_resume_mode_accepts_recovery_during_first_story(self):
+        payload = self.resumed_payload()
+        first = payload["data"]["repository"]["issues"]["nodes"][1]
+        first["state"] = "OPEN"
+        first["labels"]["nodes"][1]["name"] = "story:ready"
+        second = payload["data"]["repository"]["issues"]["nodes"][2]
+        second["labels"]["nodes"][1]["name"] = "story:blocked"
+        check = doctor.Doctor(
+            "owner/repo", 67, commitment=66, target="", mode="resume",
+            environ={"PATH":"/bin"}, runner=self.github_runner(payload))
+        check.token = "token"; check.github()
+        isolation = next(row for row in check.checks
+                         if row.name == "isolated resumed Project")
+        self.assertTrue(isolation.passed, check.checks)
+
     def test_preplanned_mode_still_rejects_started_resume_topology(self):
         value = doctor.Doctor(
             "owner/repo", 67, commitment=66, target="", mode="preplanned",
@@ -198,11 +213,10 @@ class GitHubChecks(unittest.TestCase):
 
     def test_resume_mode_fails_closed_for_incomplete_or_invalid_topology(self):
         variants = {}
-        missing = self.resumed_payload()
-        missing["data"]["repository"]["issues"]["nodes"] = [
-            item for item in missing["data"]["repository"]["issues"]["nodes"]
-            if item["number"] != 69]
-        variants["missing completed Story"] = missing
+        no_ready = self.resumed_payload()
+        no_ready["data"]["repository"]["issues"]["nodes"][2]["labels"]["nodes"][1]["name"] = \
+            "story:blocked"
+        variants["no ready Story"] = no_ready
         two_ready = self.resumed_payload()
         two_ready["data"]["repository"]["issues"]["nodes"][3]["labels"]["nodes"][1]["name"] = "story:ready"
         variants["two ready Stories"] = two_ready
