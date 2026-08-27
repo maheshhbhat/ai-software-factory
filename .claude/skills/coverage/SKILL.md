@@ -71,6 +71,13 @@ Exit codes: `0` clean · `1` tests failed · `3` no `coverage.py` · `4` non-det
 
 Three sections, and the second is the one that matters.
 
+When reporting the output, give every number a plain-language meaning. Name the
+layer or requirement set, what the count or percentage measures, and the scope
+of the test run beside the figure. Never present a bare percentage, ratio, test
+count, exit code, issue, Story, PR, or duration. Spelling digits as words is not
+an explanation. Preserve exact command output and machine-readable fields; add
+the explanation in the surrounding human-facing report.
+
 **Per layer, measured alone** — what each layer covers by itself.
 
 **Unique contribution** — remove the layer, where does coverage land. A layer
