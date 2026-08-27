@@ -116,6 +116,10 @@ STORY_BODY = """### Project
 
 $5 / 60 min
 
+### Attempt
+
+1
+
 ### Scope
 
 src/app.py
@@ -148,6 +152,61 @@ class FakeClient:
         self.created = {"number": 9, "body": body,
                         "head": {"ref": head, "sha": "deadbeef"}}
         return self.created
+
+
+class CorrectionInputTests(unittest.TestCase):
+    HEAD = "9ef7b45c2f7f83ce6e7b0de2be4638229babf132"
+
+    class Client:
+        def __init__(self, story_comments=(), pull_comments=()):
+            self.story_comments = list(story_comments)
+            self.pull_comments = list(pull_comments)
+
+        def pages(self, path):
+            if path == "/issues/214/comments":
+                return self.story_comments
+            if path == "/issues/74/comments":
+                return self.pull_comments
+            if path == "/issues?state=all":
+                return []
+            raise AssertionError(path)
+
+    @staticmethod
+    def comment(identifier, created, body):
+        return {"id": identifier, "created_at": created, "body": body,
+                "author_association": "OWNER"}
+
+    def test_fresh_worker_input_has_empty_correction_packet(self):
+        value = invoke.build_input(
+            self.Client(), {"number": 214, "body": STORY_BODY},
+            {"number": 325, "body": "### Goal\n\nx\n"}, repo="owner/repo")
+        self.assertFalse(value["correction_context"]["retry"])
+        self.assertEqual([], value["correction_context"]["records"])
+        self.assertNotIn("review_findings", value)
+
+    def test_retry_reads_story_and_linked_pr_correction_records(self):
+        finding = self.comment(
+            1, "2026-08-27T02:31:53Z",
+            "## Review findings\n\nChrome is skippable.\n\n"
+            f"<!-- review-outcome:74:{self.HEAD}:findings -->")
+        request = self.comment(
+            2, "2026-08-27T02:54:11Z",
+            "## Request changes\n\nMahesh requested changes in the active session; "
+            "I transcribed his decision here.\n\n" +
+            invoke.correction_context.marker(
+                kind="request-changes", story=214, pull_request=74, head=self.HEAD))
+        value = invoke.build_input(
+            self.Client([finding], [request]),
+            {"number": 214, "body": STORY_BODY},
+            {"number": 325, "body": "### Goal\n\nx\n"},
+            repo="owner/repo",
+            pull_request={"number": 74, "head": {"sha": self.HEAD}})
+        packet = value["correction_context"]
+        self.assertTrue(packet["retry"])
+        self.assertEqual(["review-findings", "request-changes"],
+                         [item["kind"] for item in packet["records"]])
+        self.assertEqual(["1", "2"],
+                         [item["comment_id"] for item in packet["records"]])
 
 
 class RecordingRunner:

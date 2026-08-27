@@ -24,6 +24,10 @@ STORY_BODY = """### Project
 
 $5 / 10 min
 
+### Attempt
+
+2
+
 ### Scope
 
 product/**
@@ -36,6 +40,7 @@ class FakeGitHub:
         self.events = [{"event": "labeled", "label": {"name": "story:claimed"},
                         "id": 100}]
         self.comments = []
+        self.pull_comments = []
         self.pulls = []
         self.writes = 0
         self.readable = True
@@ -59,6 +64,8 @@ class FakeGitHub:
             return self.events
         if path == "/issues/214/comments":
             return self.comments
+        if path == "/issues/1/comments":
+            return self.pull_comments
         if path == "/issues?state=all":
             return [{"number": 90, "body": "decision", "labels": [{"name": "type:adr"}]}]
         raise AssertionError(path)
@@ -158,7 +165,13 @@ class WorkerLifecycleTests(unittest.TestCase):
 
         self.client.events.append(
             {"event": "labeled", "label": {"name": "story:claimed"}, "id": 101})
-        self.client.comments.append({"body": "## Review findings\nfix the result"})
+        self.client.comments.append({
+            "id": 201,
+            "created_at": "2026-08-27T03:00:00Z",
+            "author_association": "OWNER",
+            "body": ("## Review findings\nfix the result\n\n"
+                     f"<!-- review-outcome:1:{first_head}:findings -->"),
+        })
         retry = self.deliver()
         self.assertFalse(retry.replay)
         self.assertEqual((retry.pull_request, self.client.writes, len(self.client.pulls)),

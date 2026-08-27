@@ -44,6 +44,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 import merge_gate  # noqa: E402  — single source of truth for the §9.6 Scope dialect
 import observability as obs  # noqa: E402
+import correction_context  # noqa: E402
 from factory.capacity_pool import admission as capacity_admission  # noqa: E402
 from factory.capacity_pool.policy import resolved_registry  # noqa: E402
 from factory.capacity_pool.state import CapacityState  # noqa: E402
@@ -134,6 +135,7 @@ class Reason:
     FACTORY_SELF_MODIFICATION_FORBIDDEN = "FACTORY_SELF_MODIFICATION_FORBIDDEN"
     ATTEMPT_INVALID = "ATTEMPT_INVALID"
     ATTEMPT_EXHAUSTED = "ATTEMPT_EXHAUSTED"
+    CORRECTION_CONTEXT_INVALID = "CORRECTION_CONTEXT_INVALID"
     CANCELLED = "CANCELLED"
 
 
@@ -634,6 +636,48 @@ def fetch_pull_requests(repo: str, token: str) -> list[dict]:
     return fetch_pages(f"https://api.github.com/repos/{repo}/pulls?state=all", token)
 
 
+def retry_context_preflight(repo: str, story: dict, token: str,
+                            pull_requests: list[dict]) -> tuple[bool, str]:
+    """Validate a linked-PR retry before capacity reservation or claim.
+
+    Fresh delivery has no linked PR and remains unchanged.  A retry rebuilds
+    the same canonical packet the worker will later consume; ambiguity or a
+    missing current-head finding refuses without spending an Attempt.
+    """
+    linked, error = linked_delivery_prs(story["number"], pull_requests)
+    if error:
+        return False, f"{Reason.CORRECTION_CONTEXT_INVALID}: {error}"
+    if not linked:
+        return True, "fresh delivery; no correction packet required"
+    if len(linked) != 1:
+        return False, (f"{Reason.CORRECTION_CONTEXT_INVALID}: expected one linked PR; "
+                       f"found {len(linked)}")
+    pull = linked[0]
+    try:
+        project_number, project_error = section_ref(
+            story.get("body") or "", "Project")
+        if project_error or project_number is None:
+            raise ValueError(project_error or Reason.PROJECT_LINK_MALFORMED)
+        packet = correction_context.assemble(
+            repository=repo, project=project_number,
+            story=story, pull_request=pull,
+            story_comments=fetch_pages(
+                f"https://api.github.com/repos/{repo}/issues/{story['number']}/comments",
+                token),
+            pull_comments=fetch_pages(
+                f"https://api.github.com/repos/{repo}/issues/{pull['number']}/comments",
+                token))
+    except (correction_context.ContextError, ValueError) as exc:
+        return False, f"{Reason.CORRECTION_CONTEXT_INVALID}: {exc}"
+    obs.process_event(
+        "dispatch.correction-context", repo=repo, story=story["number"],
+        pull_request=packet["pull_request"], head=packet["head"],
+        digest=packet["digest"],
+        source_ids=[item["comment_id"] for item in packet["records"]])
+    return True, (f"correction packet {packet['digest'][:12]} "
+                  f"with {len(packet['records'])} record(s)")
+
+
 def apply_recovery(repo: str, story: dict, decision: RecoveryDecision,
                    token: str) -> tuple[bool, str]:
     """Apply a recovery only if the claim is still authoritative."""
@@ -827,8 +871,12 @@ def claim(repo: str, story: dict, token: str) -> tuple[bool, str]:
 
 
 def admit_and_claim(repo: str, story: dict, token: str, *, state: CapacityState,
-                    registry) -> tuple[bool, str | None, str]:
+                    registry, preflight=None) -> tuple[bool, str | None, str]:
     """One bounded admission transaction; route identity remains opaque."""
+    if preflight is not None:
+        valid, note = preflight()
+        if not valid:
+            return False, None, f"NOT claimed — {note}"
     try:
         admitted = capacity_admission.reserve(
             task_key=capacity_admission.delivery_task_key(repo, story),
@@ -940,14 +988,16 @@ def main(argv: list[str]) -> int:
     # §9.4: recovery precedes WIP accounting and selection. The mutated issue
     # snapshot is fetched again so capacity is calculated from durable state.
     recovery_notes: list[str] = []
+    pull_requests: list[dict] = []
     if args.claim:
         timelines = {
             number: fetch_timeline(args.repo, number, token)
             for number, story in stories.items()
             if lifecycle_of(story, STORY_LIFECYCLE) == CLAIMED
         }
+        pull_requests = fetch_pull_requests(args.repo, token)
         recoveries = reconcile_claims(
-            stories, timelines, fetch_pull_requests(args.repo, token), datetime.now(timezone.utc))
+            stories, timelines, pull_requests, datetime.now(timezone.utc))
         for decision in recoveries:
             if decision.action in {"ready", "in-review", "poison"}:
                 ok, note = apply_recovery(args.repo, stories[decision.number], decision, token)
@@ -983,7 +1033,9 @@ def main(argv: list[str]) -> int:
             for decision in plan.selected:
                 story = stories[decision.number]
                 ok, reservation_id, note = admit_and_claim(
-                    args.repo, story, token, state=state, registry=registry)
+                    args.repo, story, token, state=state, registry=registry,
+                    preflight=lambda story=story: retry_context_preflight(
+                        args.repo, story, token, pull_requests))
                 claimed.append((decision.number, note))
                 if ok:
                     dispatched.append((decision, reservation_id))
