@@ -114,6 +114,35 @@ class TestParsing(unittest.TestCase):
             self.assertEqual([], poller.run_phase4_reviews("o/r"))
         targets.assert_called_once_with([], {}, {})
 
+    def test_phase4_review_pass_is_limited_to_the_selected_commitment(self):
+        def issue(number, kind, body, lifecycle):
+            return {"number": number, "body": body,
+                    "labels": [{"name": f"type:{kind}"}, {"name": lifecycle}]}
+
+        issues = {
+            60: issue(60, "project", "### Roadmap commitment\n\n#59\n",
+                      "project:active"),
+            63: issue(63, "story", "### Project\n\n#60\n", "story:in-review"),
+            67: issue(67, "project", "### Roadmap commitment\n\n#66\n",
+                      "project:active"),
+            71: issue(71, "story", "### Project\n\n#67\n", "story:in-review"),
+        }
+        pulls = [
+            {"number": 81, "state": "open", "draft": False,
+             "body": "Story: #63\n", "head": {"sha": "a" * 40}},
+            {"number": 74, "state": "open", "draft": False,
+             "body": "Story: #71\n", "head": {"sha": "b" * 40}},
+        ]
+        with mock.patch.object(poller.dispatcher, "fetch_issues", return_value=issues), \
+             mock.patch.object(poller.dispatcher, "fetch_pull_requests", return_value=pulls), \
+             mock.patch.object(poller.dispatcher, "_api", return_value=[]), \
+             mock.patch.object(poller, "hydrate_review_pulls", side_effect=lambda r, p, t: p), \
+             mock.patch.object(poller, "review_targets", return_value=[]) as targets:
+            poller.run_phase4_reviews("o/r", apply=False, commitment=59)
+        scoped_pulls, scoped_issues, _ = targets.call_args.args
+        self.assertEqual([81], [pull["number"] for pull in scoped_pulls])
+        self.assertEqual({63}, set(scoped_issues))
+
     def test_review_decision_is_read_again_after_reviewer_finishes(self):
         """An external reviewer write must not be hidden by an earlier read."""
         head = "a" * 40

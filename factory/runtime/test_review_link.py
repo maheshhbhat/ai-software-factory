@@ -34,6 +34,18 @@ def pull(number=77, story_number=10, state="open", merged_at=None, body=None, he
             "body": body if body is not None else f"Story: #{story_number}\nAgent-ID: claude-delivery\n"}
 
 
+def project(number, commitment=59, body=None):
+    return {"number": number, "labels": labels("type:project", "project:active"),
+            "body": body if body is not None else
+            f"### Roadmap commitment\n\n#{commitment}\n"}
+
+
+def scoped_story(number, project_number, lifecycle="story:in-review", body=None):
+    value = story(number, lifecycle=lifecycle)
+    value["body"] = body if body is not None else f"### Project\n\n#{project_number}\n"
+    return value
+
+
 class TestTheTwoTransitions(unittest.TestCase):
     def test_only_exact_head_approval_permits_merge_routing(self):
         current = pull(number=200, head="b" * 40)
@@ -70,6 +82,42 @@ class TestTheTwoTransitions(unittest.TestCase):
         outcome = rl.reconcile(story(lifecycle="story:in-review"), [pull()])
         self.assertIsNone(outcome.action)
         self.assertEqual(outcome.reason, rl.Reason.PR_STILL_OPEN)
+
+
+class TestCommitmentScope(unittest.TestCase):
+    def test_only_stories_reaching_the_selected_commitment_are_authorized(self):
+        issues = {
+            60: project(60, commitment=59),
+            63: scoped_story(63, 60, lifecycle="story:claimed"),
+            67: project(67, commitment=66),
+            71: scoped_story(71, 67),
+        }
+        self.assertEqual({63}, rl.authorized_story_numbers(issues, 59))
+
+    def test_malformed_or_ambiguous_links_fail_closed(self):
+        issues = {
+            60: project(60, body=("### Roadmap commitment\n\n#59\n\n"
+                                  "### Roadmap commitment\n\n#59\n")),
+            63: scoped_story(63, 60),
+            64: scoped_story(64, 60, body="### Project\n\n#60\n#67\n"),
+        }
+        self.assertEqual(set(), rl.authorized_story_numbers(issues, 59))
+
+    def test_reconciliation_does_not_touch_another_projects_story(self):
+        issues = {
+            60: project(60, commitment=59),
+            63: scoped_story(63, 60, lifecycle="story:claimed"),
+            67: project(67, commitment=66),
+            71: scoped_story(71, 67),
+        }
+        with mock.patch.object(dispatcher, "fetch_issues", return_value=issues), \
+             mock.patch.object(dispatcher, "fetch_pull_requests",
+                               return_value=[pull(81, 63), pull(74, 71)]), \
+             mock.patch.object(dispatcher, "_api", return_value=[]), \
+             mock.patch.object(rl, "apply_outcome", return_value=(True, "moved")) as apply:
+            outcomes = rl.run("o/r", "token", commitment=59)
+        self.assertEqual([63], [outcome.number for outcome in outcomes])
+        self.assertEqual([63], [call.args[1].number for call in apply.call_args_list])
 
 
 class TestLegalTransitionFallbacks(unittest.TestCase):

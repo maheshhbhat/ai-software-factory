@@ -228,9 +228,48 @@ def fetch_stories(repo: str, token: str) -> dict:
     }
 
 
-def run(repo: str, token: str, apply: bool = True) -> list[Outcome]:
+def authorized_story_numbers(issues: dict[int, dict], commitment: int) -> set[int]:
+    """Stories whose canonical Project chain reaches ``commitment``.
+
+    The dispatcher already defines the strict canonical-section parser.  Reuse
+    it here so review and delivery agree about authorization.  Missing,
+    duplicate, or malformed links return an error from ``section_ref`` and are
+    excluded; scope ambiguity must never broaden what a poller may touch.
+    """
+    def unique_ref(issue: dict, section: str) -> tuple[int | None, str | None]:
+        body = issue.get("body") or ""
+        heading = f"### {section}"
+        if sum(line.strip() == heading for line in body.splitlines()) != 1:
+            return None, dispatcher.Reason.PROJECT_LINK_MALFORMED
+        return dispatcher.section_ref(body, section)
+
+    projects = {
+        number for number, issue in issues.items()
+        if "type:project" in dispatcher.labels_of(issue)
+        and unique_ref(issue, "Roadmap commitment") == (commitment, None)
+    }
+    authorized = set()
+    for number, issue in issues.items():
+        if "type:story" not in dispatcher.labels_of(issue):
+            continue
+        project, error = unique_ref(issue, "Project")
+        if error is None and project in projects:
+            authorized.add(number)
+    return authorized
+
+
+def run(repo: str, token: str, apply: bool = True,
+        commitment: int | None = None) -> list[Outcome]:
     """One reconciliation pass. Returns the outcomes that moved a story."""
-    stories = fetch_stories(repo, token)
+    issues = dispatcher.fetch_issues(repo, token)
+    allowed = (authorized_story_numbers(issues, commitment)
+               if commitment is not None else set(issues))
+    stories = {
+        number: issue for number, issue in issues.items()
+        if number in allowed
+        and "type:story" in dispatcher.labels_of(issue)
+        and dispatcher.lifecycle_of(issue, dispatcher.STORY_LIFECYCLE) in RECONCILABLE
+    }
     if not stories:
         return []
     pull_requests = dispatcher.fetch_pull_requests(repo, token)
