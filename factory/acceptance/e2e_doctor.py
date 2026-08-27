@@ -4,8 +4,9 @@
 The default ``rehearsal`` mode preserves the strict empty test-commitment and
 fresh-target checks used by the fixture harness.  ``preplanned`` mode is for a
 real Project whose Stories already exist but have not started. ``resume`` is
-for an approved Project after a human-authorized rescue: it preserves completed
-Stories and proves that exactly one rescued Story is ready to continue.
+for an approved Project after a human-authorized recovery: it preserves any
+completed Stories and proves that exactly one recovered Story is ready to
+continue, including recovery during the first Story.
 
 This command may read GitHub, inspect local processes, and run ``poll.sh`` with
 ``--dry-run``.  It creates and removes one temporary detached Git worktree and
@@ -356,7 +357,7 @@ class Doctor:
                 terminal_successes = {"story:merged", "story:completed"}
                 completed = {number for number, state in lifecycle_by_number.items()
                              if state in terminal_successes}
-                lifecycle_ok = (topology_ok and bool(completed) and len(ready) == 1
+                lifecycle_ok = (topology_ok and len(ready) == 1
                     and all(state in terminal_successes | {"story:ready", "story:blocked"}
                             for state in lifecycle_by_number.values())
                     and all((next(item for item in story_nodes
