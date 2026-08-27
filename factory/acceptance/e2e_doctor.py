@@ -281,7 +281,9 @@ class Doctor:
                 item.get("body") or ""))
         existing_stories = sorted(
             item["number"] for item in nodes
-            if "type:story" in issue_labels(item) and re.search(
+            if "type:story" in issue_labels(item)
+            and "story:cancelled" not in issue_labels(item)
+            and re.search(
                 r"(?m)^### Project\s*$\n\s*#"
                 + re.escape(str(self.project)) + r"\s*$",
                 item.get("body") or ""))

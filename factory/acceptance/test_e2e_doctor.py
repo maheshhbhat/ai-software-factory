@@ -386,6 +386,37 @@ class GitHubChecks(unittest.TestCase):
         self.assertFalse(check.passed)
         self.assertIn("declared=[402]", check.detail)
 
+    def test_preplanned_mode_ignores_cancelled_replaced_story(self):
+        project_body = "### Stories\n\n#402\n\n### Roadmap commitment\n\n#384\n"
+        payload={"data":{"repository":{"isPrivate":False,"viewerPermission":"ADMIN",
+          "autoMergeAllowed":True,
+          "project":{"number":400,"state":"OPEN","body":project_body,
+                     "labels":{"nodes":[{"name":"type:project"},{"name":"project:active"}]}},
+          "commitment":{"number":384,"state":"OPEN","body":"real product outcome",
+                        "labels":{"nodes":[{"name":"type:roadmap-commitment"}]}},
+          "issues":{"nodes":[
+              {"number":400,"body":"### Roadmap commitment\n\n#384\n",
+               "labels":{"nodes":[{"name":"type:project"}]}},
+              {"number":401,"state":"CLOSED","body":"### Project\n\n#400\n",
+               "labels":{"nodes":[{"name":"type:story"},{"name":"story:cancelled"}]}},
+              {"number":402,"state":"OPEN","body":"### Project\n\n#400\n",
+               "labels":{"nodes":[{"name":"type:story"},{"name":"story:blocked"}]}}],
+              "pageInfo":{"hasNextPage":False}},
+          "defaultBranchRef":{"branchProtectionRule":{
+              "requiredStatusCheckContexts":["merge-gate"]}}},
+          "rateLimit":{"remaining":4999,"resetAt":"later"}}}
+        def respond(args, **_):
+            if "issues?state=open" in args[-1]: return completed(args, stdout="[]")
+            if args[-1].endswith("/rulesets"): return completed(args, stdout="[]")
+            return completed(args, stdout=json.dumps(payload))
+        value=doctor.Doctor("owner/repo",400,commitment=384,target="",
+                            mode="preplanned",environ={"PATH":"/bin"},runner=respond)
+        value.token="token"; value.github()
+        check=next(row for row in value.checks
+                   if row.name=="isolated preplanned Project")
+        self.assertTrue(check.passed, check.detail)
+        self.assertIn("stories=[402]", check.detail)
+
     def test_preplanned_mode_requires_human_approved_project(self):
         payload={"data":{"repository":{"isPrivate":False,"viewerPermission":"ADMIN",
           "autoMergeAllowed":True,
