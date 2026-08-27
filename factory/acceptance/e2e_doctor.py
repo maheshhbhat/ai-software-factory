@@ -353,14 +353,15 @@ class Doctor:
             else:
                 ready = [number for number, state in lifecycle_by_number.items()
                          if state == "story:ready"]
+                terminal_successes = {"story:merged", "story:completed"}
                 completed = {number for number, state in lifecycle_by_number.items()
-                             if state == "story:completed"}
+                             if state in terminal_successes}
                 lifecycle_ok = (topology_ok and bool(completed) and len(ready) == 1
-                    and all(state in {"story:completed", "story:ready", "story:blocked"}
+                    and all(state in terminal_successes | {"story:ready", "story:blocked"}
                             for state in lifecycle_by_number.values())
                     and all((next(item for item in story_nodes
                                   if item["number"] == number).get("state") == "CLOSED")
-                            == (state == "story:completed")
+                            == (state in terminal_successes)
                             for number, state in lifecycle_by_number.items())
                     and set(dependency_by_number.get(ready[0], [])) <= completed)
                 isolation_name = "isolated resumed Project"
