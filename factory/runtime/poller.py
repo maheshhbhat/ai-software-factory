@@ -452,15 +452,52 @@ def wake_reviewer(repo: str, target: review_route.ReviewTarget) -> None:
 
 
 def route_merge(repo: str, pull: dict, comments: list[dict], *, apply=True) -> bool:
+    """Merge only the exact head approved by the independent reviewer.
+
+    Persistent auto-merge is deliberately forbidden here.  GitHub preserves an
+    enabled auto-merge request when a branch is force-pushed, so an approval for
+    head A can otherwise merge head B.  ``--match-head-commit`` makes the merge
+    compare-and-swap: GitHub rejects it if the head changed after this read.
+    """
     if not review_link.exact_head_approved(pull, comments):
         return False
+    if pull.get("mergeable_state") != "clean":
+        return False
     if apply:
+        head = (pull.get("head") or {}).get("sha", "")
+        if not head:
+            raise WorkerLaunchFailed(
+                f"exact-head merge routing failed for PR #{pull.get('number')}: "
+                "GitHub returned no head SHA")
         result = subprocess.run(["gh", "pr", "merge", str(pull["number"]), "--repo", repo,
-                                 "--auto", "--squash"], capture_output=True, text=True)
+                                 "--squash", "--match-head-commit", head],
+                                capture_output=True, text=True)
         if result.returncode:
             raise WorkerLaunchFailed(
-                f"auto-merge routing failed: {(result.stderr or result.stdout)[:400]}")
+                f"exact-head merge routing failed: "
+                f"{(result.stderr or result.stdout)[:400]}")
     return True
+
+
+def disable_legacy_auto_merge(repo: str, pulls: list[dict], *, apply=True) -> set[int]:
+    """Remove sticky auto-merge left by factory versions before Story #586."""
+    disabled = set()
+    for pull in pulls:
+        if not review_route.LINK.findall(
+                (pull.get("body") or "").replace("\r\n", "\n")):
+            continue
+        if not pull.get("auto_merge"):
+            continue
+        if apply:
+            result = subprocess.run(
+                ["gh", "pr", "merge", str(pull["number"]), "--repo", repo,
+                 "--disable-auto"], capture_output=True, text=True)
+            if result.returncode:
+                raise WorkerLaunchFailed(
+                    f"legacy auto-merge disable failed for PR #{pull['number']}: "
+                    f"{(result.stderr or result.stdout)[:400]}")
+        disabled.add(pull["number"])
+    return disabled
 
 
 def refresh_behind_branches(repo: str, pulls: list[dict], issues: dict[int, dict],
@@ -515,9 +552,11 @@ def run_phase4_reviews(repo: str, apply: bool = True) -> list[review_route.Revie
     comments = {number: dispatcher._api(
         f"https://api.github.com/repos/{repo}/issues/{number}/comments?per_page=100", token)
                 for number in issues}
+    disable_legacy_auto_merge(repo, pulls, apply=apply)
     refreshed = refresh_behind_branches(repo, pulls, issues, apply=apply)
     targets = review_targets(
         [pull for pull in pulls if pull.get("number") not in refreshed], issues, comments)
+    reviewed_pulls = {}
     for target in targets:
         if not apply:
             continue
@@ -527,7 +566,21 @@ def run_phase4_reviews(repo: str, apply: bool = True) -> list[review_route.Revie
         fresh_comments = dispatcher._api(
             f"https://api.github.com/repos/{repo}/issues/{target.story}/comments?per_page=100",
             token)
-        route_merge(repo, fresh_pull, fresh_comments, apply=True)
+        reviewed_pulls[target.pull_request] = (fresh_pull, fresh_comments)
+
+    # Retry exact-head-approved PRs on every pass.  This is what replaces sticky
+    # auto-merge: checks may still be pending when review finishes, so a later
+    # poll performs the atomic merge once GitHub reports the head clean.
+    for candidate, candidate_comments in reviewed_pulls.values():
+        route_merge(repo, candidate, candidate_comments, apply=apply)
+    for pull in pulls:
+        if pull.get("number") in reviewed_pulls:
+            continue
+        try:
+            story = review_route.story_number(pull)
+        except review_route.RouteError:
+            continue
+        route_merge(repo, pull, comments.get(story, []), apply=apply)
     return targets
 
 

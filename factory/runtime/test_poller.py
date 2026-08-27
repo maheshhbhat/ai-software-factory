@@ -145,11 +145,45 @@ class TestParsing(unittest.TestCase):
         self.assertEqual(poller.review_targets([pull], {10: story}, {10: [marker]}), [])
 
     def test_merge_route_requires_current_head_approval(self):
-        pull = {"number": 9, "head": {"sha": "b" * 40}}
+        pull = {"number": 9, "mergeable_state": "clean",
+                "head": {"sha": "b" * 40}}
         stale = {"body": "<!-- review-outcome:9:" + "a" * 40 + ":approval -->"}
         exact = {"body": "<!-- review-outcome:9:" + "b" * 40 + ":approval -->"}
         self.assertFalse(poller.route_merge("o/r", pull, [stale], apply=False))
         self.assertTrue(poller.route_merge("o/r", pull, [exact], apply=False))
+
+    def test_merge_route_binds_merge_to_reviewed_head_without_auto_merge(self):
+        head = "b" * 40
+        pull = {"number": 9, "mergeable_state": "clean", "head": {"sha": head}}
+        exact = {"body": f"<!-- review-outcome:9:{head}:approval -->"}
+        completed = __import__("subprocess").CompletedProcess([], 0, "merged", "")
+        with mock.patch.object(poller.subprocess, "run", return_value=completed) as run:
+            self.assertTrue(poller.route_merge("o/r", pull, [exact]))
+        run.assert_called_once_with(
+            ["gh", "pr", "merge", "9", "--repo", "o/r", "--squash",
+             "--match-head-commit", head], capture_output=True, text=True)
+        self.assertNotIn("--auto", run.call_args.args[0])
+
+    def test_merge_route_waits_for_required_checks(self):
+        head = "b" * 40
+        pull = {"number": 9, "mergeable_state": "blocked", "head": {"sha": head}}
+        exact = {"body": f"<!-- review-outcome:9:{head}:approval -->"}
+        with mock.patch.object(poller.subprocess, "run") as run:
+            self.assertFalse(poller.route_merge("o/r", pull, [exact]))
+        run.assert_not_called()
+
+    def test_legacy_auto_merge_is_disabled(self):
+        pulls = [{"number": 9, "body": "Story: #11\n",
+                  "auto_merge": {"enabled_by": {"login": "factory"}}},
+                 {"number": 10, "body": "Story: #12\n", "auto_merge": None},
+                 {"number": 13, "body": "ordinary PR",
+                  "auto_merge": {"enabled_by": {"login": "human"}}}]
+        completed = __import__("subprocess").CompletedProcess([], 0, "disabled", "")
+        with mock.patch.object(poller.subprocess, "run", return_value=completed) as run:
+            self.assertEqual({9}, poller.disable_legacy_auto_merge("o/r", pulls))
+        run.assert_called_once_with(
+            ["gh", "pr", "merge", "9", "--repo", "o/r", "--disable-auto"],
+            capture_output=True, text=True)
 
     def test_behind_story_branch_is_refreshed_before_fresh_review(self):
         pull = {"number": 9, "state": "open", "draft": False,
