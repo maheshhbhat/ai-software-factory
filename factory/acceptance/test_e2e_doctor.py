@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from unittest import mock
 
 HERE = pathlib.Path(__file__).resolve().parent
@@ -217,6 +218,32 @@ class GitHubChecks(unittest.TestCase):
         isolation = next(row for row in value.checks
                          if row.name == "isolated resumed Project")
         self.assertTrue(isolation.passed, value.checks)
+
+    def test_resume_mode_accepts_one_expired_claim_for_automatic_recovery(self):
+        payload = self.resumed_payload()
+        current = payload["data"]["repository"]["issues"]["nodes"][2]
+        current["labels"]["nodes"][1]["name"] = "story:claimed"
+        current["updatedAt"] = "2026-08-27T00:00:00Z"
+        value = doctor.Doctor(
+            "owner/repo", 67, commitment=66, target="", mode="resume",
+            environ={"PATH":"/bin"}, runner=self.github_runner(payload))
+        value.token = "token"; value.github()
+        isolation = next(row for row in value.checks
+                         if row.name == "isolated resumed Project")
+        self.assertTrue(isolation.passed, value.checks)
+
+    def test_resume_mode_rejects_fresh_claim_that_may_still_be_running(self):
+        payload = self.resumed_payload()
+        current = payload["data"]["repository"]["issues"]["nodes"][2]
+        current["labels"]["nodes"][1]["name"] = "story:claimed"
+        current["updatedAt"] = datetime.now(timezone.utc).isoformat()
+        value = doctor.Doctor(
+            "owner/repo", 67, commitment=66, target="", mode="resume",
+            environ={"PATH":"/bin"}, runner=self.github_runner(payload))
+        value.token = "token"; value.github()
+        isolation = next(row for row in value.checks
+                         if row.name == "isolated resumed Project")
+        self.assertFalse(isolation.passed)
 
     def test_resume_mode_rejects_unsafe_review_only_pull_request_evidence(self):
         variants = {}

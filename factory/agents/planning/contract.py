@@ -190,6 +190,7 @@ def validate_output(altitude: Altitude, value: dict) -> dict:
                             for field in ("requirement", "failure_condition"))):
                 raise ContractError("operating envelope entry is malformed")
         known = set(identifiers)
+        envelope_by_id = {item["id"]: item for item in envelope}
         used = set()
         for story in stories:
             obligations = story.get("operating_envelope_ids") if isinstance(story, dict) else None
@@ -209,6 +210,28 @@ def validate_output(altitude: Altitude, value: dict) -> dict:
                 raise ContractError(
                     "every Story operating-envelope obligation needs exactly one "
                     "Story-local executable check")
+            story_surface = " ".join([
+                str(story.get("title") or ""), str(story.get("spec") or ""),
+                *[str(item) for item in (story.get("acceptance_criteria") or [])],
+                *[str(item) for item in (story.get("scope") or [])],
+            ]).lower()
+            surface_terms = {
+                "browser": ("browser", "chrome", "dom", "page", "click", "render", "ui"),
+                "provider": ("provider", "live", "network", "http", "fetch", "parse"),
+            }
+            has_term = lambda text, term: bool(re.search(  # noqa: E731 - local predicate
+                rf"(?<![A-Za-z0-9]){re.escape(term)}(?![A-Za-z0-9])", text))
+            for check in checks:
+                obligation = envelope_by_id[check["id"]]
+                demanded = " ".join((obligation["requirement"],
+                                      obligation["failure_condition"],
+                                      check["check"])).lower()
+                for surface, terms in surface_terms.items():
+                    if (any(has_term(demanded, term) for term in terms)
+                            and not any(has_term(story_surface, term) for term in terms)):
+                        raise ContractError(
+                            f"Story {story.get('key')!r} cannot verify {surface} "
+                            f"obligation {check['id']} within its declared scope")
             used.update(obligations)
         if used != known:
             raise ContractError("every operating-envelope ID must belong to a Story")

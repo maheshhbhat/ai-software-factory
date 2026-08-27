@@ -274,14 +274,9 @@ def recovery_decision(story: dict, timeline: list[dict], pull_requests: list[dic
     if len(prs) > 1:
         return RecoveryDecision(number, "bell", "AMBIGUOUS_LINKED_PRS",
                                 f"{len(prs)} PRs carry Story: #{number}")
-    if prs:
-        pr = prs[0]
-        if pr.get("merged_at") or pr.get("merged") is True:
-            return RecoveryDecision(number, "in-review", "MERGED_DELIVERY_PR",
-                                    f"PR #{pr.get('number')}")
-        return RecoveryDecision(number, "none", "LINKED_PR_EXISTS",
-                                f"PR #{pr.get('number')} state={pr.get('state')}")
-
+    if prs and (prs[0].get("merged_at") or prs[0].get("merged") is True):
+        return RecoveryDecision(number, "in-review", "MERGED_DELIVERY_PR",
+                                f"PR #{prs[0].get('number')}")
     claimed_events = [
         event for event in timeline
         if event.get("event") == "labeled"
@@ -298,6 +293,11 @@ def recovery_decision(story: dict, timeline: list[dict], pull_requests: list[dic
     if now - claimed_at < CLAIM_LEASE:
         return RecoveryDecision(number, "none", "CLAIM_FRESH",
                                 f"claimed_at={claimed_at.isoformat()}")
+
+    if prs:
+        pr = prs[0]
+        return RecoveryDecision(number, "in-review", "CLAIM_LEASE_EXPIRED_WITH_PR",
+                                f"PR #{pr.get('number')}; claimed_at={claimed_at.isoformat()}")
 
     attempt_raw = (merge_gate.parse_section(story.get("body") or "", "Attempt") or "").strip()
     if not attempt_raw.isdigit() or int(attempt_raw) < 1:
