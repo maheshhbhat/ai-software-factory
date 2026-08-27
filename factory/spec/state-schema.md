@@ -5,7 +5,7 @@
 > All state lives in GitHub (issues + labels + PRs + issue comments). Any cache is derivable and disposable.
 > No component other than GitHub is authoritative. Ref: `architecture-v2.1.md` §1, §4; `implementation-plan-v1.md` Phase 1.
 >
-> **`SCHEMA_VERSION = 2.2.0`** — §1–§8 are the Phase 1 state model, verified and unchanged in substance. §9 freezes the executable contracts Phase 2 implements (§9.1 defines versioning and compatibility).
+> **`SCHEMA_VERSION = 2.3.0`** — §1–§8 are the Phase 1 state model, verified and unchanged in substance. §9 freezes the executable contracts Phase 2 implements (§9.1 defines versioning and compatibility).
 
 ---
 
@@ -281,6 +281,27 @@ A Project in `project:standing`:
 | `story:in-review` | `story:ready` | review (manual in P1) / review skill | findings posted | **no `Attempt` change**; attach findings as a comment |
 | `story:ready` | `story:blocked:poison` | dispatcher (human in P1) | `Attempt >= 3` and another attempt would otherwise be dispatched | **raises** the `poison-rescue` bell; no dispatch occurs. No touch is logged here — the touch belongs to the rescue (§4.3.8) |
 | `story:blocked:poison` | `story:ready` | human | rescue per §4.3 | rescue comment + `Attempt` reset required; **yes** — the single `poison-rescue` / `rescue` touch is logged here (§4.3.8) |
+
+**Correction context on a findings retry.** Before the
+`story:in-review → story:ready` edge, every human correction record is written
+before the label change: **Comment first, label second.** The record is bound to
+the current delivery revision with exactly one marker:
+
+`<!-- correction-context:v1:KIND:story:N:pr:P:head:SHA -->`
+
+`KIND` is `human-review`, `request-changes`, or `retry-authorization`; `N` is
+the current Story, `P` its single §9.5-linked PR, and `SHA` that PR's exact
+lowercase 40-character head. The comment retains the shared-credential
+transcription provenance required by `AGENTS.md`. The independent review
+finding keeps its existing `review-outcome:P:SHA:findings` marker.
+
+For a linked-PR retry, the dispatcher builds the bounded correction packet and
+validates these bindings before capacity reservation or claim. The worker
+independently rebuilds the same packet before invoking an engine. Missing,
+ambiguous, stale, unrelated, untrusted, malformed, transcript-bearing, or
+oversized required context refuses without changing `Attempt`. Free-form
+comments are not correction context. This does not change §4.3's three-attempt
+ceiling or its separate poison-rescue sequence.
 | `*` | `story:blocked:scope` | human | scope dispute raised | **raises** the `scope-decision` bell; no touch here — the touch belongs to the resolution (§4.3.8 principle) |
 | `story:blocked:scope` | `story:blocked` | human | dispute resolved (scope amended or withdrawn) | **yes** `scope-decision` / `decision`, logged once here; re-enters normal flow |
 | `story:blocked:scope` | `story:ready` | human | dispute resolved and unblocked | **yes** `scope-decision` / `decision`, logged once here; allowed if deps already satisfied |
@@ -410,7 +431,7 @@ Nothing in §9 rewrites Phase 1: artifacts created before it (Project #1, storie
 This document is the contract, so the contract carries the version:
 
 ```
-SCHEMA_VERSION = 2.2.0
+SCHEMA_VERSION = 2.3.0
 ```
 
 Semantics: **major** changes break a component that has not been updated (a lifecycle label renamed, a field's meaning changed); **minor** adds contract that older components can ignore; **patch** is editorial. Phase 1 was authored under an implicit `1.x`.
@@ -422,10 +443,11 @@ Semantics: **major** changes break a component that has not been updated (a life
 | `2.0.0` | §9 executable contracts frozen for Phase 2 |
 | `2.1.0` | `story:completed` added (§9.16), with the §9.10 dependency rule and the §9.3 cancellation description narrowed to match (#104). **Minor:** a component that does not know the label reads it as not-ready and waits, which is the fail-closed direction. Nothing was renamed and no field changed meaning, so the major stays `2` and every pinned component keeps working |
 | `2.2.0` | Merge-gate checks (a), (d) and (e) and the CODEOWNERS deliverable withdrawn (§9.17); `story:claimed → story:in-review` and `story:in-review → story:merged` promoted to live routes (§9.11); §9.3's poison closure corrected to match §4.3.7 (#114). **Minor:** nothing is renamed and no field changes meaning. The withdrawal removes checks that were never implemented, so no component loses a behaviour it had. The two promoted routes are additive — a component that does not know them leaves those transitions to a human, which is what every component did until now. The §9.3 correction makes a *first* poisoning leave the issue open; a component that expected it closed would have been reading a state the contract never described |
+| `2.3.0` | Exact-revision correction-context markers and the pre-claim retry packet added to the existing findings edge. **Minor:** no label, body field, or existing review-outcome marker changes meaning. Older components ignore the additional marked comments and retain the prior review-finding behavior; updated components fail closed before a retry when the current packet is invalid. |
 
 Every Phase 2 component pins the major version it implements and, on encountering state written under a different major version, **halts and routes to the human queue** — it must never guess. Fail-closed is the rule wherever §9 is silent.
 
-Version is asserted, not stamped on every issue: issue bodies are rendered forms and carry no room for a marker. The dispatcher records the pinned version in its own run log, and any artifact it writes that has a free-text field carries `schema-version: 2.2.0`.
+Version is asserted, not stamped on every issue: issue bodies are rendered forms and carry no room for a marker. The dispatcher records the pinned version in its own run log, and any artifact it writes that has a free-text field carries `schema-version: 2.3.0`.
 
 ### 9.2 Atomic lifecycle transitions
 

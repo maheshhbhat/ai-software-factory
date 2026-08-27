@@ -434,6 +434,58 @@ class TestClaimRecovery(unittest.TestCase):
 
 class TestDispatchLine(unittest.TestCase):
     @patch.object(dp, "claim")
+    @patch.object(dp.capacity_admission, "reserve")
+    def test_invalid_retry_context_refuses_before_reservation_or_claim(
+            self, reserve, claim):
+        ok, reservation, note = dp.admit_and_claim(
+            "owner/repo", story(42), "token", state=Mock(), registry=(),
+            preflight=lambda: (False, "CORRECTION_CONTEXT_INVALID: missing"))
+        self.assertFalse(ok)
+        self.assertIsNone(reservation)
+        self.assertIn("CORRECTION_CONTEXT_INVALID", note)
+        reserve.assert_not_called()
+        claim.assert_not_called()
+
+    @patch.object(dp, "fetch_pages")
+    def test_fresh_delivery_preflight_reads_no_comments(self, pages):
+        ok, note = dp.retry_context_preflight(
+            "owner/repo", story(42), "token", [])
+        self.assertTrue(ok, note)
+        self.assertIn("fresh delivery", note)
+        pages.assert_not_called()
+
+    @patch.object(dp.obs, "process_event")
+    @patch.object(dp, "fetch_pages")
+    def test_linked_retry_preflight_requires_and_digests_current_finding(
+            self, pages, event):
+        head = "9ef7b45c2f7f83ce6e7b0de2be4638229babf132"
+        finding = {"id": 1, "created_at": "2026-08-27T02:31:53Z",
+                   "author_association": "OWNER",
+                   "body": ("## Review findings\n\nfix Chrome\n\n"
+                            f"<!-- review-outcome:74:{head}:findings -->")}
+        pages.side_effect = [[finding], []]
+        linked = [{"number": 74, "body": "Story: #42\n",
+                   "head": {"sha": head}}]
+        ok, note = dp.retry_context_preflight(
+            "owner/repo", story(42, attempt="2"), "token", linked)
+        self.assertTrue(ok, note)
+        self.assertIn("1 record", note)
+        event.assert_called_once()
+        fields = event.call_args.kwargs
+        self.assertEqual(["1"], fields["source_ids"])
+        self.assertNotIn("fix Chrome", str(fields))
+
+    @patch.object(dp, "fetch_pages", return_value=[])
+    def test_linked_retry_without_current_finding_fails_closed(self, _pages):
+        head = "9ef7b45c2f7f83ce6e7b0de2be4638229babf132"
+        linked = [{"number": 74, "body": "Story: #42\n",
+                   "head": {"sha": head}}]
+        ok, note = dp.retry_context_preflight(
+            "owner/repo", story(42, attempt="2"), "token", linked)
+        self.assertFalse(ok)
+        self.assertIn("CURRENT_REVIEW_FINDING_REQUIRED", note)
+
+    @patch.object(dp, "claim")
     @patch.object(dp.capacity_admission, "reserve", return_value=None)
     def test_zero_capacity_never_calls_claim(self, reserve, claim):
         state = Mock()

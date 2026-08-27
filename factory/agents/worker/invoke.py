@@ -36,6 +36,7 @@ sys.path.insert(0, str(ROOT / "factory" / "runtime"))
 import merge_gate  # noqa: E402
 import observability as obs  # noqa: E402
 import runlog  # noqa: E402
+import correction_context  # noqa: E402
 from factory.capacity_pool.executor import CapacityExecutor  # noqa: E402
 from factory.capacity_pool import admission as capacity_admission  # noqa: E402
 from factory.capacity_pool.policy import POLICIES, resolved_registry  # noqa: E402
@@ -373,16 +374,22 @@ def repository_test_command(worktree: pathlib.Path) -> list[str]:
     raise DeliveryError("repository declares no supported test command")
 
 
-def build_input(client: GitHub, story: dict, project: dict) -> dict:
-    comments = client.pages(f"/issues/{story['number']}/comments")
+def build_input(client: GitHub, story: dict, project: dict, *, repo: str,
+                pull_request: dict | None = None) -> dict:
+    story_comments = client.pages(f"/issues/{story['number']}/comments")
+    pull_comments = (client.pages(f"/issues/{pull_request['number']}/comments")
+                     if pull_request is not None else [])
     decisions = [item for item in client.pages("/issues?state=all")
                  if "type:adr" in labels(item)]
     obligations = operating_envelope.obligations(
         story.get("body") or "", project.get("body") or "")
+    packet = correction_context.assemble(
+        repository=repo, project=project["number"], story=story,
+        pull_request=pull_request,
+        story_comments=story_comments, pull_comments=pull_comments)
     return {"story": story, "project": project,
             "operating_envelope_obligations": obligations, "adrs": decisions,
-            "review_findings": [item for item in comments
-                                if "## Review findings" in (item.get("body") or "")]}
+            "correction_context": packet}
 
 
 def read_back_pr(client: GitHub, story_number: int, durable: str,
@@ -445,7 +452,15 @@ def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
         git(["fetch", "origin", f"refs/heads/{branch}:refs/remotes/origin/{branch}"],
             checkout, runner=runner)
     base_ref = f"origin/{branch}" if remote else f"origin/{default}"
-    value = build_input(client, story, project)
+    value = build_input(client, story, project, repo=repo,
+                        pull_request=pulls[0] if pulls else None)
+    packet = value["correction_context"]
+    obs.process_event(
+        "delivery.correction-context", trace_id=delivery_trace,
+        repo=repo, story=story_number, project=project_number,
+        retry=packet["retry"], pull_request=packet["pull_request"],
+        head=packet["head"], digest=packet["digest"],
+        source_ids=[item["comment_id"] for item in packet["records"]])
     with tempfile.TemporaryDirectory(prefix=f"factory-story-{story_number}-") as temp:
         worktree = pathlib.Path(temp)
         git(["worktree", "add", "--detach", str(worktree), base_ref], checkout,

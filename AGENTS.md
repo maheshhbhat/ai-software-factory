@@ -73,6 +73,21 @@ decision in session and you recorded it. The factory runs on one shared
 credential, so nothing downstream can tell his signature from yours; writing the
 provenance down is the only thing that keeps the record honest.
 
+**Bind correction guidance to the rejected revision.** When Mahesh supplies
+human review input, requests changes on a delivery PR, or authorizes a bounded
+retry, fetch the linked PR's exact 40-character head first. Put the comment on
+the Story or linked PR before changing `story:in-review` to `story:ready`, keep
+the transcription provenance above, and append exactly one marker:
+
+`<!-- correction-context:v1:KIND:story:N:pr:P:head:SHA -->`
+
+`KIND` is one of `human-review`, `request-changes`, or
+`retry-authorization`; `N` is the Story number, `P` the linked PR number, and
+`SHA` its exact lowercase head. Comment first, label second. A missing,
+wrong-head, malformed, or untrusted marker is deliberately invisible to the
+next delivery worker and the dispatcher will refuse the retry before consuming
+an Attempt.
+
 **Run bell-check before he decides, not after.** He is relying on you to have
 checked. A verdict he gives on an unchecked artifact is your failure, not his.
 
