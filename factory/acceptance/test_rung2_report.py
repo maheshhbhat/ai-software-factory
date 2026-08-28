@@ -88,6 +88,11 @@ class Rung2ReportTests(unittest.TestCase):
         self.assertEqual("PASS", result["rung_verdict"])
         self.assertTrue(result["measurement_integrity"]["passed"])
 
+        values[3].pop()
+        result = report.build(*values)
+        self.assertEqual("FAIL", result["rung_verdict"])
+        self.assertFalse(result["threshold_results"]["measurement_integrity"])
+
     def test_governance_does_not_reduce_autonomy_but_recovery_does(self):
         values = list(fixture())
         for story in values[0]["stories"]:
@@ -129,7 +134,20 @@ class Rung2ReportTests(unittest.TestCase):
         self.assertEqual("complete", usage["usage_receipts_status"])
         self.assertEqual(2, usage["route_invocations"])
         self.assertEqual(3.5, usage["normalized_capacity_units"])
-        self.assertEqual("provider-pricing-partial", usage["cost_status"])
+        self.assertEqual("unavailable-provider-pricing", usage["cost_status"])
+        self.assertEqual("unavailable", usage["known_reported_cost_usd"])
+
+    def test_superseded_approval_does_not_hide_the_active_cycle_boundary(self):
+        values = fixture()
+        values[0]["decisions"].insert(2, {
+            "bell_type": "plan-approval", "result": "approved",
+            "timestamp": "2026-01-01T00:01:30Z", "superseded": True})
+        values[3].insert(2, {
+            "project": "owner/product#18", "bell_type": "plan-approval",
+            "classification": "decision"})
+        result = report.build(*values)
+        self.assertTrue(result["measurement_integrity"]["passed"])
+        self.assertEqual(3600, result["kpis"]["cycle_time"]["seconds"])
 
     def test_missing_normalized_capacity_receipt_fails_measurement_integrity(self):
         values = list(fixture())

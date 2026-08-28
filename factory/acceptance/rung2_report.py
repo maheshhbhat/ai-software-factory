@@ -122,7 +122,7 @@ def build(evidence, process, telemetry, touches):
     integrity.extend(usage.get("usage_integrity_findings") or [])
 
     approved = [row for row in decisions if row.get("bell_type") == "plan-approval"
-                and row.get("result") == "approved"]
+                and row.get("result") == "approved" and not row.get("superseded")]
     accepted = [row for row in decisions if row.get("bell_type") == "acceptance"
                 and row.get("result") == "pass"]
     if len(approved) == len(accepted) == 1:
@@ -145,6 +145,7 @@ def build(evidence, process, telemetry, touches):
         "relay": classes["relay"] <= thresholds["relay_maximum"],
         "escaped_defects": isinstance(escaped, dict) and "count" in escaped
                            and escaped["count"] <= thresholds["escaped_defects_maximum"],
+        "measurement_integrity": not integrity,
     }
     verdict = "PASS" if all(threshold_results.values()) else "FAIL"
 

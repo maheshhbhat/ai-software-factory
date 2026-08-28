@@ -48,6 +48,7 @@ def engine_usage_cost(telemetry, numbers, accepted_story_count):
         total_cost = 0.0
         total_units = 0.0
         all_priced = True
+        priced_invocations = 0
         for row in route_rows:
             invocation_id = row.get("invocation_id")
             name = row.get("model") or "unknown"
@@ -82,6 +83,7 @@ def engine_usage_cost(telemetry, numbers, accepted_story_count):
                         total[field] = total.get(field, 0) + reported[field]
             if isinstance(exact_cost, (int, float)):
                 total["priced_invocations"] += 1
+                priced_invocations += 1
                 total["reported_cost_usd"] = round(
                     total.get("reported_cost_usd", 0) + exact_cost, 8)
                 total_cost += exact_cost
@@ -101,16 +103,19 @@ def engine_usage_cost(telemetry, numbers, accepted_story_count):
             "normalized_capacity_units_per_accepted_story": (
                 round(total_units / accepted_story_count, 8)
                 if accepted_story_count else UNAVAILABLE),
-            "known_reported_cost_usd": round(total_cost, 8),
+            "known_reported_cost_usd": (round(total_cost, 8)
+                                        if priced_invocations else UNAVAILABLE),
             "cost_status": ("complete" if receipts_complete and all_priced
-                            else "provider-pricing-partial" if receipts_complete
+                            else "provider-pricing-partial"
+                            if receipts_complete and priced_invocations
+                            else "unavailable-provider-pricing" if receipts_complete
                             else "lower-bound"),
             "cost_per_accepted_story_usd": (
                 round(total_cost / accepted_story_count, 8)
                 if receipts_complete and all_priced and accepted_story_count else UNAVAILABLE),
             "known_reported_cost_per_accepted_story_usd": (
                 round(total_cost / accepted_story_count, 8)
-                if accepted_story_count else UNAVAILABLE),
+                if accepted_story_count and priced_invocations else UNAVAILABLE),
         }
 
     # Compatibility for the Project #18-era frozen schema.
