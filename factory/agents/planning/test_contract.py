@@ -243,6 +243,31 @@ class CanonicalPathTests(unittest.TestCase):
             "Do not emit the Project or Story for Delivery with the unsupported claim.",
             normalized)
 
+    def test_prompt_requires_scope_authority_for_every_promised_product_change(self):
+        prompt = pathlib.Path(__file__).with_name("prompt.md").read_text()
+        section = prompt.split("### Scope must authorize the promised behavior", 1)[1]
+        section = section.split("Return this exact JSON shape", 1)[0]
+        normalized = " ".join(section.split())
+
+        for requirement in (
+            "`scope` as its complete implementation authority",
+            "Cross-check every Story spec, acceptance criterion, and "
+            "operating-envelope check against the repository file index",
+            "production implementation surface that can create or change that behavior",
+            "a scope containing only test or documentation paths is invalid",
+            "acceptance-to-scope mapping",
+            "fail planning and name the missing ownership decision",
+        ):
+            with self.subTest(requirement=requirement):
+                self.assertIn(requirement, normalized)
+
+        self.assertIn(
+            "new or changed browser-visible text, state, interaction, or rendering must "
+            "include the relevant application/UI implementation path", normalized)
+        self.assertIn(
+            "A final assurance Story may remain test-only only when it promises "
+            "verification rather than a product change", normalized)
+
     def test_no_competing_root_agents_tree(self):
         root = pathlib.Path(__file__).resolve().parents[3]
         self.assertFalse((root / "agents" / "planning").exists())

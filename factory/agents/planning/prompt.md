@@ -153,6 +153,32 @@ result. If all six parts cannot be grounded in product and repository facts,
 narrow the product claim to what the method can establish or fail planning. Do
 not emit the Project or Story for Delivery with the unsupported claim.
 
+### Scope must authorize the promised behavior
+
+Treat each Story's `scope` as its complete implementation authority, not as a
+list of files that happen to contain its tests. Cross-check every Story spec,
+acceptance criterion, and operating-envelope check against the repository file
+index before emitting the plan. Every promised product behavior must have at
+least one owning Story whose scope includes the production implementation
+surface that can create or change that behavior.
+
+A test, harness, fixture, procedure, or documentation path can verify behavior,
+but cannot by itself authorize a new product behavior. In particular, a Story
+that promises new or changed browser-visible text, state, interaction, or
+rendering must include the relevant application/UI implementation path; a scope
+containing only test or documentation paths is invalid. A final assurance Story
+may remain test-only only when it promises verification rather than a product
+change and an earlier dependency both owns and explicitly accepts the required
+product behavior.
+
+For each Story, state the acceptance-to-scope mapping in its `spec`: name which
+declared production path owns each product change and which declared test or
+assurance path proves it. On a revision, repeat this check against every new
+review requirement before retaining the existing scope. If repository evidence
+does not identify the required implementation surface, fail planning and name
+the missing ownership decision instead of emitting a scope that Delivery cannot
+legally satisfy.
+
 Return this exact JSON shape (ordinary JSON, no Markdown fence). Story `key`
 values are invocation-local identifiers; `depends_on` contains those keys, not
 GitHub numbers—the writer resolves them after issue creation:

@@ -238,3 +238,54 @@ Every finding uses one of the required classifications: `product-specific`,
 The Project #47 search algorithm and the Project #30 Vanguard adapter still need
 product corrections. They are useful regression subjects, but this plan does
 not implement them, rescue Story #58, or alter their lifecycle state.
+
+## Fresh-repeat result — Project #76
+
+Project #76 delivered and was accepted, but the fresh Rung 2 repeat still
+failed. Its frozen bundle is `runs/rung2/project76-final/`.
+
+- autonomy improved to 2 of 3 Stories, or 66.67%, but remained below 75%;
+- relay and escaped defects stayed at zero;
+- measurement integrity passed;
+- 8 claims covered 3 Stories, with 5 retries; and
+- all 15 provider routes carried complete normalized usage receipts.
+
+### F10 — assurance scope could not implement its own browser requirement
+
+- **Observation:** Story #80 required the browser to render the winning-
+  allocation next-cent disclosure, but its planned scope initially contained
+  only tests and a UAT document. The application file `app.js` was absent.
+- **Evidence:** Story #80 review comment 5445740430, scope-decision comment
+  5446960947, poison-rescue comment 5447018551, and the Project #76 final report.
+- **Root cause:** Planning treated scope as a test-file list instead of execution
+  authority and did not map the visible acceptance promise to its production
+  implementation surface.
+- **Classification:** `factory-systemic`.
+- **General lesson:** a Story cannot promise a product change it is forbidden to
+  implement. Assurance-only scope is valid only for verification of behavior an
+  owning dependency explicitly implements.
+- **Factory change:** require an acceptance-to-scope ownership mapping and fail
+  planning when a new visible behavior has only test or documentation scope.
+- **Regression/evaluation proof:** the canonical Planning prompt test fails if
+  the implementation-authority rule, browser-visible example, or fail-planning
+  instruction is removed.
+- **Rung 3 validation:** the next Rung 2 repeat must complete without a human
+  scope expansion or poison rescue caused by a missing implementation surface.
+
+### F11 — the reporter omitted normalized capacity-route receipts
+
+- **Observation:** the pre-closeout reporter counted token events but omitted a
+  timed-out review route even though that route had a complete normalized
+  capacity receipt.
+- **Evidence:** Project #76 telemetry and factory PRs #606 and #608.
+- **Root cause:** the report still used the Project #18-era engine-event schema
+  instead of the provider-aware route receipts introduced before this repeat.
+- **Classification:** `factory-systemic`.
+- **General lesson:** measurement must follow the authoritative admission record;
+  token availability and exact provider pricing are optional receipt details.
+- **Factory change:** count durable capacity-route receipts, require measurement
+  integrity in the final verdict, and report unavailable pricing as unavailable.
+- **Regression/evaluation proof:** reporter tests cover complete unpriced routes,
+  missing normalized receipts, superseded approvals, and integrity-gated verdicts.
+- **Rung 3 validation:** every next-repeat route must reconcile to one complete
+  normalized receipt without invented dollar cost.
