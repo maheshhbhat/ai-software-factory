@@ -1,0 +1,245 @@
+{
+  "commitment": 75,
+  "kpis": {
+    "acceptance_catches": {
+      "count": 0,
+      "criteria": []
+    },
+    "autonomy": {
+      "autonomous_stories": 2,
+      "autonomous_story_numbers": [
+        79,
+        84
+      ],
+      "definition": "merged without human recovery or human code intervention; required governance is measured separately",
+      "non_autonomous_story_numbers": [
+        80
+      ],
+      "rate": 0.6666666666666666,
+      "stories": 3
+    },
+    "cycle_time": {
+      "end": "2026-08-28T01:25:27Z",
+      "seconds": 15335.0,
+      "start": "2026-08-27T21:09:52Z"
+    },
+    "engine_usage_cost": {
+      "by_engine": {
+        "gpt-5.4": {
+          "input_tokens": 2713475,
+          "invocations": 9,
+          "normalized_capacity_units": 16.5,
+          "output_tokens": 38740,
+          "priced_invocations": 0,
+          "reported_invocations": 9,
+          "unpriced_invocations": 9,
+          "unreported_invocations": 0
+        },
+        "gpt-5.6-terra": {
+          "input_tokens": 1458527,
+          "invocations": 6,
+          "normalized_capacity_units": 20.0,
+          "output_tokens": 14164,
+          "priced_invocations": 0,
+          "reported_invocations": 6,
+          "unpriced_invocations": 6,
+          "unreported_invocations": 0
+        }
+      },
+      "cost_per_accepted_story_usd": "unavailable",
+      "cost_status": "unavailable-provider-pricing",
+      "known_reported_cost_per_accepted_story_usd": "unavailable",
+      "known_reported_cost_usd": "unavailable",
+      "normalized_capacity_units": 36.5,
+      "normalized_capacity_units_per_accepted_story": 12.16666667,
+      "route_invocations": 15,
+      "usage_integrity_findings": [],
+      "usage_receipts_status": "complete"
+    },
+    "escaped_defects": {
+      "count": 0,
+      "observations": []
+    },
+    "human_touches": {
+      "by_classification": {
+        "decision": 8,
+        "rescue": 1
+      },
+      "canonical_bells": 9,
+      "operator_actions": [
+        {
+          "action": "final bounded retry authorization",
+          "classification": "recovery",
+          "comment": 5446332814,
+          "story": 80,
+          "timestamp": "2026-08-27T23:14:16Z"
+        },
+        {
+          "action": "scope correction adding app.js",
+          "classification": "recovery",
+          "comment": 5446960947,
+          "story": 80,
+          "timestamp": "2026-08-28T00:45:24Z"
+        },
+        {
+          "action": "poison rescue after scope correction",
+          "classification": "recovery",
+          "comment": 5447018551,
+          "story": 80,
+          "timestamp": "2026-08-28T00:54:23Z"
+        },
+        {
+          "action": "owner Chrome click-and-render verification",
+          "classification": "operation",
+          "comment": 5447172493,
+          "story": 80,
+          "timestamp": "2026-08-28T01:17:20Z"
+        }
+      ],
+      "records": [
+        {
+          "actor": "@maheshhbhat",
+          "bell_type": "plan-approval",
+          "classification": "decision",
+          "note": "Mahesh requested changes on Project #76 in Codex session; duration not measured; decision-comment:5444255419; marker=plan-changes-requested:income-portfolio-analyzer:76:5444255419",
+          "project": "maheshhbhat/income-portfolio-analyzer#76",
+          "seconds_spent": 0,
+          "story": null,
+          "timestamp": "2026-08-27T19:33:23Z"
+        },
+        {
+          "actor": "@maheshhbhat",
+          "bell_type": "plan-approval",
+          "classification": "decision",
+          "note": "Mahesh requested second-round changes on Project #76 in Codex session; duration not measured; decision-comment:5444480917; marker=plan-changes-requested:income-portfolio-analyzer:76:5444480917",
+          "project": "maheshhbhat/income-portfolio-analyzer#76",
+          "seconds_spent": 0,
+          "story": null,
+          "timestamp": "2026-08-27T19:54:23Z"
+        },
+        {
+          "actor": "@maheshhbhat",
+          "bell_type": "plan-approval",
+          "classification": "decision",
+          "note": "Mahesh approved Project #76 in Codex session; duration not measured; decision-comment:5444556625; marker=plan-approval:income-portfolio-analyzer:76:5444556625",
+          "project": "maheshhbhat/income-portfolio-analyzer#76",
+          "seconds_spent": 0,
+          "story": null,
+          "timestamp": "2026-08-27T20:01:10Z"
+        },
+        {
+          "actor": "@maheshhbhat",
+          "bell_type": "plan-approval",
+          "classification": "decision",
+          "note": "Transcribed during Project #76 measurement closeout from Mahesh's existing changes-requested decision; duration not measured; decision-comment:5445065596; source=https://github.com/maheshhbhat/income-portfolio-analyzer/issues/76#issuecomment-5445065596; marker=plan-redesign:income-portfolio-analyzer:76:5445065596",
+          "project": "maheshhbhat/income-portfolio-analyzer#76",
+          "seconds_spent": 0,
+          "story": null,
+          "timestamp": "2026-08-27T20:50:43Z"
+        },
+        {
+          "actor": "@maheshhbhat",
+          "bell_type": "plan-approval",
+          "classification": "decision",
+          "note": "Mahesh requested mathematical-promise redesign for Project #76 after cancelling Story #78; duration not measured; decision-comment:5445072730; marker=plan-redesign:income-portfolio-analyzer:76:5445072730",
+          "project": "maheshhbhat/income-portfolio-analyzer#76",
+          "seconds_spent": 0,
+          "story": null,
+          "timestamp": "2026-08-27T20:51:26Z"
+        },
+        {
+          "actor": "@maheshhbhat",
+          "bell_type": "plan-approval",
+          "classification": "decision",
+          "note": "Mahesh approved redesigned Project #76 in Codex session; duration not measured; decision-comment:5445257123; marker=plan-approval-redesign:income-portfolio-analyzer:76:5445257123",
+          "project": "maheshhbhat/income-portfolio-analyzer#76",
+          "seconds_spent": 0,
+          "story": null,
+          "timestamp": "2026-08-27T21:09:52Z"
+        },
+        {
+          "actor": "@maheshhbhat",
+          "bell_type": "scope-decision",
+          "classification": "decision",
+          "note": "Mahesh authorized adding app.js to Story #80 scope in session; duration not measured; decision-comment:5446960947; marker=scope-decision:income-portfolio-analyzer:80:5446960947",
+          "project": "maheshhbhat/income-portfolio-analyzer#76",
+          "seconds_spent": 0,
+          "story": "maheshhbhat/income-portfolio-analyzer#80",
+          "timestamp": "2026-08-28T00:47:11.934924Z"
+        },
+        {
+          "actor": "@maheshhbhat",
+          "bell_type": "poison-rescue",
+          "classification": "rescue",
+          "note": "Mahesh authorized rescue after app.js was added to Story #80 scope; duration not measured; decision-comment:5447018551; marker=poison-rescue:income-portfolio-analyzer:80:5447018551",
+          "project": "maheshhbhat/income-portfolio-analyzer#76",
+          "seconds_spent": 0,
+          "story": "maheshhbhat/income-portfolio-analyzer#80",
+          "timestamp": "2026-08-28T00:54:38.084430Z"
+        },
+        {
+          "actor": "@maheshhbhat",
+          "bell_type": "acceptance",
+          "classification": "decision",
+          "note": "Mahesh accepted Project #76 in session; duration not measured; decision-comment:5447226752; marker=acceptance:income-portfolio-analyzer:76:5447226752",
+          "project": "maheshhbhat/income-portfolio-analyzer#76",
+          "seconds_spent": 0,
+          "story": null,
+          "timestamp": "2026-08-28T01:25:34.401534Z"
+        }
+      ],
+      "relay": 0
+    },
+    "poison_rate": {
+      "poisoned_stories": 1,
+      "rate": 0.3333333333333333,
+      "stories": 3,
+      "story_numbers": [
+        80
+      ]
+    },
+    "worker_attempts_retry_rate": {
+      "attempts": 8,
+      "attempts_by_story": {
+        "79": 3,
+        "80": 4,
+        "84": 1
+      },
+      "attempts_per_story": 2.6666666666666665,
+      "retries": 5,
+      "retry_share_of_attempts": 0.625,
+      "stories": 3
+    }
+  },
+  "measurement_integrity": {
+    "findings": [],
+    "passed": true
+  },
+  "product_outcome": "accepted",
+  "project": 76,
+  "report_phase": "final",
+  "repository": "maheshhbhat/income-portfolio-analyzer",
+  "rung": 2,
+  "rung_verdict": "FAIL",
+  "schema_version": 1,
+  "sources": [
+    "GitHub Project #76 and final approved Stories #84, #79, and #80 timelines and comments",
+    "Product PRs #85, #86, and #87 checks, exact heads, independent reviews, and merge records",
+    "Project #76 observability fragments preserved under /private/tmp during the run",
+    "factory/touchlog/touchlog.jsonl",
+    "exact-revision production-readiness comment 5447151060 on Project #76",
+    "real Chrome evidence comment 5447172493 on Project #76",
+    "Project #76 acceptance comment 5447226752"
+  ],
+  "threshold_results": {
+    "autonomy": false,
+    "escaped_defects": true,
+    "measurement_integrity": true,
+    "relay": true
+  },
+  "thresholds": {
+    "autonomy_minimum": 0.75,
+    "escaped_defects_maximum": 0,
+    "relay_maximum": 0
+  }
+}

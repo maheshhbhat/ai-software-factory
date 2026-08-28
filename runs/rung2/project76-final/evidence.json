@@ -1,0 +1,54 @@
+{
+  "repository": "maheshhbhat/income-portfolio-analyzer",
+  "commitment": 75,
+  "project": 76,
+  "project_ref": "maheshhbhat/income-portfolio-analyzer#76",
+  "product_outcome": "accepted",
+  "stories": [
+    {"number": 84, "merged": true, "poisoned": false, "human_recovery": false, "pull_request": 85},
+    {"number": 79, "merged": true, "poisoned": false, "human_recovery": false, "pull_request": 86},
+    {"number": 80, "merged": true, "poisoned": true, "human_recovery": true, "pull_request": 87}
+  ],
+  "decisions": [
+    {"bell_type": "plan-approval", "result": "changes-requested", "timestamp": "2026-08-27T19:33:23Z", "comment": 5444255419},
+    {"bell_type": "plan-approval", "result": "changes-requested", "timestamp": "2026-08-27T19:54:23Z", "comment": 5444480917},
+    {"bell_type": "plan-approval", "result": "approved", "timestamp": "2026-08-27T20:01:10Z", "comment": 5444556625, "superseded": true},
+    {"bell_type": "plan-approval", "result": "changes-requested", "timestamp": "2026-08-27T20:50:43Z", "comment": 5445065596},
+    {"bell_type": "plan-approval", "result": "changes-requested", "timestamp": "2026-08-27T20:51:26Z", "comment": 5445072730},
+    {"bell_type": "plan-approval", "result": "approved", "timestamp": "2026-08-27T21:09:52Z", "comment": 5445257123},
+    {"bell_type": "poison-rescue", "result": "approved", "timestamp": "2026-08-28T00:54:23Z", "story": 80, "comment": 5447018551},
+    {"bell_type": "acceptance", "result": "pass", "timestamp": "2026-08-28T01:25:27Z", "comment": 5447226752}
+  ],
+  "operator_actions": [
+    {"action": "final bounded retry authorization", "story": 80, "timestamp": "2026-08-27T23:14:16Z", "classification": "recovery", "comment": 5446332814},
+    {"action": "scope correction adding app.js", "story": 80, "timestamp": "2026-08-28T00:45:24Z", "classification": "recovery", "comment": 5446960947},
+    {"action": "poison rescue after scope correction", "story": 80, "timestamp": "2026-08-28T00:54:23Z", "classification": "recovery", "comment": 5447018551},
+    {"action": "owner Chrome click-and-render verification", "story": 80, "timestamp": "2026-08-28T01:17:20Z", "classification": "operation", "comment": 5447172493}
+  ],
+  "quality_observations": [],
+  "acceptance": {
+    "criteria": [
+      {"criterion": "In the real browser, a user can submit a representative case with a $500,000 starting portfolio, 30-year horizon, 3% inflation, and a supported positive desired ending balance; the page renders one verified first-year annual withdrawal, its supporting catalog allocation, and a 30-row projection ending at or above the requested balance.", "result": "pass"},
+      {"criterion": "For a representative $1,000,000 starting-portfolio case, the page states that the reported withdrawal is the highest verified amount across the disclosed finite catalog of fixed illustrative allocations, and increasing it by $0.01 fails the ending-balance floor for that winning allocation.", "result": "pass"},
+      {"criterion": "A desired ending balance is a projection constraint: negative values are rejected with an actionable message, while a balance above the starting portfolio is accepted when at least one catalog allocation verifies it under the deterministic model.", "result": "pass"},
+      {"criterion": "All money accepted, computed, stored, and rendered in the legacy-withdrawal path is integer cents end to end; the solver, projection, allocation, and UI do not use floating-point currency values.", "result": "pass"},
+      {"criterion": "Invalid-input and no-verified-result submissions clear any prior legacy-withdrawal result, allocation, and projection before showing an actionable refusal.", "result": "pass"},
+      {"criterion": "The feature remains product-only: it adds no runtime dependency, uses no live-provider data, changes no factory or CI files, and produces identical output for identical inputs.", "result": "pass"},
+      {"criterion": "For the current curated list, the solver canonicalizes total returns to product-owned thousandth-decimal rates, evaluates the resulting 23 fixed allocation catalog entries with a proven monotone integer-cent search rather than a per-cent sweep, and the representative Chrome-style browser flow renders in under 1 second.", "result": "pass"}
+    ]
+  },
+  "thresholds": {
+    "autonomy_minimum": 0.75,
+    "relay_maximum": 0,
+    "escaped_defects_maximum": 0
+  },
+  "sources": [
+    "GitHub Project #76 and final approved Stories #84, #79, and #80 timelines and comments",
+    "Product PRs #85, #86, and #87 checks, exact heads, independent reviews, and merge records",
+    "Project #76 observability fragments preserved under /private/tmp during the run",
+    "factory/touchlog/touchlog.jsonl",
+    "exact-revision production-readiness comment 5447151060 on Project #76",
+    "real Chrome evidence comment 5447172493 on Project #76",
+    "Project #76 acceptance comment 5447226752"
+  ]
+}
