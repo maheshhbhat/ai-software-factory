@@ -213,6 +213,36 @@ class CanonicalPathTests(unittest.TestCase):
                        "Story dependencies", "```mermaid"):
             self.assertIn(phrase, prompt)
 
+    def test_prompt_gates_exact_and_optimal_claims_on_a_complete_proof_obligation(self):
+        prompt = pathlib.Path(__file__).with_name("prompt.md").read_text()
+        section = prompt.split("### Proof obligations for exact or complete claims", 1)[1]
+        section = section.split("Return this exact JSON shape", 1)[0]
+        normalized = " ".join(section.split())
+
+        for claim in ("maximum", "minimum", "highest", "lowest", "optimal",
+                      "exact", "exhaustive", "all", "every", "guaranteed"):
+            with self.subTest(claim=claim):
+                self.assertIn(f"`{claim}`", section)
+
+        for proof_part in ("**Claim**", "**Domain**",
+                           "**Invariant / monotonicity / structural property**",
+                           "**Skipped-value justification**", "**Bound**",
+                           "**Falsification strategy**"):
+            with self.subTest(proof_part=proof_part):
+                self.assertIn(proof_part, section)
+
+        self.assertIn(
+            "Testing selected candidates and an adjacent candidate is not, by itself, "
+            "proof of a global maximum.", normalized)
+        self.assertIn(
+            "proves that every skipped value cannot be a better feasible result", normalized)
+        self.assertIn(
+            "narrow the product claim to what the method can establish or fail planning",
+            normalized)
+        self.assertIn(
+            "Do not emit the Project or Story for Delivery with the unsupported claim.",
+            normalized)
+
     def test_no_competing_root_agents_tree(self):
         root = pathlib.Path(__file__).resolve().parents[3]
         self.assertFalse((root / "agents" / "planning").exists())

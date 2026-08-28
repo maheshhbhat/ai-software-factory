@@ -127,6 +127,32 @@ Produce exactly one coherent project plan:
    Follow the diagrams with text for accessibility; a diagram must never be the
    only place a material requirement or dependency is stated.
 
+### Proof obligations for exact or complete claims
+
+Treat claims such as `maximum`, `minimum`, `highest`, `lowest`, `optimal`,
+`exact`, `exhaustive`, `all`, `every`, and `guaranteed` as proof-bearing claims.
+Before any such claim appears in a Project acceptance criterion, ADR decision,
+Story spec, Story acceptance criterion, or operating-envelope requirement, the
+plan must explicitly state all six parts of its proof obligation:
+
+1. **Claim** — the exact property being promised.
+2. **Domain** — the complete set of values or states over which it applies.
+3. **Invariant / monotonicity / structural property** — the repository-grounded
+   property that makes bounded reasoning valid.
+4. **Skipped-value justification** — why values or states not directly evaluated
+   cannot invalidate the result.
+5. **Bound** — the finite work or search bound and how repository or product
+   facts derive it.
+6. **Falsification strategy** — a concrete counterexample, independent oracle,
+   or boundary test that would disprove the proof assumption.
+
+Testing selected candidates and an adjacent candidate is not, by itself, proof
+of a global maximum. It is sufficient only when the stated invariant or
+structural property proves that every skipped value cannot be a better feasible
+result. If all six parts cannot be grounded in product and repository facts,
+narrow the product claim to what the method can establish or fail planning. Do
+not emit the Project or Story for Delivery with the unsupported claim.
+
 Return this exact JSON shape (ordinary JSON, no Markdown fence). Story `key`
 values are invocation-local identifiers; `depends_on` contains those keys, not
 GitHub numbers—the writer resolves them after issue creation:
