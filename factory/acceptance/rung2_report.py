@@ -119,6 +119,7 @@ def build(evidence, process, telemetry, touches):
                      row.get("pull_request"), row.get("metric")),
     )
     usage = shared.engine_usage_cost(telemetry, numbers, len(numbers))
+    integrity.extend(usage.get("usage_integrity_findings") or [])
 
     approved = [row for row in decisions if row.get("bell_type") == "plan-approval"
                 and row.get("result") == "approved"]
