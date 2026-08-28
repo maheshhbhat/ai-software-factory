@@ -80,7 +80,7 @@ class Rung2ReportTests(unittest.TestCase):
                       result["measurement_integrity"]["findings"])
 
     def test_thresholds_can_pass_but_integrity_is_independent(self):
-        values = fixture()
+        values = list(fixture())
         for story in values[0]["stories"]: story["human_recovery"] = False
         values[0]["stories"][0]["poisoned"] = False
         values[0]["stories"][1]["poisoned"] = False
@@ -89,7 +89,7 @@ class Rung2ReportTests(unittest.TestCase):
         self.assertTrue(result["measurement_integrity"]["passed"])
 
     def test_governance_does_not_reduce_autonomy_but_recovery_does(self):
-        values = fixture()
+        values = list(fixture())
         for story in values[0]["stories"]:
             story["human_recovery"] = False
             story["poisoned"] = False
@@ -104,6 +104,42 @@ class Rung2ReportTests(unittest.TestCase):
                          result["kpis"]["autonomy"]["autonomous_story_numbers"])
         self.assertEqual([20],
                          result["kpis"]["autonomy"]["non_autonomous_story_numbers"])
+
+    def test_capacity_receipts_cover_every_route_and_unpriced_usage_is_complete(self):
+        values = list(fixture())
+        values[2] = [
+            {"metric": "capacity.route.attempt", "story": 20,
+             "invocation_id": "delivery-20", "model": "gpt-5.4",
+             "usage_receipt": {"normalized_capacity_units": 2.5,
+                               "capacity_unit_basis": "reconciled-reservation",
+                               "exact_cost_usd": None,
+                               "dollar_cost_unavailable_reason": "subscription-backed",
+                               "reported_usage": {"input_tokens": 100}}},
+            {"metric": "capacity.route.attempt", "story": 21,
+             "invocation_id": "review-21-timeout", "model": "gpt-5.4",
+             "usage_receipt": {"normalized_capacity_units": 1.0,
+                               "capacity_unit_basis": "reconciled-reservation",
+                               "exact_cost_usd": None,
+                               "dollar_cost_unavailable_reason": "subscription-backed",
+                               "reported_usage": None}},
+        ]
+        result = report.build(*values)
+        usage = result["kpis"]["engine_usage_cost"]
+        self.assertTrue(result["measurement_integrity"]["passed"])
+        self.assertEqual("complete", usage["usage_receipts_status"])
+        self.assertEqual(2, usage["route_invocations"])
+        self.assertEqual(3.5, usage["normalized_capacity_units"])
+        self.assertEqual("provider-pricing-partial", usage["cost_status"])
+
+    def test_missing_normalized_capacity_receipt_fails_measurement_integrity(self):
+        values = list(fixture())
+        values[2] = [{"metric": "capacity.route.attempt", "story": 20,
+                      "invocation_id": "broken", "model": "gpt-5.4",
+                      "usage_receipt": {"exact_cost_usd": None}}]
+        result = report.build(*values)
+        self.assertFalse(result["measurement_integrity"]["passed"])
+        self.assertIn("complete reproducible usage receipt",
+                      " ".join(result["measurement_integrity"]["findings"]))
 
     def test_cli_accepts_multiple_run_fragments_and_is_deterministic(self):
         evidence, process, telemetry, touches = fixture()

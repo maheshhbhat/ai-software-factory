@@ -30,7 +30,90 @@ def unavailable(reason):
 
 
 def engine_usage_cost(telemetry, numbers, accepted_story_count):
-    """Report only exact cost, or a lower bound when any invocation is silent."""
+    """Report provider-aware normalized usage and only provider-exposed exact cost.
+
+    New runs use ``capacity.route.attempt`` as the canonical invocation record.
+    Older frozen bundles contain only ``engine.usage`` rows, so their historical
+    behavior remains supported.
+    """
+    route_rows = [row for row in telemetry if row.get("metric") == "capacity.route.attempt"
+                  and row.get("story") in numbers]
+    if route_rows:
+        route_rows = unique_rows(route_rows, lambda row: row.get("invocation_id"))
+        findings = []
+        usage_by_engine = defaultdict(
+            lambda: {"invocations": 0, "reported_invocations": 0,
+                     "unreported_invocations": 0, "normalized_capacity_units": 0.0,
+                     "priced_invocations": 0, "unpriced_invocations": 0})
+        total_cost = 0.0
+        total_units = 0.0
+        all_priced = True
+        for row in route_rows:
+            invocation_id = row.get("invocation_id")
+            name = row.get("model") or "unknown"
+            total = usage_by_engine[name]
+            total["invocations"] += 1
+            receipt = row.get("usage_receipt")
+            units = receipt.get("normalized_capacity_units") if isinstance(receipt, dict) else None
+            basis = receipt.get("capacity_unit_basis") if isinstance(receipt, dict) else None
+            exact_cost = receipt.get("exact_cost_usd") if isinstance(receipt, dict) else None
+            unavailable_reason = (receipt.get("dollar_cost_unavailable_reason")
+                                  if isinstance(receipt, dict) else None)
+            valid = (isinstance(invocation_id, str) and bool(invocation_id.strip())
+                     and isinstance(units, (int, float)) and units >= 0
+                     and isinstance(basis, str) and bool(basis.strip())
+                     and ((isinstance(exact_cost, (int, float)) and exact_cost >= 0)
+                          or (exact_cost is None and isinstance(unavailable_reason, str)
+                              and bool(unavailable_reason.strip()))))
+            if not valid:
+                total["unreported_invocations"] += 1
+                findings.append(
+                    f"capacity route {invocation_id or 'without invocation ID'} lacks a "
+                    "complete reproducible usage receipt")
+                all_priced = False
+                continue
+            total["reported_invocations"] += 1
+            total["normalized_capacity_units"] += units
+            total_units += units
+            reported = receipt.get("reported_usage")
+            if isinstance(reported, dict):
+                for field in ("input_tokens", "output_tokens", "total_tokens"):
+                    if isinstance(reported.get(field), (int, float)):
+                        total[field] = total.get(field, 0) + reported[field]
+            if isinstance(exact_cost, (int, float)):
+                total["priced_invocations"] += 1
+                total["reported_cost_usd"] = round(
+                    total.get("reported_cost_usd", 0) + exact_cost, 8)
+                total_cost += exact_cost
+            else:
+                total["unpriced_invocations"] += 1
+                all_priced = False
+        for total in usage_by_engine.values():
+            total["normalized_capacity_units"] = round(
+                total["normalized_capacity_units"], 8)
+        receipts_complete = not findings
+        return {
+            "by_engine": dict(sorted(usage_by_engine.items())),
+            "route_invocations": len(route_rows),
+            "usage_receipts_status": "complete" if receipts_complete else "incomplete",
+            "usage_integrity_findings": sorted(findings),
+            "normalized_capacity_units": round(total_units, 8),
+            "normalized_capacity_units_per_accepted_story": (
+                round(total_units / accepted_story_count, 8)
+                if accepted_story_count else UNAVAILABLE),
+            "known_reported_cost_usd": round(total_cost, 8),
+            "cost_status": ("complete" if receipts_complete and all_priced
+                            else "provider-pricing-partial" if receipts_complete
+                            else "lower-bound"),
+            "cost_per_accepted_story_usd": (
+                round(total_cost / accepted_story_count, 8)
+                if receipts_complete and all_priced and accepted_story_count else UNAVAILABLE),
+            "known_reported_cost_per_accepted_story_usd": (
+                round(total_cost / accepted_story_count, 8)
+                if accepted_story_count else UNAVAILABLE),
+        }
+
+    # Compatibility for the Project #18-era frozen schema.
     rows = [row for row in telemetry if row.get("metric") == "engine.usage"
             and row.get("story") in numbers]
     usage_by_engine = defaultdict(
@@ -62,6 +145,8 @@ def engine_usage_cost(telemetry, numbers, accepted_story_count):
                        if complete and accepted_story_count else UNAVAILABLE)
     return {
         "by_engine": dict(sorted(usage_by_engine.items())),
+        "usage_receipts_status": "legacy-engine-events",
+        "usage_integrity_findings": [],
         "known_reported_cost_usd": round(total_cost, 8),
         "cost_status": "complete" if complete else "lower-bound",
         "cost_per_accepted_story_usd": exact_per_story,
@@ -69,6 +154,18 @@ def engine_usage_cost(telemetry, numbers, accepted_story_count):
             round(total_cost / accepted_story_count, 8)
             if accepted_story_count and rows else UNAVAILABLE),
     }
+
+
+def unique_rows(rows, key):
+    seen = set()
+    result = []
+    for row in rows:
+        marker = key(row)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        result.append(row)
+    return result
 
 
 def build(evidence, process, telemetry, touches):
@@ -159,6 +256,7 @@ def build(evidence, process, telemetry, touches):
 
     usage_cost = engine_usage_cost(
         telemetry, numbers, len(numbers) if passed else 0)
+    integrity.extend(usage_cost.get("usage_integrity_findings") or [])
 
     boundaries = {}
     for bell in BELLS:
