@@ -15,6 +15,13 @@ When asked to monitor a black-box UAT or factory delivery, read
 plain repository skill shared by every engine; do not replace it with ad-hoc
 `tail`, JSON parsing, or GitHub polling commands.
 
+## Reviewing completed or stopped factory work
+
+When reviewing completed, failed, rescued, cancelled, or materially replanned
+factory work, read `.claude/skills/retrospective/SKILL.md`. This trigger applies
+to every engine, including engines that do not automatically discover
+`.claude/skills/`.
+
 ## Reviewing anything that needs a human decision
 
 **Do this automatically, without being asked**, whenever: a project sits at
