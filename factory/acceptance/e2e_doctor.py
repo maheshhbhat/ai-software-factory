@@ -223,9 +223,7 @@ class Doctor:
               comments(first:100){nodes{body}}}
             commitment:issue(number:$commitment){number state body labels(first:20){nodes{name}}}
             issues(first:100,states:[OPEN,CLOSED]){nodes{number state stateReason updatedAt body
-              labels(first:20){nodes{name}}
-              timelineItems(first:100,itemTypes:[LABELED_EVENT]){nodes{
-                ... on LabeledEvent{label{name}}}}}
+              labels(first:20){nodes{name}}}
               pageInfo{hasNextPage}}
             pullRequests(first:100,states:OPEN){nodes{number state body isDraft}}
             defaultBranchRef{branchProtectionRule{requiresStatusChecks requiredStatusCheckContexts}}
@@ -318,24 +316,37 @@ class Doctor:
 
         def authorized_retired_poison(item):
             number = item.get("number")
-            poison_events = sum(
-                ((event.get("label") or {}).get("name") == "story:blocked:poison")
-                for event in
-                ((item.get("timelineItems") or {}).get("nodes") or []))
             authorization = re.compile(
                 rf"(?m)^## Story replacement\s*$\n\s*"
                 rf"^decision: approved\s*$\n\s*"
                 rf"^actor: @[A-Za-z0-9-]+\s*$\n\s*"
                 rf"^replaces: #{number}\s*$\n\s*"
                 rf"^reason: final-poison\s*$")
-            return (self.mode in {"preplanned", "resume"}
-                    and number not in declared_stories
-                    and item.get("state") == "CLOSED"
-                    and item.get("stateReason") == "NOT_PLANNED"
-                    and "story:blocked:poison" in issue_labels(item)
-                    and poison_events >= 3
-                    and any(authorization.search(comment)
-                            for comment in replacement_comments))
+            static_proof = (self.mode in {"preplanned", "resume"}
+                            and number not in declared_stories
+                            and item.get("state") == "CLOSED"
+                            and item.get("stateReason") == "NOT_PLANNED"
+                            and "story:blocked:poison" in issue_labels(item)
+                            and any(authorization.search(comment)
+                                    for comment in replacement_comments))
+            if not static_proof:
+                return False
+            timeline = self.command(
+                ["gh", "api",
+                 f"repos/{self.repo}/issues/{number}/timeline?per_page=100",
+                 "--paginate", "--slurp"],
+                env={**self.env, "GH_TOKEN": self.token})
+            try:
+                pages = json.loads(timeline.stdout) if timeline.returncode == 0 else []
+                events = [event for page in pages for event in page]
+            except (TypeError, json.JSONDecodeError):
+                return False
+            poison_events = sum(
+                event.get("event") == "labeled"
+                and ((event.get("label") or {}).get("name")
+                     == "story:blocked:poison")
+                for event in events)
+            return poison_events >= 3
 
         existing_stories = sorted(
             item["number"] for item in nodes

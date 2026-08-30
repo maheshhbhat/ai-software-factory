@@ -431,9 +431,13 @@ reason: final-poison
             "body": "### Project\n\n#400\n",
             "labels": {"nodes": [
                 {"name": "type:story"}, {"name": "story:blocked:poison"}]},
-            "timelineItems": {"nodes": [
-                {"label": {"name": "story:blocked:poison"}} for _ in range(3)]},
+            # Production GraphQL returns no nested timeline nodes through the
+            # bulk issue inventory; Doctor must use the per-issue REST timeline.
+            "timelineItems": {"nodes": []},
         }
+        timeline = [[
+            {"event": "labeled", "label": {"name": "story:blocked:poison"}}
+            for _ in range(3)]]
         payload={"data":{"repository":{"isPrivate":False,"viewerPermission":"ADMIN",
           "autoMergeAllowed":True,
           "project":{"number":400,"state":"OPEN","body":project_body,
@@ -452,6 +456,8 @@ reason: final-poison
               "requiredStatusCheckContexts":["merge-gate"]}}},
           "rateLimit":{"remaining":4999,"resetAt":"later"}}}
         def respond(args, **_):
+            if any("issues/401/timeline" in arg for arg in args):
+                return completed(args, stdout=json.dumps(timeline))
             if "issues?state=open" in args[-1]: return completed(args, stdout="[]")
             if args[-1].endswith("/rulesets"): return completed(args, stdout="[]")
             return completed(args, stdout=json.dumps(payload))
@@ -469,8 +475,6 @@ reason: final-poison
             "body": "### Project\n\n#400\n",
             "labels": {"nodes": [
                 {"name": "type:story"}, {"name": "story:blocked:poison"}]},
-            "timelineItems": {"nodes": [
-                {"label": {"name": "story:blocked:poison"}} for _ in range(3)]},
         }
         authorization = """## Story replacement
 
@@ -479,16 +483,19 @@ actor: @owner
 replaces: #401
 reason: final-poison
 """
+        full_timeline = [
+            {"event": "labeled", "label": {"name": "story:blocked:poison"}}
+            for _ in range(3)]
         variants = {
-            "missing authorization": ({}, base),
+            "missing authorization": ({}, base, full_timeline),
             "only two poison events": (
                 {"comments": {"nodes": [{"body": authorization}]}},
-                {**base, "timelineItems": {"nodes": base["timelineItems"]["nodes"][:2]}}),
+                base, full_timeline[:2]),
             "closed as completed": (
                 {"comments": {"nodes": [{"body": authorization}]}},
-                {**base, "stateReason": "COMPLETED"}),
+                {**base, "stateReason": "COMPLETED"}, full_timeline),
         }
-        for name, (project_extra, poisoned) in variants.items():
+        for name, (project_extra, poisoned, timeline) in variants.items():
             payload={"data":{"repository":{"isPrivate":False,"viewerPermission":"ADMIN",
               "autoMergeAllowed":True,
               "project":{"number":400,"state":"OPEN",
@@ -507,6 +514,8 @@ reason: final-poison
                   "requiredStatusCheckContexts":["merge-gate"]}}},
               "rateLimit":{"remaining":4999,"resetAt":"later"}}}
             def respond(args, **_):
+                if any("issues/401/timeline" in arg for arg in args):
+                    return completed(args, stdout=json.dumps([timeline]))
                 if "issues?state=open" in args[-1]: return completed(args, stdout="[]")
                 if args[-1].endswith("/rulesets"): return completed(args, stdout="[]")
                 return completed(args, stdout=json.dumps(payload))
