@@ -10,6 +10,7 @@ class FakeStore:
     def __init__(self, issues=None):
         self.issues = copy.deepcopy(issues or [])
         self.comments = {}
+        self.timelines = {}
         self.labels = set()
         self.next_number = max([item["number"] for item in self.issues] or [0]) + 1
 
@@ -40,6 +41,9 @@ class FakeStore:
 
     def list_comments(self, number):
         return copy.deepcopy(self.comments.get(number, []))
+
+    def list_timeline(self, number):
+        return copy.deepcopy(self.timelines.get(number, []))
 
     def create_comment(self, number, body):
         item = {"id": 1 + sum(len(items) for items in self.comments.values()), "body": body}
@@ -201,6 +205,33 @@ class CampaignTests(unittest.TestCase):
 
 
 class ProjectTests(unittest.TestCase):
+    @staticmethod
+    def authorize_final_poison_replacement(store, *, poison_events=3):
+        project = next(item for item in store.issues if item["number"] == 10)
+        project["labels"] = ["type:project", "project:planning"]
+        old = next(item for item in store.issues if item["number"] == 12)
+        old["state"] = "closed"
+        old["state_reason"] = "not_planned"
+        old["labels"] = ["type:story", "story:blocked:poison", "phase:build"]
+        store.timelines[12] = [
+            {"event": "labeled", "label": {"name": "story:blocked:poison"}}
+            for _ in range(poison_events)
+        ]
+        store.create_comment(10, """## Story replacement
+
+decision: approved
+actor: @owner
+replaces: #12
+reason: final-poison""")
+
+    @staticmethod
+    def replacement_output():
+        output = project_output()
+        output["stories"][0]["key"] = "model-v2"
+        output["stories"][0]["title"] = "Replace finally poisoned model"
+        output["stories"][1]["depends_on"] = ["model-v2"]
+        return output
+
     def test_project_writes_adr_stories_dependencies_and_digest(self):
         store = FakeStore([project_issue()])
         trigger = store.get_issue(10)
@@ -235,6 +266,92 @@ class ProjectTests(unittest.TestCase):
         self.assertIn("- [ ] At most five candidates are attempted", body)
         self.assertIn("- [ ] No unverified portfolio is returned", body)
         self.assertNotIn("A verified projection is returned or refusal is explicit", body)
+
+    def test_final_poison_replacement_creates_one_story_and_repoints_dependency(self):
+        store = FakeStore([project_issue()])
+        first = artifacts.write(
+            store, store.get_issue(10), "10:feedback:project:prompt-v2", project_output())
+        self.authorize_final_poison_replacement(store)
+
+        replaced = artifacts.write(
+            store, store.get_issue(10), "10:feedback:project:prompt-v3",
+            self.replacement_output())
+
+        self.assertEqual(first.project, replaced.project)
+        self.assertEqual(5, len(store.issues))
+        self.assertEqual("closed", store.get_issue(12)["state"])
+        self.assertIn("story:blocked:poison", store.get_issue(12)["labels"])
+        replacement = next(item for item in store.issues
+                           if "story:model-v2 -->" in item["body"])
+        self.assertNotEqual(12, replacement["number"])
+        self.assertEqual(13, replaced.stories[1])
+        self.assertIn(
+            f"### Depends-on\n\n#{replacement['number']}",
+            store.get_issue(13)["body"])
+        self.assertIn("story:blocked", store.get_issue(13)["labels"])
+        self.assertNotIn("#12\n", store.get_issue(10)["body"])
+        self.assertEqual(replaced, artifacts.verify(
+            store, store.get_issue(10), "10:feedback:project:prompt-v3",
+            contract.Altitude.PROJECT))
+
+        replayed = artifacts.write(
+            store, store.get_issue(10), "10:feedback:project:prompt-v3",
+            self.replacement_output())
+        self.assertEqual(replaced, replayed)
+        self.assertEqual(5, len(store.issues))
+
+    def test_story_identity_change_remains_refused_without_exact_exception(self):
+        cases = ("not-final", "not-planning", "no-authorization", "not-repointed")
+        for case in cases:
+            store = FakeStore([project_issue()])
+            artifacts.write(
+                store, store.get_issue(10), "10:feedback:project:prompt-v2",
+                project_output())
+            self.authorize_final_poison_replacement(
+                store, poison_events=2 if case == "not-final" else 3)
+            if case == "not-planning":
+                store.update_labels(10, ["type:project", "project:active"])
+            if case == "no-authorization":
+                store.comments[10] = []
+            output = self.replacement_output()
+            if case == "not-repointed":
+                output["stories"][1]["depends_on"] = []
+
+            with self.subTest(case=case), self.assertRaises(artifacts.ArtifactError):
+                artifacts.write(
+                    store, store.get_issue(10), "10:feedback:project:prompt-v3", output)
+            self.assertEqual(4, len(store.issues))
+
+    def test_final_poison_replacement_cannot_reuse_a_historical_story_key(self):
+        store = FakeStore([project_issue()])
+        artifacts.write(
+            store, store.get_issue(10), "10:feedback:project:prompt-v2",
+            project_output())
+        store.create_issue(
+            "Historical replacement",
+            "<!-- planning-artifact:old:story:model-v2 -->\n\n"
+            "### Project\n\n#10\n",
+            ["type:story"])
+        self.authorize_final_poison_replacement(store)
+
+        with self.assertRaisesRegex(
+                artifacts.ArtifactError, "identity was already used"):
+            artifacts.write(
+                store, store.get_issue(10),
+                "10:feedback:project:prompt-v3", self.replacement_output())
+
+    def test_ordinary_revision_cannot_add_or_remove_story_identity(self):
+        store = FakeStore([project_issue()])
+        artifacts.write(
+            store, store.get_issue(10), "10:feedback:project:prompt-v2", project_output())
+        output = project_output()
+        output["stories"].pop()
+
+        with self.assertRaisesRegex(
+                artifacts.ArtifactError, "replace exactly one"):
+            artifacts.write(
+                store, store.get_issue(10), "10:feedback:project:prompt-v3", output)
+        self.assertEqual(4, len(store.issues))
 
     def test_project_revision_replaces_stale_risks_in_place(self):
         store = FakeStore([project_issue()])

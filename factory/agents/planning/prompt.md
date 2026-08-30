@@ -21,9 +21,14 @@ hard failure and authorizes no partial write.
    than silently yielding to either one.
 6. The existing generated plan, when this is a revision. Preserve its ADR issue
    and story identities and keys. Revise their content in place; do not add or
-   remove a story merely to restate feedback. If feedback truly requires a graph
-   shape change, fail and surface that structural decision instead of silently
-   duplicating or orphaning artifacts.
+   remove a story merely to restate feedback. There is one bounded exception: a
+   Story closed as not planned after its third poisoning may be replaced when
+   the Project carries a structured human `## Story replacement` authorization naming
+   that exact Story. In that case remove exactly its old key, add exactly one new
+   key, and repoint every downstream dependency to the new key. Preserve every
+   other Story identity. If any other feedback requires a graph-shape change,
+   fail and surface that structural decision instead of silently duplicating or
+   orphaning artifacts.
 
 The invocation input contains repository source under `repository.sources`.
 Treat that supplied source as the authoritative read; do not claim that shell,

@@ -37,6 +37,7 @@ class Store(Protocol):
     def update_issue(self, number: int, body: str, title: str | None = None) -> dict: ...
     def update_labels(self, number: int, labels: list[str]) -> dict: ...
     def list_comments(self, number: int) -> list[dict]: ...
+    def list_timeline(self, number: int) -> list[dict]: ...
     def create_comment(self, number: int, body: str) -> dict: ...
     def update_comment(self, comment_id: int, body: str) -> dict: ...
     def ensure_label(self, name: str) -> None: ...
@@ -59,6 +60,112 @@ def label_names(item: dict) -> set[str]:
     return {label.get("name") if isinstance(label, dict) else label
             for label in item.get("labels", [])
             if (label.get("name") if isinstance(label, dict) else label)}
+
+
+def _story_marker_key(item: dict, project: int) -> str | None:
+    body = item.get("body") or ""
+    if f"### Project\n\n#{project}" not in body:
+        return None
+    match = re.search(
+        rf"<!-- {MARKER}:[^ \n]+:story:([^ ]+) -->", body)
+    return match.group(1) if match else None
+
+
+def _declared_story_numbers(project_body: str) -> list[int]:
+    values = section_lines(project_body, "Stories")
+    if values == ["_No response_"]:
+        return []
+    if any(not re.fullmatch(r"#[1-9][0-9]*", value) for value in values):
+        raise ArtifactError("project Stories section does not contain bare issue references")
+    numbers = [int(value[1:]) for value in values]
+    if len(set(numbers)) != len(numbers):
+        raise ArtifactError("project Stories section contains duplicate issue references")
+    return numbers
+
+
+def _replacement_authorized(store: Store, project: int, story: int) -> bool:
+    pattern = re.compile(
+        rf"(?m)^## Story replacement\s*$\n\s*"
+        rf"^decision: approved\s*$\n\s*"
+        rf"^actor: @[A-Za-z0-9-]+\s*$\n\s*"
+        rf"^replaces: #{story}\s*$\n\s*"
+        rf"^reason: final-poison\s*$")
+    return any(pattern.search(comment.get("body") or "")
+               for comment in store.list_comments(project))
+
+
+def _poison_count(store: Store, story: int) -> int:
+    return sum(
+        event.get("event") == "labeled"
+        and ((event.get("label") or {}).get("name") == "story:blocked:poison")
+        for event in store.list_timeline(story))
+
+
+def _dependency_numbers(story_body: str) -> set[int]:
+    values = section_lines(story_body, "Depends-on")
+    if values == ["none"]:
+        return set()
+    if any(not re.fullmatch(r"#[1-9][0-9]*", value) for value in values):
+        raise ArtifactError("existing Story dependencies do not conform")
+    return {int(value[1:]) for value in values}
+
+
+def _validate_story_identity_change(store: Store, trigger: dict,
+                                    output_by_key: dict[str, dict],
+                                    issues: list[dict]) -> None:
+    """Allow only one human-authorized replacement after final poisoning."""
+    project = trigger["number"]
+    live_project = store.get_issue(project)
+    declared = _declared_story_numbers(live_project.get("body") or "")
+    by_number = {item["number"]: item for item in issues}
+    if any(number not in by_number for number in declared):
+        raise ArtifactError("declared Story is missing from repository read-back")
+    declared_items = [by_number[number] for number in declared]
+    existing_by_key = {}
+    for item in declared_items:
+        key = _story_marker_key(item, project)
+        if not key or key in existing_by_key:
+            raise ArtifactError("declared Story identity does not conform")
+        existing_by_key[key] = item
+
+    existing_keys = set(existing_by_key)
+    proposed_keys = set(output_by_key)
+    if not existing_keys or existing_keys == proposed_keys:
+        return
+
+    removed = existing_keys - proposed_keys
+    added = proposed_keys - existing_keys
+    if len(removed) != 1 or len(added) != 1:
+        raise ArtifactError(
+            "feedback revision may replace exactly one finally poisoned Story")
+    old_key, new_key = next(iter(removed)), next(iter(added))
+    old = existing_by_key[old_key]
+    historical_new = [
+        item for item in issues
+        if item["number"] not in declared
+        and _story_marker_key(item, project) == new_key
+    ]
+    if historical_new:
+        raise ArtifactError("replacement Story identity was already used")
+    if (str(old.get("state", "")).lower() != "closed"
+            or str(old.get("state_reason", "")).lower() != "not_planned"
+            or "story:blocked:poison" not in label_names(old)
+            or _poison_count(store, old["number"]) < 3):
+        raise ArtifactError(
+            "Story replacement requires a closed final-poison Story")
+    if "project:planning" not in label_names(live_project):
+        raise ArtifactError(
+            "Story replacement requires the Project to be in planning")
+    if not _replacement_authorized(store, project, old["number"]):
+        raise ArtifactError(
+            "Story replacement requires structured human authorization")
+
+    for key, item in existing_by_key.items():
+        if key == old_key or old["number"] not in _dependency_numbers(item.get("body") or ""):
+            continue
+        if new_key not in output_by_key[key].get("depends_on", []):
+            raise ArtifactError(
+                f"replacement Story must preserve downstream dependency for {key}")
 
 
 def _find(items: list[dict], token: str) -> dict | None:
@@ -320,13 +427,8 @@ def write_project(store: Store, trigger: dict, key: str, output: dict) -> Writte
     _adr_body(output["adr"])
     for story in output["stories"]:
         _story_body(story, trigger["number"], [1] * len(story["depends_on"]), envelope)
-    existing_story_keys = {match.group(1) for item in store.list_issues("all")
-                           if (match := re.search(
-                               rf"<!-- {MARKER}:{trigger['number']}:[^\n]*:project:prompt-[^\n]*:story:([^ ]+) -->",
-                               item.get("body") or ""))}
-    proposed_story_keys = set(by_key)
-    if existing_story_keys and existing_story_keys != proposed_story_keys:
-        raise ArtifactError("feedback revision may not silently add or remove story identities")
+    issues = store.list_issues("all")
+    _validate_story_identity_change(store, trigger, by_key, issues)
     adr = _issue_reconcile(store, trigger["number"], key, "adr",
                            f"[ADR] {output['adr']['title']}",
                            _adr_body(output["adr"]), ["type:adr"])
@@ -406,14 +508,18 @@ def verify(store: Store, trigger: dict, key: str,
     adr = _find(issues, marker(key, "adr"))
     digest = _find(store.list_comments(trigger["number"]), marker(key, "digest"))
     story_prefix = f"<!-- {MARKER}:{key}:story:"
-    stories = sorted((item for item in issues
-                      if story_prefix in (item.get("body") or "")),
-                     key=lambda item: item["number"])
+    current_stories = [item for item in issues
+                       if story_prefix in (item.get("body") or "")]
+    project = store.get_issue(trigger["number"])
+    declared = _declared_story_numbers(project.get("body") or "")
+    current_by_number = {item["number"]: item for item in current_stories}
+    if set(declared) != set(current_by_number):
+        raise ArtifactError("project Story list does not match planning output")
+    stories = [current_by_number[number] for number in declared]
     if not adr or not digest or not stories:
         raise ArtifactError("project read-back missing ADR, stories, or digest")
     if "type:adr" not in set(adr.get("labels") or []):
         raise ArtifactError("ADR label does not conform")
-    project = store.get_issue(trigger["number"])
     envelope = parse_envelope(section_lines(project.get("body") or "",
                                             "Operating envelope"))
     expected_envelope_digest = envelope_digest(envelope)
@@ -563,6 +669,9 @@ class GitHubStore:
 
     def list_comments(self, number):
         return self._pages(f"/issues/{number}/comments")
+
+    def list_timeline(self, number):
+        return self._pages(f"/issues/{number}/timeline")
 
     def create_comment(self, number, body):
         return self._api(f"/issues/{number}/comments", "POST", {"body": body})

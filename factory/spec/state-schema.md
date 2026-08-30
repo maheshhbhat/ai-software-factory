@@ -46,6 +46,7 @@ standing branch: project:awaiting-ready → project:standing  (§4.1.1: continuo
 
 correction edges:
   project:active   → project:awaiting-ready   (§4.1: criteria amended after approval)
+  project:active   → project:planning        (§4.1: final-poison Story replacement)
   project:standing → project:awaiting-ready   (§4.1: criteria amended after approval)
 ```
 
@@ -232,6 +233,7 @@ All transitions are effected by editing the single lifecycle label (Phase 1: by 
 | `project:planning` | `project:awaiting-ready` | planning output (manual in P1) | ADR + stories + criteria written | no | human queue |
 | `project:awaiting-ready` | `project:active` | human | approves the criteria; **approval comment posted first** (§5.1) | **yes** `plan-approval` / `decision` | sequencer may mark stories ready |
 | `project:awaiting-ready` | `project:planning` | human | requests changes to the plan | yes `plan-approval` / `decision` (note explains) | planning re-invoked; returns to `awaiting-ready` |
+| `project:active` | `project:planning` | human | one declared Story closed as not planned after its third poisoning, and a structured replacement comment names that Story | yes `plan-approval` / `decision` (note explains) | planning may replace exactly that Story, preserve all other Story identities, repoint dependencies, and return to `awaiting-ready` |
 | `project:active` | `project:awaiting-ready` | human | **criteria amended after approval** — the standing approval is superseded (§5.2) | no (no human bell rung; supersession comment required) | human re-approval gate |
 | `project:active` | `project:awaiting-acceptance` | human (manual in P1) / sequencer | every story reached a terminal success — `story:merged` or `story:completed`; after readiness promotion, an exact-revision Production Readiness artifact is also `ready` | no | human queue |
 | `project:awaiting-acceptance` | `project:accepted` | human | acceptance comment records **pass for every criterion** (§5.3) | **yes** `acceptance` / `decision` | terminal |
@@ -361,6 +363,29 @@ actor: @handle
 ```
 
 No bell is rung and no touch is logged for the supersession itself — no human judgment was exercised, the standing approval merely became void. The next `plan-approval` bell is rung by the human at the re-approval gate.
+
+### 5.2.1 Final-poison Story replacement (`project:active → project:planning`)
+
+The third poisoning closes a Story as not planned and makes it a re-planning
+input (§4.3.7). Planning may replace that identity only after the owner has
+requested plan changes and the Project also carries this structured comment:
+
+```
+## Story replacement
+
+decision: approved
+actor: @handle
+replaces: #N
+reason: final-poison
+```
+
+The named Story must be declared by the Project, closed as not planned, retain
+`story:blocked:poison`, and have at least three poison-label events in its
+timeline. Planning removes exactly that Story key, adds exactly one new key,
+repoints every direct downstream dependency, and preserves every other Story
+identity. It then returns the Project to `project:awaiting-ready`; Delivery
+cannot resume until the revised plan is approved. This comment is provenance
+for the already logged changes-requested decision, not a second bell or touch.
 
 ### 5.3 Outcome acceptance (`project:awaiting-acceptance → ...`)
 
