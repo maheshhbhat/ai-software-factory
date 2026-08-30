@@ -219,9 +219,13 @@ class Doctor:
         owner, name = self.repo.split("/", 1)
         query = """query($owner:String!,$name:String!,$project:Int!,$commitment:Int!){
           repository(owner:$owner,name:$name){isPrivate viewerPermission autoMergeAllowed
-            project:issue(number:$project){number state body labels(first:20){nodes{name}}}
+            project:issue(number:$project){number state body labels(first:20){nodes{name}}
+              comments(first:100){nodes{body}}}
             commitment:issue(number:$commitment){number state body labels(first:20){nodes{name}}}
-            issues(first:100,states:[OPEN,CLOSED]){nodes{number state updatedAt body labels(first:20){nodes{name}}}
+            issues(first:100,states:[OPEN,CLOSED]){nodes{number state stateReason updatedAt body
+              labels(first:20){nodes{name}}
+              timelineItems(first:100,itemTypes:[LABELED_EVENT]){nodes{
+                ... on LabeledEvent{label{name}}}}}
               pageInfo{hasNextPage}}
             pullRequests(first:100,states:OPEN){nodes{number state body isDraft}}
             defaultBranchRef{branchProtectionRule{requiresStatusChecks requiredStatusCheckContexts}}
@@ -300,10 +304,44 @@ class Doctor:
                 r"(?m)^### Roadmap commitment\s*$\n\s*#"
                 + re.escape(str(self.commitment)) + r"\s*$",
                 item.get("body") or ""))
+        stories_match = re.search(
+            r"(?ms)^### Stories\s*$\n(.*?)(?=^### |\Z)",
+            project.get("body") or "")
+        declared_stories = sorted(
+            int(value) for value in re.findall(
+                r"(?m)^\s*#(\d+)\s*$",
+                stories_match.group(1) if stories_match else ""))
+        replacement_comments = [
+            item.get("body") or "" for item in
+            ((project.get("comments") or {}).get("nodes") or [])
+        ]
+
+        def authorized_retired_poison(item):
+            number = item.get("number")
+            poison_events = sum(
+                ((event.get("label") or {}).get("name") == "story:blocked:poison")
+                for event in
+                ((item.get("timelineItems") or {}).get("nodes") or []))
+            authorization = re.compile(
+                rf"(?m)^## Story replacement\s*$\n\s*"
+                rf"^decision: approved\s*$\n\s*"
+                rf"^actor: @[A-Za-z0-9-]+\s*$\n\s*"
+                rf"^replaces: #{number}\s*$\n\s*"
+                rf"^reason: final-poison\s*$")
+            return (self.mode in {"preplanned", "resume"}
+                    and number not in declared_stories
+                    and item.get("state") == "CLOSED"
+                    and item.get("stateReason") == "NOT_PLANNED"
+                    and "story:blocked:poison" in issue_labels(item)
+                    and poison_events >= 3
+                    and any(authorization.search(comment)
+                            for comment in replacement_comments))
+
         existing_stories = sorted(
             item["number"] for item in nodes
             if "type:story" in issue_labels(item)
             and "story:cancelled" not in issue_labels(item)
+            and not authorized_retired_poison(item)
             and re.search(
                 r"(?m)^### Project\s*$\n\s*#"
                 + re.escape(str(self.project)) + r"\s*$",
@@ -313,13 +351,6 @@ class Doctor:
                         and not existing_stories)
             isolation_name = "isolated test commitment"
         else:
-            stories_match = re.search(
-                r"(?ms)^### Stories\s*$\n(.*?)(?=^### |\Z)",
-                project.get("body") or "")
-            declared_stories = sorted(
-                int(value) for value in re.findall(
-                    r"(?m)^\s*#(\d+)\s*$",
-                    stories_match.group(1) if stories_match else ""))
             story_nodes = [item for item in nodes if item.get("number") in declared_stories]
             lifecycle_by_number = {}
             dependency_by_number = {}

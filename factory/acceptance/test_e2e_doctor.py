@@ -417,6 +417,108 @@ class GitHubChecks(unittest.TestCase):
         self.assertTrue(check.passed, check.detail)
         self.assertIn("stories=[402]", check.detail)
 
+    def test_preplanned_mode_ignores_authorized_final_poison_replacement(self):
+        project_body = "### Stories\n\n#402\n\n### Roadmap commitment\n\n#384\n"
+        authorization = """## Story replacement
+
+decision: approved
+actor: @owner
+replaces: #401
+reason: final-poison
+"""
+        poisoned = {
+            "number": 401, "state": "CLOSED", "stateReason": "NOT_PLANNED",
+            "body": "### Project\n\n#400\n",
+            "labels": {"nodes": [
+                {"name": "type:story"}, {"name": "story:blocked:poison"}]},
+            "timelineItems": {"nodes": [
+                {"label": {"name": "story:blocked:poison"}} for _ in range(3)]},
+        }
+        payload={"data":{"repository":{"isPrivate":False,"viewerPermission":"ADMIN",
+          "autoMergeAllowed":True,
+          "project":{"number":400,"state":"OPEN","body":project_body,
+                     "labels":{"nodes":[{"name":"type:project"},{"name":"project:active"}]},
+                     "comments":{"nodes":[{"body":authorization}]}},
+          "commitment":{"number":384,"state":"OPEN","body":"real product outcome",
+                        "labels":{"nodes":[{"name":"type:roadmap-commitment"}]}},
+          "issues":{"nodes":[
+              {"number":400,"body":"### Roadmap commitment\n\n#384\n",
+               "labels":{"nodes":[{"name":"type:project"}]}},
+              poisoned,
+              {"number":402,"state":"OPEN","body":"### Project\n\n#400\n",
+               "labels":{"nodes":[{"name":"type:story"},{"name":"story:blocked"}]}}],
+              "pageInfo":{"hasNextPage":False}},
+          "defaultBranchRef":{"branchProtectionRule":{
+              "requiredStatusCheckContexts":["merge-gate"]}}},
+          "rateLimit":{"remaining":4999,"resetAt":"later"}}}
+        def respond(args, **_):
+            if "issues?state=open" in args[-1]: return completed(args, stdout="[]")
+            if args[-1].endswith("/rulesets"): return completed(args, stdout="[]")
+            return completed(args, stdout=json.dumps(payload))
+        value=doctor.Doctor("owner/repo",400,commitment=384,target="",
+                            mode="preplanned",environ={"PATH":"/bin"},runner=respond)
+        value.token="token"; value.github()
+        check=next(row for row in value.checks
+                   if row.name=="isolated preplanned Project")
+        self.assertTrue(check.passed, check.detail)
+        self.assertIn("stories=[402]", check.detail)
+
+    def test_preplanned_mode_refuses_unproven_poison_replacement(self):
+        base = {
+            "number": 401, "state": "CLOSED", "stateReason": "NOT_PLANNED",
+            "body": "### Project\n\n#400\n",
+            "labels": {"nodes": [
+                {"name": "type:story"}, {"name": "story:blocked:poison"}]},
+            "timelineItems": {"nodes": [
+                {"label": {"name": "story:blocked:poison"}} for _ in range(3)]},
+        }
+        authorization = """## Story replacement
+
+decision: approved
+actor: @owner
+replaces: #401
+reason: final-poison
+"""
+        variants = {
+            "missing authorization": ({}, base),
+            "only two poison events": (
+                {"comments": {"nodes": [{"body": authorization}]}},
+                {**base, "timelineItems": {"nodes": base["timelineItems"]["nodes"][:2]}}),
+            "closed as completed": (
+                {"comments": {"nodes": [{"body": authorization}]}},
+                {**base, "stateReason": "COMPLETED"}),
+        }
+        for name, (project_extra, poisoned) in variants.items():
+            payload={"data":{"repository":{"isPrivate":False,"viewerPermission":"ADMIN",
+              "autoMergeAllowed":True,
+              "project":{"number":400,"state":"OPEN",
+                         "body":"### Stories\n\n#402\n\n### Roadmap commitment\n\n#384\n",
+                         "labels":{"nodes":[{"name":"type:project"},{"name":"project:active"}]},
+                         **project_extra},
+              "commitment":{"number":384,"state":"OPEN","body":"real product outcome",
+                            "labels":{"nodes":[{"name":"type:roadmap-commitment"}]}},
+              "issues":{"nodes":[
+                  {"number":400,"body":"### Roadmap commitment\n\n#384\n",
+                   "labels":{"nodes":[{"name":"type:project"}]}}, poisoned,
+                  {"number":402,"state":"OPEN","body":"### Project\n\n#400\n",
+                   "labels":{"nodes":[{"name":"type:story"},{"name":"story:blocked"}]}}],
+                  "pageInfo":{"hasNextPage":False}},
+              "defaultBranchRef":{"branchProtectionRule":{
+                  "requiredStatusCheckContexts":["merge-gate"]}}},
+              "rateLimit":{"remaining":4999,"resetAt":"later"}}}
+            def respond(args, **_):
+                if "issues?state=open" in args[-1]: return completed(args, stdout="[]")
+                if args[-1].endswith("/rulesets"): return completed(args, stdout="[]")
+                return completed(args, stdout=json.dumps(payload))
+            value=doctor.Doctor("owner/repo",400,commitment=384,target="",
+                                mode="preplanned",environ={"PATH":"/bin"},runner=respond)
+            value.token="token"; value.github()
+            check=next(row for row in value.checks
+                       if row.name=="isolated preplanned Project")
+            with self.subTest(name=name):
+                self.assertFalse(check.passed)
+                self.assertIn("stories=[401, 402]", check.detail)
+
     def test_preplanned_mode_requires_human_approved_project(self):
         payload={"data":{"repository":{"isPrivate":False,"viewerPermission":"ADMIN",
           "autoMergeAllowed":True,
