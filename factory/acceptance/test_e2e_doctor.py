@@ -614,14 +614,49 @@ class LocalChecks(unittest.TestCase):
             nonlocal count
             count += 1
             return completed(args, stdout="CAPACITY_OK" if count == 1 else "wrong")
-        runner = RecordingRunner()
         value = doctor.Doctor(
             "owner/repo", 400, commitment=384, target="product.js",
             environ=self.environment(), runner=respond)
         value.worker_engine_start()
         probes = [row for row in value.checks if row.name.startswith("capacity probe")]
         self.assertTrue(probes[0].passed)
-        self.assertTrue(any(not row.passed for row in probes[1:]))
+        warnings = [row for row in probes[1:] if not row.passed]
+        self.assertTrue(warnings)
+        self.assertTrue(all(not row.blocking for row in warnings))
+        fallback = next(
+            row for row in value.checks
+            if row.name == "healthy Delivery fallback capacity")
+        self.assertTrue(fallback.passed)
+        self.assertIn(probes[0].name.removeprefix("capacity probe "), fallback.detail)
+        self.assertIn("excluded=", fallback.detail)
+
+        persisted = doctor.CapacityState(self.capacity_path, uri=False)
+        try:
+            registry = doctor.resolved_registry(
+                self.environment(), health=persisted.health)
+            failed_names = {
+                row.name.removeprefix("capacity probe ").split("/", 1)[1]
+                for row in warnings
+            }
+            self.assertTrue(all(
+                not item.available for item in registry if item.name in failed_names))
+        finally:
+            persisted.close()
+
+    def test_every_probe_failure_blocks_when_no_delivery_fallback_remains(self):
+        value = doctor.Doctor(
+            "owner/repo", 400, commitment=384, target="product.js",
+            environ=self.environment(),
+            runner=lambda args, **kwargs: completed(args, stdout="wrong"))
+        value.worker_engine_start()
+        probes = [row for row in value.checks if row.name.startswith("capacity probe")]
+        self.assertTrue(probes)
+        self.assertTrue(all(not row.passed and not row.blocking for row in probes))
+        fallback = next(
+            row for row in value.checks
+            if row.name == "healthy Delivery fallback capacity")
+        self.assertFalse(fallback.passed)
+        self.assertTrue(fallback.blocking)
 
     def test_echoing_probe_prompt_is_not_success(self):
         prompt_echo = completed([], stdout="Reply exactly CAPACITY_OK")
@@ -742,6 +777,39 @@ class LocalChecks(unittest.TestCase):
         self.assertIn("PASS  one",text)
         self.assertIn("FAIL  two",text)
         self.assertIn("BLOCKED — fix 1 failure",text)
+
+    def test_render_warns_for_optional_failure_without_blocking(self):
+        text = doctor.render([
+            doctor.Check("optional", False, "excluded", blocking=False),
+            doctor.Check("fallback", True, "eligible"),
+        ])
+        self.assertIn("WARN  optional", text)
+        self.assertIn("PASS  fallback", text)
+        self.assertIn("READY", text)
+
+    def test_cli_receipt_omits_nonblocking_warning_and_keeps_fallback_proof(self):
+        checks = [
+            doctor.Check("capacity probe openai/unavailable", False,
+                         "excluded", blocking=False),
+            doctor.Check("healthy Delivery fallback capacity", True,
+                         "eligible route=['openai/healthy']; excluded=['openai/unavailable']"),
+        ]
+        with tempfile.TemporaryDirectory() as root:
+            path = pathlib.Path(root) / "ready.json"
+            with mock.patch.object(doctor, "Doctor") as doctor_class, \
+                 mock.patch.object(doctor.readiness_receipt, "factory_revision",
+                                   return_value="a" * 40):
+                doctor_class.return_value.run.return_value = checks
+                doctor_class.return_value.env = {}
+                code = doctor.main([
+                    "--repo", "owner/repo", "--project", "60",
+                    "--commitment", "59", "--mode", "resume",
+                    "--receipt", str(path)])
+            self.assertEqual(0, code)
+            receipt_checks = json.loads(path.read_text())["checks"]
+            self.assertEqual(
+                ["healthy Delivery fallback capacity"],
+                [row["name"] for row in receipt_checks])
 
     def test_preplanned_cli_does_not_require_target_and_binds_project_identity(self):
         checks = [doctor.Check("probe", True, "answered")]

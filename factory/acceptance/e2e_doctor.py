@@ -39,8 +39,9 @@ sys.path.insert(0, str(ROOT))
 import observability as obs  # noqa: E402
 import readiness_receipt  # noqa: E402
 import status as live_status  # noqa: E402
-from factory.capacity_pool.policy import resolved_registry  # noqa: E402
+from factory.capacity_pool.policy import POLICIES, resolved_registry  # noqa: E402
 from factory.capacity_pool.providers import cli_adapter, provider_environment  # noqa: E402
+from factory.capacity_pool.router import route  # noqa: E402
 from factory.capacity_pool.state import CapacityState  # noqa: E402
 
 DEFAULT_REPO = "maheshhbhat/ai-software-factory"
@@ -60,6 +61,7 @@ class Check:
     name: str
     passed: bool
     detail: str
+    blocking: bool = True
 
 
 class Doctor:
@@ -80,8 +82,8 @@ class Doctor:
         self.checks: list[Check] = []
         self.token = ""
 
-    def record(self, name: str, passed: bool, detail: str) -> bool:
-        self.checks.append(Check(name, passed, detail))
+    def record(self, name: str, passed: bool, detail: str, *, blocking=True) -> bool:
+        self.checks.append(Check(name, passed, detail, blocking))
         return passed
 
     def command(self, args: list[str], *, timeout=30, env=None, cwd=ROOT):
@@ -163,7 +165,7 @@ class Doctor:
                     "CLAUDE_CODE_OAUTH_TOKEN and ~/.factory-reviewer-token are absent")
 
     def worker_engine_start(self):
-        """Probe every configured capacity independently and persist the result."""
+        """Probe every model, exclude failures, and prove Delivery still routes."""
         configured = [item for item in resolved_registry(self.env) if item.available]
         state_path = self.env.get("FACTORY_CAPACITY_STATE", "").strip()
         state_path = pathlib.Path(state_path) if state_path else \
@@ -171,6 +173,7 @@ class Doctor:
         state_path.parent.mkdir(parents=True, exist_ok=True)
         state = CapacityState(state_path, uri=False)
         try:
+            unavailable = []
             for item in configured:
                 adapter = cli_adapter(
                     item.provider, cwd=ROOT,
@@ -184,10 +187,28 @@ class Doctor:
                     state.mark_healthy(item.provider, item.name, "doctor-probe-success")
                 else:
                     state.mark_failure(item.provider, item.name, "doctor-probe-failed")
-                self.record(f"capacity probe {item.provider}/{item.name}", passed,
-                            "adapter probe answered" if passed else "adapter probe failed")
+                    unavailable.append(f"{item.provider}/{item.name}")
+                self.record(
+                    f"capacity probe {item.provider}/{item.name}", passed,
+                    "adapter probe answered" if passed else
+                    "adapter probe failed; model excluded from this readiness route",
+                    blocking=False)
             if not configured:
                 self.record("capacity probes", False, "no configured model capacity")
+                return
+            healthy = resolved_registry(self.env, health=state.health)
+            try:
+                plan = route(POLICIES["delivery"].request(), healthy)
+            except LookupError:
+                self.record(
+                    "healthy Delivery fallback capacity", False,
+                    "no healthy configured model can satisfy the Delivery policy; "
+                    f"excluded={unavailable}")
+            else:
+                selected = [f"{step.provider}/{step.model}" for step in plan.steps]
+                self.record(
+                    "healthy Delivery fallback capacity", True,
+                    f"eligible route={selected}; excluded={unavailable}")
         finally:
             state.close()
 
@@ -542,9 +563,10 @@ class Doctor:
 
 
 def render(checks: list[Check], *, mode: str = "rehearsal") -> str:
-    lines = [f"{'PASS' if item.passed else 'FAIL'}  {item.name} — {item.detail}"
+    lines = [f"{'PASS' if item.passed else 'FAIL' if item.blocking else 'WARN'}  "
+             f"{item.name} — {item.detail}"
              for item in checks]
-    failures = sum(not item.passed for item in checks)
+    failures = sum(item.blocking and not item.passed for item in checks)
     ready = ({
         "preplanned": "READY — approved preplanned Project may enter delivery",
         "resume": "READY — approved rescued Project may resume delivery",
@@ -575,7 +597,7 @@ def main(argv=None) -> int:
                       target=args.target, mode=args.mode)
     checks = instance.run()
     print(render(checks, mode=args.mode))
-    if not all(item.passed for item in checks):
+    if not all(item.passed or not item.blocking for item in checks):
         return 1
     path = (pathlib.Path(args.receipt) if args.receipt else
             readiness_receipt.default_path(args.repo, args.commitment))
@@ -585,7 +607,7 @@ def main(argv=None) -> int:
         revision=readiness_receipt.factory_revision(ROOT),
         environ=instance.env,
         checks=[{"name": row.name, "passed": row.passed, "detail": row.detail}
-                for row in checks])
+                for row in checks if row.blocking])
     print(f"RECEIPT  {path} — expires_at={payload['expires_at']}")
     return 0
 

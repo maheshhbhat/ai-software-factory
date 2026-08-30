@@ -52,6 +52,13 @@ capacity, merge controls, worktree creation, poller exclusivity, observability,
 and the normal read-only `poll.sh --dry-run` path before issuing the same
 short-lived receipt.
 
+The capacity check probes every configured model, but one unavailable optional
+model is a warning rather than an automatic stop. The failed model is excluded
+and recorded in capacity health. Doctor then asks the production router to prove
+that at least one healthy route still satisfies the Delivery policy. Readiness
+is blocked when that aggregate route cannot be formed; the receipt freezes the
+eligible route and the excluded models.
+
 ## What a scenario is
 
 Three rules, each there because dropping it turns the suite back into unit tests
