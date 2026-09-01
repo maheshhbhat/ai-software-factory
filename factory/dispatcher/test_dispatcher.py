@@ -119,6 +119,26 @@ class TestEligibility(unittest.TestCase):
             with self.subTest(scope=scope):
                 self.assertEqual(self.reason(story(10, scope=scope)), R.ELIGIBLE)
 
+    def test_product_repository_may_own_its_workflow(self):
+        candidate = story(10, scope=".github/workflows/tests.yml")
+        plan = dp.plan_dispatch(
+            {10: candidate}, {901: project()}, COMMITMENT,
+            protect_factory=False,
+        )
+        self.assertEqual([decision.number for decision in plan.selected], [10])
+
+    def test_factory_repository_still_blocks_its_workflow(self):
+        candidate = story(10, scope=".github/workflows/tests.yml")
+        plan = dp.plan_dispatch(
+            {10: candidate}, {901: project()}, COMMITMENT,
+            protect_factory=True,
+        )
+        self.assertEqual(plan.selected, [])
+        self.assertEqual(
+            plan.decisions[0].reason,
+            R.FACTORY_SELF_MODIFICATION_FORBIDDEN,
+        )
+
 
 class TestAuthorizationChain(unittest.TestCase):
     """story → project → standing commitment, with no maintenance bypass."""

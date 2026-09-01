@@ -447,7 +447,8 @@ def dependency_satisfied(issue: dict | None) -> tuple[bool, str]:
 
 def evaluate_story(story: dict, projects: dict, stories: dict,
                    commitment: int,
-                   dependencies: DependencyIndex | None = None) -> Decision:
+                   dependencies: DependencyIndex | None = None,
+                   protect_factory: bool = True) -> Decision:
     """Decide whether one story is authorized and eligible for dispatch.
 
     Order matters only for the quality of the reported reason; every check is
@@ -529,7 +530,8 @@ def evaluate_story(story: dict, projects: dict, stories: dict,
     if scope_err:
         return Decision(number, False, Reason.SCOPE_INVALID, project=project_number,
                         detail=scope_err)
-    protected = merge_gate.protected_factory_scope(patterns)
+    protected = (merge_gate.protected_factory_scope(patterns)
+                 if protect_factory else [])
     if protected:
         return Decision(number, False, Reason.FACTORY_SELF_MODIFICATION_FORBIDDEN,
                         project=project_number,
@@ -548,7 +550,8 @@ def evaluate_story(story: dict, projects: dict, stories: dict,
 
 def plan_dispatch(stories: dict, projects: dict, commitment: int,
                   wip_limit: int = WIP_LIMIT,
-                  dependencies: DependencyIndex | None = None) -> Plan:
+                  dependencies: DependencyIndex | None = None,
+                  protect_factory: bool = True) -> Plan:
     """Evaluate every story, then select deterministically (§9.10).
 
     `stories` is the dispatch queue and the only source of candidates. A
@@ -566,7 +569,8 @@ def plan_dispatch(stories: dict, projects: dict, commitment: int,
 
     for number in sorted(stories):
         plan.decisions.append(
-            evaluate_story(stories[number], projects, stories, commitment, dependencies))
+            evaluate_story(stories[number], projects, stories, commitment,
+                           dependencies, protect_factory))
 
     # Total ordering by (project number, story number): no ties, no randomness.
     ordered = sorted(plan.eligible(), key=lambda d: (d.project or 0, d.number))
@@ -1014,7 +1018,13 @@ def main(argv: list[str]) -> int:
     # and nothing it reads is added to `stories` (#107).
     dependencies = DependencyIndex(
         issues, fetch=lambda number: fetch_issue(args.repo, number, token))
-    plan = plan_dispatch(stories, projects, args.commitment, args.wip_limit, dependencies)
+    # The self-modification guard protects the factory's own control plane. A
+    # product repository is allowed to own its own workflows and agent files;
+    # treating every repository's `.github` directory as factory internals
+    # silently made legitimate product Stories undispatchable (P5-051).
+    protect_factory = args.repo.rsplit("/", 1)[-1] == "ai-software-factory"
+    plan = plan_dispatch(stories, projects, args.commitment, args.wip_limit,
+                         dependencies, protect_factory)
 
     claimed: list[tuple[int, str]] = []
     dispatched: list[tuple[Decision, str]] = []
