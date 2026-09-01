@@ -404,6 +404,13 @@ def read_back_pr(client: GitHub, story_number: int, durable: str,
     raise DeliveryError("durable PR read-back failed")
 
 
+def protected_control_scope(repo: str, scope: list[str]) -> list[str]:
+    """Return protected paths only when delivery targets the factory itself."""
+    if repo.rsplit("/", 1)[-1] != "ai-software-factory":
+        return []
+    return merge_gate.protected_factory_scope(scope)
+
+
 def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
             *, timeout: int | None = None, max_usd: float | None = None,
             runner=subprocess.run, client: GitHub | None = None,
@@ -440,7 +447,7 @@ def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
     scope, error = merge_gate.parse_scope(story.get("body") or "")
     if error:
         raise DeliveryError(f"invalid Story scope: {error}")
-    protected = merge_gate.protected_factory_scope(scope)
+    protected = protected_control_scope(repo, scope)
     if protected:
         raise DeliveryError(
             "FACTORY_SELF_MODIFICATION_FORBIDDEN: protected Story scope: "

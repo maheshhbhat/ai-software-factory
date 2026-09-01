@@ -248,7 +248,7 @@ class FactorySelfModificationTests(unittest.TestCase):
                         invoke.DeliveryError,
                         "FACTORY_SELF_MODIFICATION_FORBIDDEN"):
                     invoke.execute(
-                        "owner/repo", 214, "token", pathlib.Path("."),
+                        "owner/ai-software-factory", 214, "token", pathlib.Path("."),
                         runner=runner,
                         client=FakeClient(story_body=body),
                     )
@@ -256,6 +256,20 @@ class FactorySelfModificationTests(unittest.TestCase):
                     command and command[0] in ("codex", "claude")
                     for command, _ in runner.calls
                 ))
+
+    def test_product_repository_workflow_is_not_factory_control_scope(self):
+        self.assertEqual(
+            invoke.protected_control_scope(
+                "owner/product", [".github/workflows/tests.yml"]),
+            [],
+        )
+
+    def test_factory_repository_workflow_remains_control_scope(self):
+        self.assertEqual(
+            invoke.protected_control_scope(
+                "owner/ai-software-factory", [".github/workflows/tests.yml"]),
+            [".github/workflows/tests.yml"],
+        )
 
 
 class ProductCheckoutTests(unittest.TestCase):
