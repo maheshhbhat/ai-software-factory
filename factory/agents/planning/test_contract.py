@@ -282,6 +282,30 @@ class CanonicalPathTests(unittest.TestCase):
             "A final assurance Story may remain test-only only when it promises "
             "verification rather than a product change", normalized)
 
+    def test_real_browser_assurance_requires_a_feasible_planned_mechanism(self):
+        prompt = pathlib.Path(__file__).with_name("prompt.md").read_text()
+        section = prompt.split(
+            "### Browser assurance must have a feasible mechanism", 1)[1]
+        section = section.split("Return this exact JSON shape", 1)[0]
+        normalized = " ".join(section.split())
+
+        for requirement in (
+            "real-browser or named-browser assurance",
+            "Reuse an existing browser-testing mechanism",
+            "Authorize an established browser-testing dependency",
+            "every manifest, implementation, test, and configuration path",
+            "narrow the browser-assurance promise",
+            "fail planning before writing any Project artifacts",
+            "raw browser-process",
+            "debug-protocol",
+            "`--dump-dom`",
+            "homemade driver is not an acceptable substitute",
+            "repository evidence proves it reliable for every promised check",
+            "Do not make Delivery discover missing browser tooling through retries",
+        ):
+            with self.subTest(requirement=requirement):
+                self.assertIn(requirement, normalized)
+
     def test_no_competing_root_agents_tree(self):
         root = pathlib.Path(__file__).resolve().parents[3]
         self.assertFalse((root / "agents" / "planning").exists())

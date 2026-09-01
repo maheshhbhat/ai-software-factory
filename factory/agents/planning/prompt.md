@@ -184,6 +184,28 @@ does not identify the required implementation surface, fail planning and name
 the missing ownership decision instead of emitting a scope that Delivery cannot
 legally satisfy.
 
+### Browser assurance must have a feasible mechanism
+
+When a Project acceptance criterion promises real-browser or named-browser
+assurance, Planning must prove before Delivery that the planned Stories can
+produce that evidence reliably. Choose exactly one feasible route and state it
+in the ADR, Story specification, scope, and acceptance criteria:
+
+1. Reuse an existing browser-testing mechanism whose reliability for the
+   promised checks is grounded by repository source and tests.
+2. Authorize an established browser-testing dependency. Include every manifest,
+   implementation, test, and configuration path needed to install and use it in
+   Story scope, and apply the dependency hazard rules.
+3. When neither route is authorized, narrow the browser-assurance promise to
+   evidence the repository can reliably produce or fail planning before writing
+   any Project artifacts.
+
+A newly invented raw browser-process, debug-protocol, `--dump-dom`, or equivalent
+homemade driver is not an acceptable substitute for an established
+browser-testing tool unless that mechanism already exists in the product
+repository and repository evidence proves it reliable for every promised check.
+Do not make Delivery discover missing browser tooling through retries.
+
 Return this exact JSON shape (ordinary JSON, no Markdown fence). Story `key`
 values are invocation-local identifiers; `depends_on` contains those keys, not
 GitHub numbers—the writer resolves them after issue creation:
