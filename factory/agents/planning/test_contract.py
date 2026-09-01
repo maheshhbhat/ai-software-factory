@@ -296,6 +296,8 @@ class CanonicalPathTests(unittest.TestCase):
             "every manifest, implementation, test, and configuration path",
             "narrow the browser-assurance promise",
             "fail planning before writing any Project artifacts",
+            "For a plan that proceeds under the first or second route",
+            "state the chosen mechanism and its repository evidence",
             "raw browser-process",
             "debug-protocol",
             "`--dump-dom`",

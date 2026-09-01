@@ -188,8 +188,7 @@ legally satisfy.
 
 When a Project acceptance criterion promises real-browser or named-browser
 assurance, Planning must prove before Delivery that the planned Stories can
-produce that evidence reliably. Choose exactly one feasible route and state it
-in the ADR, Story specification, scope, and acceptance criteria:
+produce that evidence reliably. Take exactly one of these routes:
 
 1. Reuse an existing browser-testing mechanism whose reliability for the
    promised checks is grounded by repository source and tests.
@@ -199,6 +198,10 @@ in the ADR, Story specification, scope, and acceptance criteria:
 3. When neither route is authorized, narrow the browser-assurance promise to
    evidence the repository can reliably produce or fail planning before writing
    any Project artifacts.
+
+For a plan that proceeds under the first or second route, state the chosen
+mechanism and its repository evidence in the ADR, Story specification, scope,
+and acceptance criteria.
 
 A newly invented raw browser-process, debug-protocol, `--dump-dom`, or equivalent
 homemade driver is not an acceptable substitute for an established
