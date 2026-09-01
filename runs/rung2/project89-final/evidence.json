@@ -1,0 +1,55 @@
+{
+  "repository": "maheshhbhat/income-portfolio-analyzer",
+  "commitment": 88,
+  "project": 89,
+  "project_ref": "#89",
+  "product_outcome": "failed-with-findings",
+  "stories": [
+    {"number": 95, "merged": true, "poisoned": true, "human_recovery": true, "pull_request": 96},
+    {"number": 92, "merged": true, "poisoned": false, "human_recovery": false, "pull_request": 97},
+    {"number": 93, "merged": false, "poisoned": true, "human_recovery": true, "pull_request": 98}
+  ],
+  "decisions": [
+    {"bell_type": "plan-approval", "result": "approved", "timestamp": "2026-08-30T18:59:21Z", "comment": 5470637772},
+    {"bell_type": "poison-rescue", "result": "approved", "timestamp": "2026-08-30T20:18:58Z", "story": 95, "comment": 5471027899},
+    {"bell_type": "poison-rescue", "result": "approved", "timestamp": "2026-08-31T00:55:30Z", "story": 93, "comment": 5472391445},
+    {"bell_type": "poison-rescue", "result": "approved", "timestamp": "2026-09-01T00:24:15Z", "story": 93, "comment": 5486674061}
+  ],
+  "operator_actions": [
+    {"action": "Story 95 bounded poison rescue", "story": 95, "timestamp": "2026-08-30T20:18:58Z", "classification": "recovery", "comment": 5471027899},
+    {"action": "Story 93 first bounded poison rescue", "story": 93, "timestamp": "2026-08-31T00:55:30Z", "classification": "recovery", "comment": 5472391445},
+    {"action": "Story 93 second and final poison rescue", "story": 93, "timestamp": "2026-09-01T00:24:15Z", "classification": "recovery", "comment": 5486674061},
+    {"action": "Story 93 cancellation", "story": 93, "timestamp": "2026-09-01T18:07:11Z", "classification": "decision", "comment": 5498262971},
+    {"action": "Rung 2 failed-with-findings classification", "timestamp": "2026-09-01T18:06:51Z", "classification": "decision", "comment": 5498258936}
+  ],
+  "quality_observations": [
+    {"kind": "acceptance-catch", "criterion": "real Chrome responsiveness and console-error assurance", "classification": "factory-systemic", "finding": "Planning required real-Chrome assurance while prohibiting a proven browser-test dependency and limiting Story 93 to one test file; the custom dump-DOM harness never produced trustworthy terminal evidence."}
+  ],
+  "acceptance": {
+    "criteria": [
+      {"criterion": "For identical valid inputs within the supported numeric domain consisting of a starting portfolio, desired annual withdrawal, horizon, inflation rate, safety-floor balance, and post-trigger withdrawal reduction percentage, the browser renders one steady year-by-year table and one guardrail year-by-year table, and each table contains one row for each requested horizon year; once a path depletes, later rows show starting balance 0, withdrawal paid 0, and ending balance 0.", "result": "pass"},
+      {"criterion": "The guardrail path evaluates, for each year in order starting at year 1, whether that year's STARTING balance is at or below the user-entered safety floor; the first such year is the trigger year and the reduction applies from that year forward and not earlier. A year whose starting balance is 0 because the portfolio depleted in the prior year satisfies this rule for any floor, including a floor of exactly 0. A depletion that occurs in year N does not, by itself, make year N's starting balance 0; the earliest year that can trigger on a zero starting balance from that depletion is year N+1, if it exists within the horizon. The page reports the resulting trigger year number, or reports explicitly that the floor was not reached within the horizon, including when depletion occurs in the final horizon year and produces no later row.", "result": "pass"},
+      {"criterion": "The page shows total withdrawals paid and ending balance for the steady path and, separately, for the guardrail path for the same run.", "result": "pass"},
+      {"criterion": "If the requested withdrawal rate is unreachable from the curated list, the page still renders the best achievable shared allocation and visibly says that the requested rate was unreachable rather than presenting the approximation as though the target were met.", "result": "pass"},
+      {"criterion": "After a valid render, submitting invalid input such as a non-positive starting portfolio, a negative safety floor, or a reduction outside 0-100% removes the prior steady table, guardrail table, totals, ending balances, and trigger statement before the refusal message becomes visible.", "result": "pass"},
+      {"criterion": "If a valid-shaped request or accepted-looking rate input cannot stay inside the supported arithmetic contract, the comparison removes any prior steady table, guardrail table, totals, ending balances, and trigger statement before showing an actionable refusal, and no partial or unsafe money result is rendered.", "result": "pass"},
+      {"criterion": "A real Chrome run at a 30-year horizon and 3% annual inflation completes click-to-visible-render in under 1 second for one $500,000 starting-portfolio case and one approximately $1,000,000 starting-portfolio case, and the page generates no browser console errors in either run.", "result": "fail"},
+      {"criterion": "The shared allocation, steady path, and guardrail path keep money as integer cents throughout the comparison flow, the shared allocation sums to the input portfolio in cents, dollar-string browser input using plain decimal without thousands separators is parsed directly to integer cents with no floating-point intermediate and sub-cent precision rejected, and one canonical parts-per-million rate contract is used for curated yield, curated growth, and user-entered inflation: each accepted rate must land exactly on a non-negative 1/1,000,000 fraction scale before guarded arithmetic, off-scale values are refused rather than silently rounded, the guardrail module is pure with no DOM, IO, network, clock, or provider-state dependency, and two separate calls with identical input produce the same deterministic JSON serialization.", "result": "pass"},
+      {"criterion": "The comparison uses only the existing curated securities list and existing deterministic blended-rate assumptions, adds no new dependency, provider, database, or network call, and this planning digest includes a written comparison with Project #76 on story count, calculation risk, browser-integration scope, realistic-input exposure, failure handling, and independent assurance before the Plan approval bell.", "result": "pass"}
+    ]
+  },
+  "thresholds": {
+    "autonomy_minimum": 0.75,
+    "relay_maximum": 0,
+    "escaped_defects_maximum": 0
+  },
+  "sources": [
+    "GitHub Project #89 and final Stories #95, #92, and #93 timelines and comments",
+    "Product PRs #96 and #97 merge records and required checks",
+    "Closed unmerged Product PR #98 checks and exact-head review evidence",
+    "Project #89 observability fragments preserved under /private/tmp/project89-recovery-evidence and /private/tmp/project89-final-rescue-evidence",
+    "factory/touchlog/touchlog.jsonl entries available at closeout",
+    "Project #89 failed-with-findings outcome comment 5498258936",
+    "Story #93 cancellation comment 5498262971"
+  ]
+}

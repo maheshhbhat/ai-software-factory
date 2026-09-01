@@ -1,0 +1,214 @@
+{
+  "commitment": 88,
+  "kpis": {
+    "acceptance_catches": {
+      "count": 1,
+      "criteria": [
+        {
+          "criterion": "A real Chrome run at a 30-year horizon and 3% annual inflation completes click-to-visible-render in under 1 second for one $500,000 starting-portfolio case and one approximately $1,000,000 starting-portfolio case, and the page generates no browser console errors in either run.",
+          "result": "fail"
+        }
+      ]
+    },
+    "autonomy": {
+      "autonomous_stories": 1,
+      "autonomous_story_numbers": [
+        92
+      ],
+      "definition": "merged without human recovery or human code intervention; required governance is measured separately",
+      "non_autonomous_story_numbers": [
+        93,
+        95
+      ],
+      "rate": 0.3333333333333333,
+      "stories": 3
+    },
+    "cycle_time": {
+      "reason": "one approved plan and one passing acceptance are required",
+      "status": "unavailable"
+    },
+    "engine_usage_cost": {
+      "by_engine": {
+        "gpt-5.4": {
+          "input_tokens": 3369982,
+          "invocations": 4,
+          "normalized_capacity_units": 8.5,
+          "output_tokens": 30140,
+          "priced_invocations": 0,
+          "reported_invocations": 4,
+          "unpriced_invocations": 4,
+          "unreported_invocations": 0
+        },
+        "unknown": {
+          "invocations": 13,
+          "normalized_capacity_units": 0.0,
+          "priced_invocations": 0,
+          "reported_invocations": 0,
+          "unpriced_invocations": 0,
+          "unreported_invocations": 13
+        }
+      },
+      "cost_per_accepted_story_usd": "unavailable",
+      "cost_status": "lower-bound",
+      "known_reported_cost_per_accepted_story_usd": "unavailable",
+      "known_reported_cost_usd": "unavailable",
+      "normalized_capacity_units": 8.5,
+      "normalized_capacity_units_per_accepted_story": 2.83333333,
+      "route_invocations": 17,
+      "usage_integrity_findings": [
+        "capacity route missing-delivery-reservation:00d4b1ebe8d24567ae4fba6ee7955f7e lacks a complete reproducible usage receipt",
+        "capacity route missing-delivery-reservation:02dc9c1f6fb442b196e60bc895bd7160 lacks a complete reproducible usage receipt",
+        "capacity route missing-delivery-reservation:217050c8be13400aa1601de54543e1f2 lacks a complete reproducible usage receipt",
+        "capacity route missing-delivery-reservation:2f3230df16114b7aae620ac422123b11 lacks a complete reproducible usage receipt",
+        "capacity route missing-delivery-reservation:370bdd493a944776be079cd7e999f158 lacks a complete reproducible usage receipt",
+        "capacity route missing-delivery-reservation:37d5612bef68465d8046168a04f2b2c8 lacks a complete reproducible usage receipt",
+        "capacity route missing-delivery-reservation:3dc682750adc49d983be45ff2966377a lacks a complete reproducible usage receipt",
+        "capacity route missing-delivery-reservation:4c5abe24b4a34e83bb58fb976c5930e0 lacks a complete reproducible usage receipt",
+        "capacity route missing-delivery-reservation:6613635ca315426c86f0f7d9a2214459 lacks a complete reproducible usage receipt",
+        "capacity route missing-delivery-reservation:7dbcbe63b38842469f77039293bda5c2 lacks a complete reproducible usage receipt",
+        "capacity route missing-delivery-reservation:863369fccacc4365a9a02f516b600fd0 lacks a complete reproducible usage receipt",
+        "capacity route missing-delivery-reservation:e58d2b8098304ed5ac3515290775bf2f lacks a complete reproducible usage receipt",
+        "capacity route missing-delivery-reservation:f12d4d0d964c4e5c9cd9ea67fc024a3f lacks a complete reproducible usage receipt"
+      ],
+      "usage_receipts_status": "incomplete"
+    },
+    "escaped_defects": {
+      "count": 0,
+      "observations": []
+    },
+    "human_touches": {
+      "by_classification": {
+        "rescue": 2
+      },
+      "canonical_bells": 2,
+      "operator_actions": [
+        {
+          "action": "Story 95 bounded poison rescue",
+          "classification": "recovery",
+          "comment": 5471027899,
+          "story": 95,
+          "timestamp": "2026-08-30T20:18:58Z"
+        },
+        {
+          "action": "Story 93 first bounded poison rescue",
+          "classification": "recovery",
+          "comment": 5472391445,
+          "story": 93,
+          "timestamp": "2026-08-31T00:55:30Z"
+        },
+        {
+          "action": "Story 93 second and final poison rescue",
+          "classification": "recovery",
+          "comment": 5486674061,
+          "story": 93,
+          "timestamp": "2026-09-01T00:24:15Z"
+        },
+        {
+          "action": "Story 93 cancellation",
+          "classification": "decision",
+          "comment": 5498262971,
+          "story": 93,
+          "timestamp": "2026-09-01T18:07:11Z"
+        },
+        {
+          "action": "Rung 2 failed-with-findings classification",
+          "classification": "decision",
+          "comment": 5498258936,
+          "timestamp": "2026-09-01T18:06:51Z"
+        }
+      ],
+      "records": [
+        {
+          "actor": "@maheshhbhat",
+          "bell_type": "poison-rescue",
+          "classification": "rescue",
+          "note": "Restored after temporary evidence loss: Mahesh authorized one bounded rescue in session; duration was not measured and is recorded as 0 rather than invented; provenance=https://github.com/maheshhbhat/income-portfolio-analyzer/issues/93#issuecomment-5472391445",
+          "project": "#89",
+          "seconds_spent": 0,
+          "story": "#93",
+          "timestamp": "2026-08-31T15:44:42.571267Z"
+        },
+        {
+          "actor": "@maheshhbhat",
+          "bell_type": "poison-rescue",
+          "classification": "rescue",
+          "note": "Mahesh authorized Story #93 second and final rescue in session; duration was not measured and is recorded as 0 rather than invented; provenance=https://github.com/maheshhbhat/income-portfolio-analyzer/issues/93#issuecomment-5486674061",
+          "project": "#89",
+          "seconds_spent": 0,
+          "story": "#93",
+          "timestamp": "2026-09-01T00:24:45.267281Z"
+        }
+      ],
+      "relay": 0
+    },
+    "poison_rate": {
+      "poisoned_stories": 2,
+      "rate": 0.6666666666666666,
+      "stories": 3,
+      "story_numbers": [
+        93,
+        95
+      ]
+    },
+    "worker_attempts_retry_rate": {
+      "attempts": 16,
+      "attempts_by_story": {
+        "92": 3,
+        "93": 9,
+        "95": 4
+      },
+      "attempts_per_story": 5.333333333333333,
+      "retries": 13,
+      "retry_share_of_attempts": 0.8125,
+      "stories": 3
+    }
+  },
+  "measurement_integrity": {
+    "findings": [
+      "capacity route missing-delivery-reservation:00d4b1ebe8d24567ae4fba6ee7955f7e lacks a complete reproducible usage receipt",
+      "capacity route missing-delivery-reservation:02dc9c1f6fb442b196e60bc895bd7160 lacks a complete reproducible usage receipt",
+      "capacity route missing-delivery-reservation:217050c8be13400aa1601de54543e1f2 lacks a complete reproducible usage receipt",
+      "capacity route missing-delivery-reservation:2f3230df16114b7aae620ac422123b11 lacks a complete reproducible usage receipt",
+      "capacity route missing-delivery-reservation:370bdd493a944776be079cd7e999f158 lacks a complete reproducible usage receipt",
+      "capacity route missing-delivery-reservation:37d5612bef68465d8046168a04f2b2c8 lacks a complete reproducible usage receipt",
+      "capacity route missing-delivery-reservation:3dc682750adc49d983be45ff2966377a lacks a complete reproducible usage receipt",
+      "capacity route missing-delivery-reservation:4c5abe24b4a34e83bb58fb976c5930e0 lacks a complete reproducible usage receipt",
+      "capacity route missing-delivery-reservation:6613635ca315426c86f0f7d9a2214459 lacks a complete reproducible usage receipt",
+      "capacity route missing-delivery-reservation:7dbcbe63b38842469f77039293bda5c2 lacks a complete reproducible usage receipt",
+      "capacity route missing-delivery-reservation:863369fccacc4365a9a02f516b600fd0 lacks a complete reproducible usage receipt",
+      "capacity route missing-delivery-reservation:e58d2b8098304ed5ac3515290775bf2f lacks a complete reproducible usage receipt",
+      "capacity route missing-delivery-reservation:f12d4d0d964c4e5c9cd9ea67fc024a3f lacks a complete reproducible usage receipt",
+      "every measured Story must be merged",
+      "plan-approval decisions (1) and touch receipts (0) differ",
+      "poison-rescue decisions (3) and touch receipts (2) differ"
+    ],
+    "passed": false
+  },
+  "product_outcome": "failed-with-findings",
+  "project": 89,
+  "report_phase": "final",
+  "repository": "maheshhbhat/income-portfolio-analyzer",
+  "rung": 2,
+  "rung_verdict": "FAIL",
+  "schema_version": 1,
+  "sources": [
+    "GitHub Project #89 and final Stories #95, #92, and #93 timelines and comments",
+    "Product PRs #96 and #97 merge records and required checks",
+    "Closed unmerged Product PR #98 checks and exact-head review evidence",
+    "Project #89 observability fragments preserved under /private/tmp/project89-recovery-evidence and /private/tmp/project89-final-rescue-evidence",
+    "factory/touchlog/touchlog.jsonl entries available at closeout",
+    "Project #89 failed-with-findings outcome comment 5498258936",
+    "Story #93 cancellation comment 5498262971"
+  ],
+  "threshold_results": {
+    "autonomy": false,
+    "escaped_defects": true,
+    "measurement_integrity": false,
+    "relay": true
+  },
+  "thresholds": {
+    "autonomy_minimum": 0.75,
+    "escaped_defects_maximum": 0,
+    "relay_maximum": 0
+  }
+}
