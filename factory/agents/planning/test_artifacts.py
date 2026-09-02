@@ -225,6 +225,37 @@ replaces: #12
 reason: final-poison""")
 
     @staticmethod
+    def authorize_owner_cancelled_poison_replacement(
+            store, *, attempt=3, poison_events=1, cancellation=True,
+            reason="owner-cancelled-poison", lifecycle="story:cancelled",
+            state="closed", state_reason="not_planned"):
+        project = next(item for item in store.issues if item["number"] == 10)
+        project["labels"] = ["type:project", "project:planning"]
+        old = next(item for item in store.issues if item["number"] == 12)
+        old["state"] = state
+        old["state_reason"] = state_reason
+        old["labels"] = ["type:story", lifecycle, "phase:build"]
+        old["body"] = old["body"].replace(
+            "### Attempt\n\n0", f"### Attempt\n\n{attempt}")
+        store.timelines[12] = [
+            {"event": "labeled", "label": {"name": "story:blocked:poison"}}
+            for _ in range(poison_events)
+        ]
+        if cancellation:
+            store.create_comment(12, """## Cancellation decision
+
+actor: @owner
+decision: cancel
+
+The owner stopped a known-impossible scope.""")
+        store.create_comment(10, f"""## Story replacement
+
+decision: approved
+actor: @owner
+replaces: #12
+reason: {reason}""")
+
+    @staticmethod
     def replacement_output():
         output = project_output()
         output["stories"][0]["key"] = "model-v2"
@@ -299,6 +330,49 @@ reason: final-poison""")
             self.replacement_output())
         self.assertEqual(replaced, replayed)
         self.assertEqual(5, len(store.issues))
+
+    def test_owner_cancelled_poison_replacement_creates_one_story(self):
+        store = FakeStore([project_issue()])
+        first = artifacts.write(
+            store, store.get_issue(10), "10:feedback:project:prompt-v2", project_output())
+        self.authorize_owner_cancelled_poison_replacement(store)
+
+        replaced = artifacts.write(
+            store, store.get_issue(10), "10:feedback:project:prompt-v3",
+            self.replacement_output())
+
+        self.assertEqual(first.project, replaced.project)
+        self.assertEqual(5, len(store.issues))
+        self.assertEqual("closed", store.get_issue(12)["state"])
+        self.assertIn("story:cancelled", store.get_issue(12)["labels"])
+        replacement = next(item for item in store.issues
+                           if "story:model-v2 -->" in item["body"])
+        self.assertNotEqual(12, replacement["number"])
+        self.assertNotIn("#12\n", store.get_issue(10)["body"])
+
+    def test_owner_cancelled_replacement_fails_closed_without_every_guard(self):
+        cases = {
+            "attempts-remain": {"attempt": 2},
+            "never-poisoned": {"poison_events": 0},
+            "no-cancellation-decision": {"cancellation": False},
+            "wrong-authorization-reason": {"reason": "final-poison"},
+            "wrong-lifecycle": {"lifecycle": "story:blocked:poison"},
+            "still-open": {"state": "open", "state_reason": None},
+            "wrong-close-reason": {"state_reason": "completed"},
+        }
+        for case, options in cases.items():
+            store = FakeStore([project_issue()])
+            artifacts.write(
+                store, store.get_issue(10),
+                "10:feedback:project:prompt-v2", project_output())
+            self.authorize_owner_cancelled_poison_replacement(store, **options)
+
+            with self.subTest(case=case), self.assertRaisesRegex(
+                    artifacts.ArtifactError, "eligible closed retired Story"):
+                artifacts.write(
+                    store, store.get_issue(10),
+                    "10:feedback:project:prompt-v3", self.replacement_output())
+            self.assertEqual(4, len(store.issues))
 
     def test_story_identity_change_remains_refused_without_exact_exception(self):
         cases = ("not-final", "not-planning", "no-authorization", "not-repointed")

@@ -210,13 +210,16 @@ class CanonicalPathTests(unittest.TestCase):
                        "hazard", "falsifiable", "read-back"):
             self.assertIn(phrase, prompt)
 
-    def test_prompt_limits_final_poison_replacement_to_one_authorized_story(self):
+    def test_prompt_limits_retired_story_replacement_to_one_authorized_story(self):
         prompt = pathlib.Path(__file__).with_name("prompt.md").read_text()
         normalized = " ".join(prompt.split())
         for phrase in (
             "remove exactly its old key",
             "exactly one new key",
             "after its third poisoning",
+            "all three delivery Attempts are spent",
+            "at least one poisoning",
+            "owner-cancelled-poison",
             "structured human `## Story replacement` authorization",
             "repoint every downstream dependency",
             "Preserve every other Story identity",
