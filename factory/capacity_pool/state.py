@@ -85,7 +85,8 @@ class CapacityState:
             raise ValueError("task prefix must not be empty")
         rows = self.connection.execute(
             "SELECT task_key, model FROM leases "
-            "WHERE substr(task_key, 1, ?) = ? ORDER BY rowid",
+            "WHERE substr(task_key, 1, ?) = ? "
+            "AND status IN ('consumed', 'complete') ORDER BY rowid",
             (len(task_prefix), task_prefix)).fetchall()
         models = []
         for row in rows:

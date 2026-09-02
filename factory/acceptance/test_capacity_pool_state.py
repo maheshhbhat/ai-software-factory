@@ -63,6 +63,11 @@ class CapacityStateTests(unittest.TestCase):
         second = self.state.reserve(
             "delivery:owner/repo:107:2", "openai", "sol", 1,
             ttl_seconds=30)
+        self.state.consume(second.lease_id, task_key="delivery:owner/repo:107:2")
+        released = self.state.reserve(
+            "delivery:owner/repo:107:3", "openai", "sol", 1,
+            ttl_seconds=30)
+        self.state.release(released.lease_id)
 
         self.assertEqual(
             ("fable",),
