@@ -73,6 +73,27 @@ class CapacityState:
     def close(self):
         self.connection.close()
 
+    def models_for_task_prefix(self, task_prefix: str, *,
+                               exclude_task_key: str | None = None) -> tuple[str, ...]:
+        """Return models already leased for one logical task family.
+
+        Delivery attempt numbers are the final task-key component.  Keeping the
+        lookup in state makes retry diversity survive process restarts without
+        adding another source of routing history.
+        """
+        if not task_prefix:
+            raise ValueError("task prefix must not be empty")
+        rows = self.connection.execute(
+            "SELECT task_key, model FROM leases "
+            "WHERE substr(task_key, 1, ?) = ? ORDER BY rowid",
+            (len(task_prefix), task_prefix)).fetchall()
+        models = []
+        for row in rows:
+            if row["task_key"] == exclude_task_key or row["model"] in models:
+                continue
+            models.append(row["model"])
+        return tuple(models)
+
     def health(self, provider: str, model: str) -> dict:
         row = self.connection.execute(
             "SELECT * FROM health WHERE provider=? AND model=?", (provider, model)).fetchone()

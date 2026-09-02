@@ -15,7 +15,7 @@ class Admission:
     reservation_id: str
 
 
-def delivery_request(story: dict) -> RouteRequest:
+def delivery_request(story: dict, *, prior_models: tuple[str, ...] = ()) -> RouteRequest:
     body = (story.get("body") or "").replace("\r\n", "\n")
     section = re.search(r"(?ms)^### Spend cap\n\n(.*?)(?=\n### |\Z)", body)
     money = re.search(r"\$([0-9]+(?:\.[0-9]+)?)", section.group(1)) if section else None
@@ -30,7 +30,11 @@ def delivery_request(story: dict) -> RouteRequest:
     }.items() if labels & candidates)
     return POLICIES["delivery"].request(
         triggers=triggers, total_timeout_seconds=int(minutes.group(1)) * 60,
-        total_budget_units=float(money.group(1)))
+        total_budget_units=float(money.group(1)), prior_models=prior_models)
+
+
+def delivery_task_prefix(repo: str, story: dict) -> str:
+    return f"delivery:{repo.lower()}:{int(story['number'])}:"
 
 
 def delivery_task_key(repo: str, story: dict, *, next_attempt: bool = True) -> str:
@@ -39,7 +43,7 @@ def delivery_task_key(repo: str, story: dict, *, next_attempt: bool = True) -> s
     if not match:
         raise ValueError("Story Attempt must be an integer")
     attempt = int(match.group(1)) + (1 if next_attempt else 0)
-    return f"delivery:{repo.lower()}:{int(story['number'])}:{attempt}"
+    return f"{delivery_task_prefix(repo, story)}{attempt}"
 
 
 def reserve(*, task_key: str, request: RouteRequest,

@@ -66,6 +66,32 @@ class CapacityAdmissionTests(unittest.TestCase):
             admission.delivery_task_key(
                 "owner/repo", claimed, next_attempt=False))
 
+    def test_delivery_request_carries_prior_story_models(self):
+        story = {
+            "number": 20,
+            "body": "### Attempt\n\n1\n\n### Spend cap\n\n$5 / 60 min\n",
+            "labels": [],
+        }
+        request = admission.delivery_request(story, prior_models=("terra",))
+        self.assertEqual(("terra",), request.prior_models)
+        self.assertEqual("delivery:owner/repo:20:",
+                         admission.delivery_task_prefix("Owner/Repo", story))
+
+    def test_prior_story_model_is_not_selected_for_the_next_attempt(self):
+        self.state.mark_healthy("openai", "terra")
+        self.state.mark_healthy("anthropic", "sonnet")
+        request = RouteRequest(
+            "delivery", frozenset({"code"}), Tier.BALANCED, "medium", 60, 3,
+            prior_models=("terra",))
+
+        value = admission.reserve(
+            task_key="delivery:o/r:20:2", request=request,
+            registry=self.models, state=self.state)
+        lease = self.state.consume(
+            value.reservation_id, task_key="delivery:o/r:20:2")
+
+        self.assertEqual("sonnet", lease.model)
+
 
 if __name__ == "__main__":
     unittest.main()

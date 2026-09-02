@@ -53,6 +53,27 @@ class CapacityStateTests(unittest.TestCase):
             self.state.reserve("task-2", "openai", "terra", 3, ttl_seconds=30,
                                capacity_limit=5)
 
+    def test_models_for_task_prefix_preserves_retry_history(self):
+        self.state.mark_healthy("anthropic", "fable")
+        self.state.mark_healthy("openai", "sol")
+        first = self.state.reserve(
+            "delivery:owner/repo:107:1", "anthropic", "fable", 1,
+            ttl_seconds=30)
+        self.state.consume(first.lease_id, task_key="delivery:owner/repo:107:1")
+        second = self.state.reserve(
+            "delivery:owner/repo:107:2", "openai", "sol", 1,
+            ttl_seconds=30)
+
+        self.assertEqual(
+            ("fable",),
+            self.state.models_for_task_prefix(
+                "delivery:owner/repo:107:",
+                exclude_task_key="delivery:owner/repo:107:2"))
+        self.assertEqual(
+            ("fable", "sol"),
+            self.state.models_for_task_prefix("delivery:owner/repo:107:"))
+        self.assertNotEqual(first.lease_id, second.lease_id)
+
     def test_separate_connections_share_atomic_reservations(self):
         self.state.mark_healthy("openai", "terra")
         peer = CapacityState(Path(self.tmp.name) / "state.sqlite", uri=False,

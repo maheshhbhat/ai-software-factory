@@ -488,9 +488,13 @@ def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
                         "hazard": {"hazard", "risk:hazard"},
                         "high-complexity": {"high-complexity", "complexity:high"},
                     }.items() if labels_set & candidates)
+                prior_models = state.models_for_task_prefix(
+                    capacity_admission.delivery_task_prefix(repo, story),
+                    exclude_task_key=task_key)
                 request = POLICIES["delivery"].request(
                     triggers=triggers, total_timeout_seconds=bounds.timeout,
-                    total_budget_units=bounds.max_usd)
+                    total_budget_units=bounds.max_usd,
+                    prior_models=prior_models)
 
                 def mutation_state():
                     return ("post-mutation" if changed_paths(
@@ -536,7 +540,7 @@ def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
                         launch=("completed" if result.outcome == "success" else "failed"),
                         output=result.output)
                 if result.outcome != "success":
-                    detail = f": {result.output}" if result.output else ""
+                    detail = f": {runlog.tail(result.output)}" if result.output else ""
                     raise DeliveryError(
                         f"delivery capacity failed: {result.outcome}{detail}")
             finally:
