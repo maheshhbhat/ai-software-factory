@@ -184,9 +184,11 @@ class CapacityExecutor:
                 }:
                     self.state.mark_quality_failure(
                         step.provider, step.model, attempt.outcome)
-                return self._finish(attempt.outcome, "", records, consumed,
+                return self._finish(attempt.outcome, attempt.diagnostic[:500],
+                                    records, consumed,
                                     terminal_outcome=terminal)
-        return self._finish("no-eligible-capacity", "", records, consumed,
+        diagnostic = attempt.diagnostic[:500] if attempt is not None else ""
+        return self._finish("no-eligible-capacity", diagnostic, records, consumed,
                             terminal_outcome=(records[-1]["terminal_outcome"]
                                               if records else "not-admitted"))
 

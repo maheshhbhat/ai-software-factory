@@ -882,9 +882,12 @@ def admit_and_claim(repo: str, story: dict, token: str, *, state: CapacityState,
         if not valid:
             return False, None, f"NOT claimed — {note}"
     try:
+        prior_models = state.models_for_task_prefix(
+            capacity_admission.delivery_task_prefix(repo, story))
         admitted = capacity_admission.reserve(
             task_key=capacity_admission.delivery_task_key(repo, story),
-            request=capacity_admission.delivery_request(story),
+            request=capacity_admission.delivery_request(
+                story, prior_models=prior_models),
             registry=registry, state=state)
     except (TypeError, ValueError) as exc:
         return False, None, f"NOT admitted — {exc}"

@@ -123,6 +123,17 @@ class CapacityExecutorTests(unittest.TestCase):
                 self.assertIsNotNone(
                     result.attempts[0]["usage_receipt"]["normalized_capacity_units"])
 
+    def test_terminal_provider_diagnostic_is_preserved(self):
+        result = CapacityExecutor({
+            "openai": ProviderAdapter("openai", lambda **_: AttemptResult(
+                "unknown-failure", diagnostic="provider exited with status 7")),
+        }, self.state).execute(
+            task_key="diagnostic", request=self.request(),
+            registry=self.registry()[:1], payload={})
+
+        self.assertEqual("unknown-failure", result.outcome)
+        self.assertEqual("provider exited with status 7", result.output)
+
     def test_quality_failure_never_switches_provider(self):
         called = []
         executor = CapacityExecutor({
