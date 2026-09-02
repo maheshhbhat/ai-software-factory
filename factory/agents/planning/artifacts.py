@@ -83,15 +83,34 @@ def _declared_story_numbers(project_body: str) -> list[int]:
     return numbers
 
 
-def _replacement_authorized(store: Store, project: int, story: int) -> bool:
+def _replacement_authorization_reason(store: Store, project: int,
+                                      story: int) -> str | None:
     pattern = re.compile(
         rf"(?m)^## Story replacement\s*$\n\s*"
         rf"^decision: approved\s*$\n\s*"
         rf"^actor: @[A-Za-z0-9-]+\s*$\n\s*"
         rf"^replaces: #{story}\s*$\n\s*"
-        rf"^reason: final-poison\s*$")
+        rf"^reason: (final-poison|owner-cancelled-poison)\s*$")
+    reasons = [match.group(1)
+               for comment in store.list_comments(project)
+               if (match := pattern.search(comment.get("body") or ""))]
+    return reasons[-1] if reasons else None
+
+
+def _owner_cancelled(store: Store, story: int) -> bool:
+    pattern = re.compile(
+        r"(?m)^## Cancellation decision\s*$\n\s*"
+        r"^actor: @[A-Za-z0-9-]+\s*$\n\s*"
+        r"^decision: cancel\s*$")
     return any(pattern.search(comment.get("body") or "")
-               for comment in store.list_comments(project))
+               for comment in store.list_comments(story))
+
+
+def _attempt(body: str) -> int | None:
+    values = section_lines(body, "Attempt")
+    if len(values) != 1 or not re.fullmatch(r"[0-9]+", values[0]):
+        return None
+    return int(values[0])
 
 
 def _poison_count(store: Store, story: int) -> int:
@@ -113,7 +132,7 @@ def _dependency_numbers(story_body: str) -> set[int]:
 def _validate_story_identity_change(store: Store, trigger: dict,
                                     output_by_key: dict[str, dict],
                                     issues: list[dict]) -> None:
-    """Allow only one human-authorized replacement after final poisoning."""
+    """Allow one bounded, human-authorized replacement of retired work."""
     project = trigger["number"]
     live_project = store.get_issue(project)
     declared = _declared_story_numbers(live_project.get("body") or "")
@@ -147,19 +166,27 @@ def _validate_story_identity_change(store: Store, trigger: dict,
     ]
     if historical_new:
         raise ArtifactError("replacement Story identity was already used")
-    if (str(old.get("state", "")).lower() != "closed"
-            or str(old.get("state_reason", "")).lower() != "not_planned"
-            or "story:blocked:poison" not in label_names(old)
-            or _poison_count(store, old["number"]) < 3):
+    reason = _replacement_authorization_reason(store, project, old["number"])
+    if reason is None:
         raise ArtifactError(
-            "Story replacement requires a closed final-poison Story")
+            "Story replacement requires structured human authorization")
+    retired = (str(old.get("state", "")).lower() == "closed"
+               and str(old.get("state_reason", "")).lower() == "not_planned")
+    final_poison = (reason == "final-poison"
+                    and "story:blocked:poison" in label_names(old)
+                    and _poison_count(store, old["number"]) >= 3)
+    owner_cancelled_poison = (
+        reason == "owner-cancelled-poison"
+        and "story:cancelled" in label_names(old)
+        and _attempt(old.get("body") or "") == 3
+        and _poison_count(store, old["number"]) >= 1
+        and _owner_cancelled(store, old["number"]))
+    if not retired or not (final_poison or owner_cancelled_poison):
+        raise ArtifactError(
+            "Story replacement requires an eligible closed retired Story")
     if "project:planning" not in label_names(live_project):
         raise ArtifactError(
             "Story replacement requires the Project to be in planning")
-    if not _replacement_authorized(store, project, old["number"]):
-        raise ArtifactError(
-            "Story replacement requires structured human authorization")
-
     for key, item in existing_by_key.items():
         if key == old_key or old["number"] not in _dependency_numbers(item.get("body") or ""):
             continue
