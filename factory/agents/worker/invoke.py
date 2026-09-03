@@ -43,7 +43,7 @@ from factory.capacity_pool.policy import POLICIES, resolved_registry  # noqa: E4
 from factory.capacity_pool.providers import (  # noqa: E402
     InvocationPayload, cli_adapter, provider_environment,
 )
-from factory.capacity_pool.state import CapacityState  # noqa: E402
+from factory.capacity_pool.state import CapacityState, default_state_path  # noqa: E402
 from factory.runtime import operating_envelope  # noqa: E402
 
 DEFAULT_TIMEOUT = 3600
@@ -210,9 +210,7 @@ def parse_bounds(body: str) -> Bounds:
 
 
 def capacity_state_path(environ=None) -> pathlib.Path:
-    env = os.environ if environ is None else environ
-    configured = env.get("FACTORY_CAPACITY_STATE", "").strip()
-    return pathlib.Path(configured) if configured else ROOT / "runs" / "capacity-pool.sqlite"
+    return default_state_path(ROOT, environ)
 
 
 def state_version(events: list[dict]) -> str:

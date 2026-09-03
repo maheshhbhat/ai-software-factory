@@ -592,6 +592,8 @@ class TestPollOnce(unittest.TestCase):
         failure = poller.WorkerLaunchFailed("worker exited 1", definite=True)
         with mock.patch.object(poller, "run_dispatcher", return_value=REPORT), \
              mock.patch.object(poller, "wake_worker", side_effect=failure), \
+             mock.patch.object(poller, "release_unstarted_reservation",
+                               return_value=False), \
              mock.patch.object(poller.dispatcher, "release_definite_failure",
                                return_value=(True, "released")) as release:
             result = poller.poll_once("o/r", 54, set())

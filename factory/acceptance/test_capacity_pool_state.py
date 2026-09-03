@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from factory.capacity_pool.state import CapacityState
+from factory.capacity_pool.state import CapacityState, default_state_path
 
 
 class Clock:
@@ -22,6 +22,30 @@ class CapacityStateTests(unittest.TestCase):
     def tearDown(self):
         self.state.close()
         self.tmp.cleanup()
+
+    def test_default_state_path_is_shared_by_primary_and_linked_worktrees(self):
+        root = Path(self.tmp.name) / "primary"
+        common = root / ".git"
+        linked = Path(self.tmp.name) / "linked"
+        worktree_git = common / "worktrees" / "linked"
+        worktree_git.mkdir(parents=True)
+        linked.mkdir()
+        (linked / ".git").write_text(f"gitdir: {worktree_git}\n")
+        (worktree_git / "commondir").write_text("../..\n")
+
+        expected = common.resolve() / "factory" / "capacity-pool.sqlite"
+        self.assertEqual(expected, default_state_path(root, {}))
+        self.assertEqual(expected, default_state_path(linked, {}))
+
+    def test_default_state_path_honors_override_and_non_git_fallback(self):
+        root = Path(self.tmp.name) / "plain"
+        root.mkdir()
+        self.assertEqual(
+            Path("/tmp/operator-capacity.sqlite"),
+            default_state_path(
+                root, {"FACTORY_CAPACITY_STATE": "/tmp/operator-capacity.sqlite"}))
+        self.assertEqual(root / "runs" / "capacity-pool.sqlite",
+                         default_state_path(root, {}))
 
     def test_cooldown_requires_probe_and_probe_success_for_health(self):
         value = self.state.mark_failure("openai", "terra", "rate-limited",

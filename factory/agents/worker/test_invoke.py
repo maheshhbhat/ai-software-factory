@@ -41,7 +41,7 @@ class ParsingTests(unittest.TestCase):
 
 class BoundaryTests(unittest.TestCase):
     def test_default_capacity_state_is_factory_owned_not_product_owned(self):
-        self.assertEqual(invoke.ROOT / "runs" / "capacity-pool.sqlite",
+        self.assertEqual(invoke.default_state_path(invoke.ROOT, {}),
                          invoke.capacity_state_path({}))
         self.assertEqual(pathlib.Path("/tmp/shared.sqlite"),
                          invoke.capacity_state_path(
