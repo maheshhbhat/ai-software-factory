@@ -497,6 +497,43 @@ class FailedWorkCheckpointTests(unittest.TestCase):
     def test_failed_durable_pr_write_preserves_recovery_pair(self):
         self._assert_execute_recovery_cleanup(create_pr_fails=True)
 
+    def test_no_attempt_retry_preserves_original_worker_provenance(self):
+        class State:
+            health = None
+            @staticmethod
+            def models_for_task_prefix(*_args, **_kwargs): return ()
+
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = RecordingRunner(["src/app.py"])
+            base = "d" * 40
+            patch = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"),
+                repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit=base,
+                scope=["src/app.py"], mutation_state="post-mutation",
+                terminal_outcome="started-mid-work-failed",
+                originating_worker=self.WORKER, runner=runner))
+            manifest = invoke.recovery_manifest(patch)
+            original = manifest.read_bytes()
+            result = SimpleNamespace(
+                outcome="no-eligible-capacity", output="", attempts=(),
+                terminal_outcome="not-admitted")
+            executor = mock.Mock()
+            executor.execute.return_value = result
+            with mock.patch.object(invoke, "CapacityExecutor",
+                                   return_value=executor), \
+                 mock.patch.object(invoke, "cli_adapter", return_value=mock.Mock()):
+                with self.assertRaisesRegex(invoke.DeliveryError,
+                                            "no-eligible-capacity"):
+                    invoke.execute(
+                        "owner/repo", 214, "token", pathlib.Path("/checkout"),
+                        runner=runner, client=FakeClient(), state=State(),
+                        registry=[SimpleNamespace(provider="openai")])
+            self.assertEqual(original, manifest.read_bytes())
+            self.assertEqual(self.WORKER,
+                             json.loads(original)["originating_worker"])
+
     def _assert_execute_recovery_cleanup(self, *, create_pr_fails):
         class State:
             health = None

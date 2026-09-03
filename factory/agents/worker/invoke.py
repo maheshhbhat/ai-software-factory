@@ -507,6 +507,28 @@ def remove_recovery(patch: pathlib.Path) -> None:
     recovery_manifest(patch).unlink()
 
 
+def recovered_work_state(worktree: pathlib.Path, paths: list[str]) -> str:
+    """Digest the exact recovered file state without trusting Git metadata."""
+    digest = hashlib.sha256()
+    for relative in sorted(paths):
+        path = worktree / relative
+        digest.update(relative.encode("utf-8") + b"\0")
+        try:
+            metadata = path.lstat()
+        except FileNotFoundError:
+            digest.update(b"missing\0")
+            continue
+        digest.update(f"{stat.S_IFMT(metadata.st_mode)}:{stat.S_IMODE(metadata.st_mode)}"
+                      .encode("ascii") + b"\0")
+        if path.is_symlink():
+            digest.update(os.readlink(path).encode("utf-8") + b"\0")
+        elif path.is_file():
+            digest.update(path.read_bytes() + b"\0")
+        else:
+            raise DeliveryError(f"recovered path is not a file: {relative}")
+    return digest.hexdigest()
+
+
 def checkpoint_failed_work(worktree: pathlib.Path, checkout: pathlib.Path, *,
                            repo: str, story_number: int, default: str,
                            base_ref: str, base_commit: str,
@@ -697,15 +719,18 @@ def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
     originating_worker = {"task": task_key}
     with tempfile.TemporaryDirectory(prefix=f"factory-story-{story_number}-") as temp:
         worktree = pathlib.Path(temp)
+        recovery_context = {"present": False}
+        restored_state = None
         git(["worktree", "add", "--detach", str(worktree), base_ref], checkout,
             runner=runner)
         try:
-            recovery_context = {"present": False}
             if has_recovery:
                 recovery_context = restore_failed_work(
                     saved_recovery, worktree, repo=repo,
                     story_number=story_number, base_commit=base_commit,
                     scope=scope, runner=runner)
+                restored_state = recovered_work_state(
+                    worktree, recovery_context["recovered_paths"])
             value["recovery_context"] = recovery_context
             prompt = worker_prompt(value)
             owns_state = state is None
@@ -815,15 +840,24 @@ def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
             head = git(["rev-parse", "HEAD"], worktree, runner=runner).stdout.strip()
         except Exception as exc:
             try:
-                ref = checkpoint_failed_work(
-                    worktree, checkout, repo=repo, story_number=story_number,
-                    default=default, base_ref=base_ref, base_commit=base_commit,
-                    scope=scope,
-                    mutation_state="post-mutation",
-                    terminal_outcome=(getattr(exc, "terminal_outcome", "") or
-                                      "worker-wrapper-failed"),
-                    originating_worker=originating_worker,
-                    runner=runner)
+                recovered_paths = recovery_context.get("recovered_paths", [])
+                recovery_is_unchanged = (
+                    has_recovery and restored_state is not None and
+                    recovered_work_state(worktree, recovered_paths) == restored_state and
+                    sorted(changed_paths(worktree, base_ref, runner=runner)) ==
+                    sorted(recovered_paths))
+                if recovery_is_unchanged:
+                    ref = str(saved_recovery)
+                else:
+                    ref = checkpoint_failed_work(
+                        worktree, checkout, repo=repo, story_number=story_number,
+                        default=default, base_ref=base_ref, base_commit=base_commit,
+                        scope=scope,
+                        mutation_state="post-mutation",
+                        terminal_outcome=(getattr(exc, "terminal_outcome", "") or
+                                          "worker-wrapper-failed"),
+                        originating_worker=originating_worker,
+                        runner=runner)
             except Exception as checkpoint_error:
                 # A checkpoint failure must never turn known work into a
                 # definite no-start. Keep the original failure, block fallback,
