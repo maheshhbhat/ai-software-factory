@@ -5,6 +5,14 @@ decision points called **bells**; everything else runs on the rails. The value
 of the whole system rests on those decisions being real, so the rules below are
 about protecting them.
 
+## Use the shared Factory Operator Administrator role
+
+When asked to operate, administer, resume, pause, monitor, rescue, review,
+close out, hand off, or improve the factory, use the
+`factory-operator-administrator` skill. It is the same engine-neutral role used
+by Codex and other engines. On takeover, verify the local handoff against
+GitHub, repository, run, and process evidence before acting.
+
 ## Run bell-check before any decision reaches Mahesh
 
 **Trigger — invoke the `bell-check` skill automatically, without being asked,

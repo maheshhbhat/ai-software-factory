@@ -1,0 +1,4 @@
+interface:
+  display_name: "Factory Operator Administrator"
+  short_description: "Operate, hand off, and improve the factory safely"
+  default_prompt: "Inspect authoritative factory state, explain it plainly, and take the next authorized operator action."
