@@ -52,6 +52,7 @@ MARKER = "worker-artifact"
 SECTION = r"^### {name}\s*$\n(.*?)(?=^### |\Z)"
 STORY_LINK = re.compile(r"(?m)^Story: #(\d+)$")
 START_MARKER = "<!-- factory-worker-start:v1 -->"
+FAILURE_MARKER = "FACTORY_WORKER_FAILURE_V1="
 
 
 class DeliveryError(RuntimeError):
@@ -62,9 +63,13 @@ class DeliveryError(RuntimeError):
     that report is the only place those tokens are ever counted.
     """
 
-    def __init__(self, message: str, output: str = ""):
+    def __init__(self, message: str, output: str = "", *,
+                 mutation_state: str = "none", terminal_outcome: str = ""):
         super().__init__(message)
         self.output = output
+        self.mutation_state = mutation_state
+        self.terminal_outcome = terminal_outcome
+        self.recovery_ref = ""
 
 
 def platform_diagnostics(checkout: pathlib.Path) -> dict:
@@ -409,6 +414,38 @@ def protected_control_scope(repo: str, scope: list[str]) -> list[str]:
     return merge_gate.protected_factory_scope(scope)
 
 
+def recovery_patch(repo: str, story_number: int, environ=None) -> pathlib.Path:
+    """Stable host-local checkpoint used only after a worker changed files."""
+    environ = os.environ if environ is None else environ
+    root = pathlib.Path(environ.get(
+        "FACTORY_RECOVERY_DIR", str(ROOT / ".runtime" / "worker-recovery")))
+    return root / repo.replace("/", "--") / f"story-{story_number}.patch"
+
+
+def checkpoint_failed_work(worktree: pathlib.Path, checkout: pathlib.Path, *,
+                           repo: str, story_number: int, default: str,
+                           scope: list[str],
+                           runner=subprocess.run) -> str:
+    """Preserve authorized in-scope edits before removing the temp worktree.
+
+    The checkpoint is host-local and unreviewed. It is never pushed or merged.
+    A later launch for the same Story applies it, then runs the normal scope,
+    test, commit, push, and review path.
+    """
+    paths = changed_paths(worktree, f"origin/{default}", runner=runner)
+    if not paths or merge_gate.paths_out_of_scope(paths, scope):
+        return ""
+    git(["add", "--", *paths], worktree, runner=runner)
+    patch = git(["diff", "--binary", "--cached", f"origin/{default}"],
+                worktree, runner=runner).stdout
+    if not patch:
+        return ""
+    target = recovery_patch(repo, story_number)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(patch, encoding="utf-8")
+    return str(target)
+
+
 def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
             *, timeout: int | None = None, max_usd: float | None = None,
             runner=subprocess.run, client: GitHub | None = None,
@@ -457,6 +494,7 @@ def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
         git(["fetch", "origin", f"refs/heads/{branch}:refs/remotes/origin/{branch}"],
             checkout, runner=runner)
     base_ref = f"origin/{branch}" if remote else f"origin/{default}"
+    saved_recovery = recovery_patch(repo, story_number)
     value = build_input(client, story, project, repo=repo,
                         pull_request=pulls[0] if pulls else None)
     packet = value["correction_context"]
@@ -471,6 +509,10 @@ def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
         git(["worktree", "add", "--detach", str(worktree), base_ref], checkout,
             runner=runner)
         try:
+            if saved_recovery.is_file():
+                git(["apply", "--index", str(saved_recovery)], worktree,
+                    runner=runner)
+                git(["reset"], worktree, runner=runner)
             prompt = (HERE.joinpath("prompt.md").read_text()
                       + "\n\n## Invocation input\n\n" + json.dumps(value, indent=2))
             owns_state = state is None
@@ -540,7 +582,11 @@ def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
                 if result.outcome != "success":
                     detail = f": {runlog.tail(result.output)}" if result.output else ""
                     raise DeliveryError(
-                        f"delivery capacity failed: {result.outcome}{detail}")
+                        f"delivery capacity failed: {result.outcome}{detail}",
+                        result.output, mutation_state=(
+                            result.attempts[-1]["mutation_state"]
+                            if result.attempts else "none"),
+                        terminal_outcome=result.terminal_outcome)
             finally:
                 if owns_state:
                     state.close()
@@ -565,9 +611,30 @@ def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
             git(["push", "origin", f"HEAD:refs/heads/{branch}"], worktree,
                 runner=runner)
             head = git(["rev-parse", "HEAD"], worktree, runner=runner).stdout.strip()
+        except Exception as exc:
+            try:
+                ref = checkpoint_failed_work(
+                    worktree, checkout, repo=repo, story_number=story_number,
+                    default=default, scope=scope, runner=runner)
+            except Exception as checkpoint_error:
+                # A checkpoint failure must never turn known work into a
+                # definite no-start. Keep the original failure, block fallback,
+                # and include the preservation error in its diagnostic.
+                setattr(exc, "mutation_state", "ambiguous")
+                prior = getattr(exc, "output", "")
+                setattr(exc, "output", (prior + "\ncheckpoint failed: " +
+                                         str(checkpoint_error)).strip())
+                ref = ""
+            if ref:
+                setattr(exc, "mutation_state", "post-mutation")
+                setattr(exc, "recovery_ref", ref)
+            raise
         finally:
             git(["worktree", "remove", "--force", str(worktree)], checkout,
                 runner=runner)
+
+    if saved_recovery.is_file():
+        saved_recovery.unlink()
 
     body = f"Story: #{story_number}\n\n{durable}\n"
     if pulls:
@@ -617,6 +684,11 @@ def main(argv=None) -> int:
         output = getattr(exc, "output", "")
         if output:
             print(f"engine output tail:\n{runlog.tail(output)}", file=sys.stderr)
+        print(FAILURE_MARKER + json.dumps({
+            "mutation_state": getattr(exc, "mutation_state", "none"),
+            "terminal_outcome": getattr(exc, "terminal_outcome", ""),
+            "recovery_ref": getattr(exc, "recovery_ref", ""),
+        }, sort_keys=True), file=sys.stderr)
         return 1
     print(json.dumps(result.__dict__, sort_keys=True))
     return 0

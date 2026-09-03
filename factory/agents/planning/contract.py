@@ -37,6 +37,30 @@ PROJECT_KEYS = frozenset({
 ENVELOPE_CATEGORIES = ("representative-input", "responsiveness",
                        "external-provider", "work-bound", "degradation")
 
+BROWSER_ASSURANCE_TERMS = ("chrome", "real-browser", "named-browser")
+ESTABLISHED_BROWSER_TOOLS = ("playwright", "selenium", "webdriver", "cypress",
+                             "puppeteer")
+RAW_BROWSER_LAUNCH_PATTERNS = (
+    r"google chrome\.app", r"\bchrome_bin\b", r"--dump-dom",
+    r"--remote-debugging", r"child_process", r"\bspawn\s*\(",
+    r"\bexecfile\s*\(",
+)
+
+
+def proposes_raw_browser_launcher(text: str) -> bool:
+    """True only when a plan proposes a raw launcher, not when it forbids one."""
+    for sentence in re.split(r"[.\n;]+", text):
+        if not any(re.search(pattern, sentence, re.I)
+                   for pattern in RAW_BROWSER_LAUNCH_PATTERNS):
+            continue
+        if re.search(
+                r"\b(?:do not|does not|must not|never|without|forbid(?:s|den)?|"
+                r"reject(?:s|ed)?|prevent(?:s|ed)?|fail(?:s|ed)? if|block(?:s|ed)?)\b",
+                sentence, re.I):
+            continue
+        return True
+    return False
+
 CAMPAIGN_JSON_SCHEMA = {
     "type": "object", "additionalProperties": False,
     "properties": {
@@ -215,6 +239,36 @@ def validate_output(altitude: Altitude, value: dict) -> dict:
                 *[str(item) for item in (story.get("acceptance_criteria") or [])],
                 *[str(item) for item in (story.get("scope") or [])],
             ]).lower()
+            if any(term in story_surface for term in BROWSER_ASSURANCE_TERMS):
+                if proposes_raw_browser_launcher(story_surface):
+                    raise ContractError(
+                        f"Story {story.get('key')!r} proposes a raw browser launcher; "
+                        "use an established browser-testing tool")
+                if not any(tool in story_surface for tool in ESTABLISHED_BROWSER_TOOLS):
+                    raise ContractError(
+                        f"Story {story.get('key')!r} promises named-browser assurance "
+                        "without an established browser-testing tool")
+                if "headless" not in story_surface:
+                    raise ContractError(
+                        f"Story {story.get('key')!r} promises named-browser assurance "
+                        "without headless execution")
+                if not any(term in story_surface for term in
+                           ("github actions", "linux runner", "ci runner",
+                            ".github/workflows")):
+                    raise ContractError(
+                        f"Story {story.get('key')!r} promises named-browser assurance "
+                        "without a supported CI or Linux runner")
+                if "favicon" not in story_surface:
+                    raise ContractError(
+                        f"Story {story.get('key')!r} promises named-browser web "
+                        "assurance without checking favicon handling")
+                if ("console error" in story_surface and
+                        not any(term in story_surface for term in
+                                ("failed request", "request failure", "network error",
+                                 "http error"))):
+                    raise ContractError(
+                        f"Story {story.get('key')!r} checks console errors but not failed "
+                        "page requests such as missing assets")
             surface_terms = {
                 "browser": ("browser", "chrome", "dom", "page", "click", "render", "ui"),
                 "provider": ("provider", "live", "network", "http", "fetch", "parse"),

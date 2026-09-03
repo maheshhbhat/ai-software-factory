@@ -219,13 +219,18 @@ class RecordingRunner:
     def __call__(self, cmd, **kwargs):
         self.calls.append((list(cmd), kwargs.get("env")))
         out = ""
+        code = 0
         if cmd[:3] == ["git", "diff", "--name-only"]:
             out = "\n".join(self.changed)
+        elif cmd[:3] == ["git", "status", "--porcelain"]:
+            out = "\n".join(f" M {path}" for path in self.changed)
+        elif cmd[:4] == ["git", "diff", "--binary", "--cached"]:
+            out = "diff --git a/src/app.py b/src/app.py\n"
         elif cmd[:2] == ["git", "rev-parse"]:
             out = "deadbeef\n"
         elif cmd[0] in ("claude", "codex"):
             out = self.engine_output
-        return subprocess.CompletedProcess(cmd, 0, out, "")
+        return subprocess.CompletedProcess(cmd, code, out, "")
 
     def environment_for(self, predicate):
         found = [env for cmd, env in self.calls if predicate(cmd)]
@@ -270,6 +275,30 @@ class FactorySelfModificationTests(unittest.TestCase):
                 "owner/ai-software-factory", [".github/workflows/tests.yml"]),
             [".github/workflows/tests.yml"],
         )
+
+
+class FailedWorkCheckpointTests(unittest.TestCase):
+    def test_in_scope_changes_are_committed_to_a_stable_local_recovery_ref(self):
+        runner = RecordingRunner(["src/app.py"])
+        with tempfile.TemporaryDirectory() as recovery:
+            with mock.patch.dict(invoke.os.environ,
+                                 {"FACTORY_RECOVERY_DIR": recovery}):
+                ref = invoke.checkpoint_failed_work(
+                    pathlib.Path("/worktree"), pathlib.Path("/checkout"),
+                    repo="owner/repo", story_number=214, default="main",
+                    scope=["src/app.py"], runner=runner)
+        self.assertTrue(ref.endswith("owner--repo/story-214.patch"))
+        commands = [command for command, _ in runner.calls]
+        self.assertIn(["git", "add", "--", "src/app.py"], commands)
+
+    def test_out_of_scope_changes_are_not_checkpointed(self):
+        runner = RecordingRunner(["secrets.txt"])
+        ref = invoke.checkpoint_failed_work(
+            pathlib.Path("/worktree"), pathlib.Path("/checkout"), repo="owner/repo",
+            story_number=214, default="main", scope=["src/app.py"], runner=runner)
+        self.assertEqual("", ref)
+        self.assertFalse(any(command[:2] == ["git", "add"]
+                             for command, _ in runner.calls))
 
 
 class ProductCheckoutTests(unittest.TestCase):

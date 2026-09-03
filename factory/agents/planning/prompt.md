@@ -212,6 +212,21 @@ browser-testing tool unless that mechanism already exists in the product
 repository and repository evidence proves it reliable for every promised check.
 Do not make Delivery discover missing browser tooling through retries.
 
+The deterministic Planning contract rejects direct application launchers such
+as `Google Chrome.app`, `CHROME_BIN`, `child_process`, `spawn`, `execFile`,
+remote-debugging commands, and `--dump-dom`. A named-browser plan must name an
+established tool, headless execution, and a supported CI or Linux runner. When
+the promise includes zero page-generated console errors, the executable check
+must also capture failed page requests and name the failed URL. This covers
+browser-generated asset requests, including a missing favicon, without forcing
+non-web products to carry an icon requirement.
+
+For a browser-tested web application, include favicon handling in the planned
+product surface and in the failed-request assurance. The application may serve
+a declared icon or intentionally return a successful empty response for the
+conventional `/favicon.ico` request. Do not require this web asset from a
+non-web product.
+
 Return this exact JSON shape (ordinary JSON, no Markdown fence). Story `key`
 values are invocation-local identifiers; `depends_on` contains those keys, not
 GitHub numbers—the writer resolves them after issue creation:

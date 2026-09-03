@@ -155,9 +155,60 @@ Text fallback."""
             contract.validate_output(contract.Altitude.PROJECT, value)
 
         story["title"] = "Browser scenario assurance"
-        story["spec"] = "Exercise the browser page and its rendered UI."
-        story["scope"] = ["src/browser-app.js"]
+        story["spec"] = ("Use Playwright headless branded Chrome in GitHub Actions. "
+                         "Fail on HTTP request failures, including favicon handling.")
+        story["scope"] = ["src/browser-app.js", ".github/workflows/tests.yml"]
         self.assertIs(value, contract.validate_output(contract.Altitude.PROJECT, value))
+
+    def test_named_browser_plan_blocks_raw_launchers_and_incomplete_assurance(self):
+        story = {
+            "key": "browser", "title": "Chrome browser assurance",
+            "spec": ("Use Playwright headless Chrome in GitHub Actions; capture failed "
+                     "requests and favicon handling."),
+            "phase": "hardening", "depends_on": [], "hazard": True,
+            "acceptance_criteria": ["Chrome page renders with zero console errors"],
+            "operating_envelope_ids": [], "operating_envelope_checks": [],
+            "scope": ["test/browser.test.js", ".github/workflows/tests.yml"],
+            "spend_cap": "$5 / 60 min",
+        }
+        value = {"altitude": "project", "acceptance_criteria": ["criterion"],
+                 "operating_envelope": [], "adr": {}, "stories": [story],
+                 "expected_bells": 2, "risks": "risk", "digest": self.DIGEST}
+        self.assertIs(value, contract.validate_output(contract.Altitude.PROJECT, value))
+
+        original = story["acceptance_criteria"]
+        story["acceptance_criteria"] = [
+            "Chrome page renders with zero console errors and must not use child_process"]
+        self.assertIs(value, contract.validate_output(contract.Altitude.PROJECT, value))
+        story["acceptance_criteria"] = original
+
+        for fragment, message in (
+            (" Launch Google Chrome.app with child_process spawn.", "raw browser launcher"),
+            ("", None),
+        ):
+            if message:
+                story["spec"] += fragment
+                with self.assertRaisesRegex(contract.ContractError, message):
+                    contract.validate_output(contract.Altitude.PROJECT, value)
+                story["spec"] = story["spec"].removesuffix(fragment)
+
+        for missing, message in (
+            ("Playwright", "established browser-testing tool"),
+            ("headless", "headless execution"),
+            ("GitHub Actions", "supported CI or Linux runner"),
+            ("favicon", "favicon handling"),
+            ("failed requests", "failed page requests"),
+        ):
+            original = story["spec"]
+            original_scope = story["scope"]
+            story["spec"] = original.replace(missing, "")
+            if missing == "GitHub Actions":
+                story["scope"] = ["test/browser.test.js"]
+            with self.subTest(missing=missing), self.assertRaisesRegex(
+                    contract.ContractError, message):
+                contract.validate_output(contract.Altitude.PROJECT, value)
+            story["spec"] = original
+            story["scope"] = original_scope
 
     def test_missing_or_mismatched_output_fails(self):
         with self.assertRaises(contract.ContractError):
