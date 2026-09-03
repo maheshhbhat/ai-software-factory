@@ -140,14 +140,15 @@ def repository_evidence(files: list[str], sources: dict[str, str]) -> dict:
                                     "evidence": (f"{source_path}:"
                                                  "productionOwners"),
                                 })
-        for line_number, line in enumerate(text.splitlines(), 1):
-            names = forbidden_dependency_assertions(line)
-            for name in names:
-                forbidden.add(name)
-                assertions.append({
-                    "kind": "forbidden-dependency", "name": name,
-                    "evidence": f"{source_path}:{line_number}",
-                })
+        if executable_test_path(source_path):
+            for line_number, line in enumerate(text.splitlines(), 1):
+                names = forbidden_dependency_assertions(line)
+                for name in names:
+                    forbidden.add(name)
+                    assertions.append({
+                        "kind": "forbidden-dependency", "name": name,
+                        "evidence": f"{source_path}:{line_number}",
+                    })
     return {"production_owners": owners,
             "forbidden_dependencies": sorted(forbidden),
             "policy_assertions": assertions}
@@ -155,6 +156,15 @@ def repository_evidence(files: list[str], sources: dict[str, str]) -> dict:
 
 DEPENDENCY_ACCESS = (r"(?:devDependencies|dependencies)(?:\?\.)?"
                      r"(?:\.([@A-Za-z0-9_/-]+)|\[['\"]([@A-Za-z0-9_./-]+)['\"]\])")
+
+
+def executable_test_path(path: str) -> bool:
+    """True for conventional executable test files, never prose or product source."""
+    lowered = path.lower()
+    name = pathlib.PurePosixPath(lowered).name
+    return (lowered.startswith(("test/", "tests/", "spec/", "specs/"))
+            or "/test/" in lowered or "/tests/" in lowered
+            or name.startswith("test_") or ".test." in name or ".spec." in name)
 
 
 def forbidden_dependency_assertions(line: str) -> set[str]:

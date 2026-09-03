@@ -290,6 +290,11 @@ class RepositoryCompatibilityTests(unittest.TestCase):
         with self.assertRaisesRegex(contract.ContractError, "does not resolve"):
             contract.validate_repository_compatibility(value, repository)
 
+    def test_scope_keeps_merge_gate_repository_relative_syntax(self):
+        value = self.plan(scope=["./app.js"])
+        with self.assertRaisesRegex(contract.ContractError, "does not resolve"):
+            contract.validate_repository_compatibility(value, self.repository())
+
     def test_claimed_existing_verification_path_must_resolve(self):
         value = self.plan(
             spec="Reuse the existing verification path `test/missing.js`.")
@@ -310,6 +315,19 @@ class RepositoryCompatibilityTests(unittest.TestCase):
     def test_explicitly_forbidden_dependency_is_rejected(self):
         value = self.plan(spec=(
             "Change winning allocation disclosure in app.js and add dependency playwright."))
+        with self.assertRaisesRegex(contract.ContractError,
+                                    "forbidden dependency 'playwright'"):
+            contract.validate_repository_compatibility(value, self.repository())
+
+    def test_later_prohibition_does_not_hide_forbidden_dependency_proposal(self):
+        value = self.plan(spec=(
+            "Use dependency playwright. Do not add a raw browser launcher."))
+        with self.assertRaisesRegex(contract.ContractError,
+                                    "forbidden dependency 'playwright'"):
+            contract.validate_repository_compatibility(value, self.repository())
+
+    def test_versioned_forbidden_dependency_is_rejected(self):
+        value = self.plan(spec="Add dependency playwright@1.40.0.")
         with self.assertRaisesRegex(contract.ContractError,
                                     "forbidden dependency 'playwright'"):
             contract.validate_repository_compatibility(value, self.repository())

@@ -106,6 +106,13 @@ class InvocationTests(unittest.TestCase):
         self.assertEqual(
             {"playwright"}, invoke.forbidden_dependency_assertions(line))
 
+    def test_assertion_shaped_text_outside_executable_tests_is_not_policy(self):
+        assertion = "assert.equal(packageJson.devDependencies.playwright, undefined);"
+        for path in ("README.md", "src/example.js"):
+            with self.subTest(path=path):
+                evidence = invoke.repository_evidence([path], {path: assertion})
+                self.assertEqual([], evidence["forbidden_dependencies"])
+
     def test_product_preflight_requires_exactly_one_nonempty_product(self):
         for client, error in ((Client(product_paths=[]), invoke.InvocationError),
                               (Client(product_paths=["product.md", "Product.md"]),

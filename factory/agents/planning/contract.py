@@ -347,12 +347,12 @@ def _story_text(story: dict) -> str:
 
 
 def _repository_path_resolves(pattern: str, files: set[str]) -> bool:
-    normalized = pattern.removeprefix("./").rstrip("/")
+    normalized = pattern.rstrip("/")
     return normalized in files or any(match_path(normalized, path) for path in files)
 
 
 def _scope_resolves(pattern: str, files: set[str]) -> bool:
-    normalized = pattern.removeprefix("./").rstrip("/")
+    normalized = pattern.rstrip("/")
     recursive_root = normalized[:-3].rstrip("/") if normalized.endswith("/**") else ""
     parent = normalized.rsplit("/", 1)[0] if "/" in normalized else ""
     new_file_beside_existing = (not re.search(r"[*?\[]", normalized)
@@ -365,7 +365,7 @@ def _scope_resolves(pattern: str, files: set[str]) -> bool:
 
 
 def _scope_authorizes(path: str, scope: list[str]) -> bool:
-    return any(match_path(pattern.removeprefix("./"), path)
+    return any(match_path(pattern, path)
                for pattern in scope if isinstance(pattern, str))
 
 
@@ -403,7 +403,7 @@ def validate_repository_compatibility(value: dict, repository: dict) -> dict:
     """Reject only contradictions mechanically established by repository facts."""
     if value.get("altitude") != Altitude.PROJECT.value:
         return value
-    files = {path.removeprefix("./") for path in repository.get("files", [])
+    files = {path for path in repository.get("files", [])
              if isinstance(path, str)}
     owners = _owner_facts(repository)
     forbidden = _forbidden_dependencies(repository)
@@ -435,14 +435,23 @@ def validate_repository_compatibility(value: dict, repository: dict) -> dict:
                 raise ContractError(
                     f"Story {key!r} promises behavior owned by {path!r} but omits "
                     "that production owner from scope")
-        for sentence in re.split(r"[\n;]+", text):
-            if re.search(r"\b(?:do not|must not|without|avoid|forbid)\b", sentence, re.I):
+        proposed = set()
+        for match in DEPENDENCY_PROPOSAL.finditer(text):
+            prefix = text[max(0, match.start() - 24):match.start()]
+            if re.search(r"\b(?:do not|must not|avoid|forbid)\s*$", prefix, re.I):
                 continue
-            proposed = {match.group(1).rstrip(".,").lower()
-                        for match in DEPENDENCY_PROPOSAL.finditer(sentence)}
-            contradicted = sorted(proposed if "*" in forbidden else proposed & forbidden)
-            if contradicted:
-                raise ContractError(
-                    f"Story {key!r} proposes forbidden dependency "
-                    f"{contradicted[0]!r} contrary to repository policy evidence")
+            proposed.add(_dependency_name(match.group(1)))
+        contradicted = sorted(proposed if "*" in forbidden else proposed & forbidden)
+        if contradicted:
+            raise ContractError(
+                f"Story {key!r} proposes forbidden dependency "
+                f"{contradicted[0]!r} contrary to repository policy evidence")
     return value
+
+
+def _dependency_name(value: str) -> str:
+    candidate = value.rstrip(".,").lower()
+    if candidate.startswith("@"):
+        separator = candidate.find("@", 1)
+        return candidate if separator < 0 else candidate[:separator]
+    return candidate.split("@", 1)[0]
