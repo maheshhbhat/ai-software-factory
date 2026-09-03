@@ -1079,13 +1079,22 @@ def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
                        runner=runner).stdout.strip()
             if has_recovery:
                 mark_recovery_push_pending(saved_recovery, head)
-            git(["push", "origin", f"HEAD:refs/heads/{branch}"], worktree,
-                runner=runner)
+            try:
+                git(["push", "origin", f"HEAD:refs/heads/{branch}"], worktree,
+                    runner=runner)
+            except Exception as exc:
+                if has_recovery:
+                    setattr(exc, "mutation_state", "ambiguous")
+                    setattr(exc, "terminal_outcome", "push-outcome-ambiguous")
+                    setattr(exc, "recovery_ref", str(saved_recovery))
+                raise
             if has_recovery:
                 mark_recovery_pushed(saved_recovery, head)
         except Exception as exc:
             try:
-                if isinstance(exc, RecoveryError):
+                if (isinstance(exc, RecoveryError) or
+                        (has_recovery and getattr(exc, "recovery_ref", "") ==
+                         str(saved_recovery))):
                     ref = str(saved_recovery)
                 else:
                     recovered_paths = recovery_context.get("recovered_paths", [])
