@@ -38,6 +38,7 @@ failed" is precisely how a system ends up with two workers writing to one branch
 from __future__ import annotations
 
 import os
+import json
 import re
 import shlex
 import signal
@@ -69,6 +70,7 @@ LAUNCH_TIMEOUT_SECONDS = 1800
 # the Story's cap on the engine, and this grace is the launcher's margin for
 # the worker's own setup and teardown around that.
 LAUNCH_GRACE_SECONDS = 120
+FAILURE_MARKER = "FACTORY_WORKER_FAILURE_V1="
 
 # The Story section and shape the cap is declared in — a regex mirror of
 # `factory/agents/worker/invoke.py parse_bounds()`, which owns the strict
@@ -413,11 +415,30 @@ def report_from(worker: str, completed, started: float) -> LaunchReport:
     deciding that separately is how one adapter quietly stops being diagnosable.
     """
     launched = completed.returncode == 0
+    failure = None
+    if not launched:
+        for line in reversed((completed.stderr or "").splitlines()):
+            if line.startswith(FAILURE_MARKER):
+                try:
+                    failure = json.loads(line.removeprefix(FAILURE_MARKER))
+                except (json.JSONDecodeError, TypeError):
+                    failure = None
+                break
+    post_mutation = bool(
+        failure and failure.get("mutation_state") not in {None, "", "none", "pre-mutation"})
+    result = (Result.LAUNCHED if launched else
+              Result.AMBIGUOUS if post_mutation else Result.FAILED)
+    if post_mutation:
+        detail = ("worker changed repository files before failing; fallback is blocked"
+                  + (f" and the work is preserved at {failure.get('recovery_ref')}"
+                     if failure.get("recovery_ref") else ""))
+    else:
+        detail = ((completed.stdout or "").strip()[:200] if launched else
+                  f"exit {completed.returncode}: {(completed.stderr or '').strip()[:200]}")
     return LaunchReport(
         worker,
-        Result.LAUNCHED if launched else Result.FAILED,
-        (completed.stdout or "").strip()[:200] if launched
-        else f"exit {completed.returncode}: {(completed.stderr or '').strip()[:200]}",
+        result,
+        detail,
         exit_code=completed.returncode,
         elapsed_ms=runlog.elapsed_ms(started),
         pid=getattr(completed, "pid", None),

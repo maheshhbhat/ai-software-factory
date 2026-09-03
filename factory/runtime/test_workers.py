@@ -56,6 +56,9 @@ def runner_by_command(mapping, default_code=0):
         outcome = mapping.get(key, default_code)
         if isinstance(outcome, BaseException):
             raise outcome
+        if isinstance(outcome, tuple):
+            code, stdout, stderr = outcome
+            return subprocess.CompletedProcess(cmd, code, stdout, stderr)
         return subprocess.CompletedProcess(cmd, outcome, "", "")
     _run.calls = calls
     return _run
@@ -186,6 +189,23 @@ class TestFailoverSafety(unittest.TestCase):
     def test_ambiguous_report_does_not_permit_fallback(self):
         self.assertFalse(w.LaunchReport("x", w.Result.AMBIGUOUS).may_fall_back)
         self.assertTrue(w.LaunchReport("x", w.Result.FAILED).may_fall_back)
+
+    def test_nonzero_exit_after_mutation_blocks_fallback_and_names_checkpoint(self):
+        stderr = ("delivery failed\n" + w.FAILURE_MARKER +
+                  '{"mutation_state":"post-mutation",'
+                  '"terminal_outcome":"started-mid-work-failed",'
+                  '"recovery_ref":"refs/heads/factory-recovery/story-64"}\n')
+        run = runner_by_command({
+            "/bin/claude": (1, "", stderr),
+            "/bin/codex": 0,
+        })
+        report, trail = w.dispatch_to_worker(
+            [self.claude, self.codex], 64, 55, runner=run)
+        self.assertIsNone(report)
+        launched = [item for item in trail if isinstance(item, w.LaunchReport)]
+        self.assertEqual([w.Result.AMBIGUOUS], [item.result for item in launched])
+        self.assertIn("factory-recovery/story-64", launched[0].detail)
+        self.assertNotIn("/bin/codex", [command[0] for command in run.calls])
 
     def test_all_workers_failing_launches_nobody(self):
         run = runner_by_command({"/bin/claude": 1, "/bin/codex": 1})
