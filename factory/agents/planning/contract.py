@@ -366,7 +366,12 @@ def _owner_facts(repository: dict) -> list[dict]:
         return [{"behavior": behavior, "path": path}
                 for behavior, paths in facts.items()
                 for path in ([paths] if isinstance(paths, str) else paths)]
-    return [item for item in facts if isinstance(item, dict)] if isinstance(facts, list) else []
+    if not isinstance(facts, list):
+        return []
+    return [item for item in facts
+            if isinstance(item, dict) and isinstance(item.get("path"), str)
+            and (isinstance(item.get("behavior"), str)
+                 or isinstance(item.get("story_key"), str))]
 
 
 def _forbidden_dependencies(repository: dict) -> set[str]:
@@ -414,11 +419,9 @@ def validate_repository_compatibility(value: dict, repository: dict) -> dict:
             path = fact.get("path")
             behavior = fact.get("behavior", fact.get("claim", ""))
             required_key = fact.get("story_key")
-            terms = fact.get("terms") or ([behavior] if behavior else [])
-            if isinstance(terms, str):
-                terms = [terms]
-            applies = (required_key == key or any(
-                isinstance(term, str) and term.lower() in lowered for term in terms))
+            applies = (required_key == key or
+                       isinstance(behavior, str) and bool(behavior)
+                       and behavior.lower() in lowered)
             if (applies and isinstance(path, str) and _path_resolves(path, files)
                     and not _scope_authorizes(path, scope)):
                 raise ContractError(

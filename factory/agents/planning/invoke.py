@@ -100,33 +100,46 @@ def read_repository(client: artifacts.GitHubStore) -> tuple[str, list[dict], dic
 
 
 def repository_evidence(files: list[str], sources: dict[str, str]) -> dict:
-    """Extract only explicit, mechanically checkable ownership and policy facts."""
+    """Extract explicit structured ownership and mechanically provable policy facts."""
     known = set(files)
     owners, forbidden, assertions = [], set(), []
     for source_path, text in sources.items():
-        if source_path.lower().endswith((".html", ".htm")):
-            for target in re.findall(
-                    r"<script\b[^>]*\bsrc\s*=\s*['\"]([^'\"]+)['\"]", text, re.I):
-                target = target.split("?", 1)[0].lstrip("./")
-                if target in known:
-                    owners.append({
-                        "path": target,
-                        "terms": ["browser", "visible", "render", "display", "ui",
-                                  "interaction", "text", "disclosure"],
-                        "evidence": f"{source_path} loads {target}",
-                    })
         if source_path.lower().endswith(".json"):
             try:
                 manifest = json.loads(text)
             except json.JSONDecodeError:
                 manifest = None
             if isinstance(manifest, dict):
-                for container in (manifest.get("factoryPolicy"), manifest.get("policy")):
+                containers = (manifest.get("factoryPlanning"),
+                              manifest.get("factoryPolicy"), manifest.get("policy"))
+                for container in containers:
                     if isinstance(container, dict):
                         values = container.get("forbiddenDependencies") or []
                         if isinstance(values, list):
                             forbidden.update(item for item in values
                                              if isinstance(item, str) and item)
+                        ownership = container.get("productionOwners") or []
+                        if isinstance(ownership, dict):
+                            ownership = [{"behavior": behavior, "path": path}
+                                         for behavior, path in ownership.items()]
+                        if isinstance(ownership, list):
+                            for fact in ownership:
+                                if not isinstance(fact, dict):
+                                    continue
+                                path = fact.get("path")
+                                behavior = fact.get("behavior")
+                                story_key = fact.get("storyKey", fact.get("story_key"))
+                                if (not isinstance(path, str) or path not in known
+                                        or not ((isinstance(behavior, str) and behavior)
+                                                or (isinstance(story_key, str)
+                                                    and story_key))):
+                                    continue
+                                owners.append({
+                                    "path": path, "behavior": behavior or "",
+                                    "story_key": story_key or "",
+                                    "evidence": (f"{source_path}:"
+                                                 "productionOwners"),
+                                })
         for line_number, line in enumerate(text.splitlines(), 1):
             lowered = line.lower()
             if not re.search(r"\b(?:assert|expect)\b", lowered):

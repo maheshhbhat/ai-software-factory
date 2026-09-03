@@ -72,11 +72,21 @@ class InvocationTests(unittest.TestCase):
              "app.js": "export const render = () => {};",
              "test/policy.test.js": (
                  "assert.equal(packageJson.devDependencies.playwright, undefined);"),
-             "package.json": json.dumps({"factoryPolicy": {
-                 "forbiddenDependencies": ["puppeteer"]}})})
+             "package.json": json.dumps({
+                 "factoryPlanning": {"productionOwners": [{
+                     "behavior": "winning allocation disclosure",
+                     "path": "app.js"}]},
+                 "factoryPolicy": {"forbiddenDependencies": ["puppeteer"]}})})
         self.assertEqual("app.js", evidence["production_owners"][0]["path"])
         self.assertEqual(["playwright", "puppeteer"],
                          evidence["forbidden_dependencies"])
+
+    def test_html_script_relationship_does_not_infer_production_ownership(self):
+        evidence = invoke.repository_evidence(
+            ["index.html", "app.js"],
+            {"index.html": '<script type="module" src="/app.js"></script>',
+             "app.js": "export const render = () => {};"})
+        self.assertEqual([], evidence["production_owners"])
 
     def test_product_preflight_requires_exactly_one_nonempty_product(self):
         for client, error in ((Client(product_paths=[]), invoke.InvocationError),
