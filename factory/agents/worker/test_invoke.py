@@ -553,6 +553,33 @@ class FailedWorkCheckpointTests(unittest.TestCase):
                                 ["git", "diff", "--binary", "--cached"]
                                 for command, _ in runner.calls))
 
+    def test_restore_checks_out_the_staged_gitlink_before_validation(self):
+        class GitlinkRunner(RecordingRunner):
+            def __call__(self, cmd, **kwargs):
+                result = super().__call__(cmd, **kwargs)
+                if cmd[:3] == ["git", "ls-files", "--stage"]:
+                    return subprocess.CompletedProcess(
+                        cmd, 0, "160000 " + "c" * 40 + " 0\tvendor/lib\n", "")
+                return result
+
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = GitlinkRunner(["vendor/lib"])
+            ref = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"),
+                repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit=self.BASE,
+                scope=["vendor/lib"], mutation_state="post-mutation",
+                terminal_outcome="started-mid-work-failed",
+                originating_worker=self.WORKER, runner=runner))
+            invoke.restore_failed_work(
+                ref, pathlib.Path("/new"), repo="owner/repo", story_number=214,
+                base_commit=self.BASE, scope=["vendor/lib"], runner=runner)
+        self.assertIn(
+            ["git", "submodule", "update", "--init", "--checkout", "--",
+             "vendor/lib"],
+            [command for command, _ in runner.calls])
+
     def test_invalid_recovery_blocks_execute_before_engine_launch(self):
         with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
                 invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
@@ -607,6 +634,32 @@ class FailedWorkCheckpointTests(unittest.TestCase):
                 invoke.execute(
                     "owner/repo", 214, "token", pathlib.Path("/checkout"),
                     runner=runner, client=FakeClient())
+            self.assertEqual(str(patch), caught.exception.recovery_ref)
+
+    def test_durable_pr_replay_rejects_recovery_head_drift(self):
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = RecordingRunner(["src/app.py"])
+            patch = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"),
+                repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit=self.BASE,
+                scope=["src/app.py"], mutation_state="post-mutation",
+                terminal_outcome="started-mid-work-failed",
+                originating_worker=self.WORKER, runner=runner))
+            invoke.mark_recovery_pushed(patch, "b" * 40)
+            client = FakeClient()
+            client.created = {
+                "number": 9,
+                "body": "Story: #214\n\n" + invoke.marker(214, "5") + "\n",
+                "head": {"ref": "story/214-delivery", "sha": "c" * 40},
+            }
+            with self.assertRaisesRegex(invoke.RecoveryError,
+                                        "does not match") as caught:
+                invoke.execute(
+                    "owner/repo", 214, "token", pathlib.Path("/checkout"),
+                    runner=runner, client=client)
+            self.assertEqual("post-mutation", caught.exception.mutation_state)
             self.assertEqual(str(patch), caught.exception.recovery_ref)
 
     def test_successful_delivery_removes_recovery_pair_after_durable_pr(self):
@@ -690,22 +743,38 @@ class FailedWorkCheckpointTests(unittest.TestCase):
             )
             with patches[0], patches[1], patches[2]:
                 if create_pr_fails:
-                    with self.assertRaisesRegex(invoke.DeliveryError,
-                                                "durable PR write failed"):
+                    with self.assertRaisesRegex(
+                            invoke.DeliveryError,
+                            "durable PR write failed") as caught:
                         invoke.execute(
                             "owner/repo", 214, "token", pathlib.Path("/checkout"),
                             runner=runner, client=Client(), state=State(),
                             registry=[SimpleNamespace(provider="openai")])
+                    self.assertEqual("post-mutation",
+                                     caught.exception.mutation_state)
+                    self.assertEqual("delivery-finalization-failed",
+                                     caught.exception.terminal_outcome)
+                    self.assertEqual(str(patch), caught.exception.recovery_ref)
                     self.assertTrue(patch.exists())
                     self.assertTrue(invoke.recovery_manifest(patch).exists())
                     self.assertEqual(
                         base, json.loads(invoke.recovery_manifest(
                             patch).read_text())["delivered_head"])
+                    with self.assertRaisesRegex(
+                            invoke.DeliveryError,
+                            "durable PR write failed") as resumed:
+                        invoke.execute(
+                            "owner/repo", 214, "token", pathlib.Path("/checkout"),
+                            runner=runner, client=Client(), state=State(),
+                            registry=[SimpleNamespace(provider="openai")])
+                    self.assertEqual("post-mutation",
+                                     resumed.exception.mutation_state)
+                    self.assertEqual(str(patch), resumed.exception.recovery_ref)
+                    self.assertEqual(1, executor.execute.call_count)
                     invoke.execute(
                         "owner/repo", 214, "token", pathlib.Path("/checkout"),
                         runner=runner, client=FakeClient(), state=State(),
                         registry=[SimpleNamespace(provider="openai")])
-                    self.assertEqual(1, executor.execute.call_count)
                     self.assertFalse(patch.exists())
                     self.assertFalse(invoke.recovery_manifest(patch).exists())
                 else:

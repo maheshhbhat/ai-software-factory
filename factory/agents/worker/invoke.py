@@ -639,6 +639,32 @@ def recovered_work_state(worktree: pathlib.Path, paths: list[str], *,
     return digest.hexdigest()
 
 
+def checkout_recovered_gitlinks(worktree: pathlib.Path, paths: list[str], *,
+                                runner=subprocess.run) -> None:
+    """Make each staged gitlink's checked-out directory match the index."""
+    staged = git(["ls-files", "--stage", "--", *paths], worktree,
+                 runner=runner).stdout
+    gitlinks = []
+    for line in staged.splitlines():
+        metadata, separator, relative = line.partition("\t")
+        fields = metadata.split()
+        if separator and len(fields) == 3 and fields[0] == "160000":
+            gitlinks.append(relative)
+    if gitlinks:
+        # Tests and the worker must inspect the dependency revision that will
+        # actually be committed, not an older submodule checkout.
+        git(["submodule", "update", "--init", "--checkout", "--", *gitlinks],
+            worktree, runner=runner)
+
+
+def mark_finalization_failure(exc: Exception, patch: pathlib.Path) -> None:
+    """Keep a pushed recovery retry charged until its PR is durable."""
+    setattr(exc, "mutation_state", "post-mutation")
+    if not getattr(exc, "terminal_outcome", ""):
+        setattr(exc, "terminal_outcome", "delivery-finalization-failed")
+    setattr(exc, "recovery_ref", str(patch))
+
+
 def checkpoint_failed_work(worktree: pathlib.Path, checkout: pathlib.Path, *,
                            repo: str, story_number: int, default: str,
                            base_ref: str, base_commit: str,
@@ -734,6 +760,7 @@ def restore_failed_work(patch: pathlib.Path, worktree: pathlib.Path, *,
     except (AttributeError, TypeError, ValueError) as exc:
         raise RecoveryError("recovery checkpoint timestamp is invalid") from exc
     git(["apply", "--index", str(patch)], worktree, runner=runner)
+    checkout_recovered_gitlinks(worktree, paths, runner=runner)
     applied_paths = changed_paths(worktree, base_commit, runner=runner)
     if sorted(applied_paths) != sorted(paths):
         raise RecoveryError("recovery checkpoint patch paths do not match its manifest")
@@ -810,6 +837,11 @@ def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
             except RecoveryError as exc:
                 exc.recovery_ref = str(saved_recovery)
                 raise
+            if delivered_head is not None and delivered_head != pull["head"]["sha"]:
+                exc = RecoveryError(
+                    "durable recovery head does not match pull request head")
+                exc.recovery_ref = str(saved_recovery)
+                raise exc
             if delivered_head == pull["head"]["sha"]:
                 remove_recovery(saved_recovery)
         return Delivery(story_number, project_number, pull["head"]["ref"],
@@ -853,11 +885,15 @@ def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
                     "pushed recovery head does not match branch head")
                 exc.recovery_ref = str(saved_recovery)
                 raise exc
-            body = f"Story: #{story_number}\n\n{durable}\n"
-            pull = (client.update_pr(pulls[0]["number"], body) if pulls else
-                    client.create_pr(f"Story #{story_number}: bounded delivery",
-                                     branch, default, body))
-            fresh = read_back_pr(client, story_number, durable)
+            try:
+                body = f"Story: #{story_number}\n\n{durable}\n"
+                pull = (client.update_pr(pulls[0]["number"], body) if pulls else
+                        client.create_pr(f"Story #{story_number}: bounded delivery",
+                                         branch, default, body))
+                fresh = read_back_pr(client, story_number, durable)
+            except Exception as exc:
+                mark_finalization_failure(exc, saved_recovery)
+                raise
             obs.process_event(
                 "delivery.pull-request.written", trace_id=delivery_trace,
                 repo=repo, story=story_number, project=project_number,
@@ -1033,13 +1069,18 @@ def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
             git(["worktree", "remove", "--force", str(worktree)], checkout,
                 runner=runner)
 
-    body = f"Story: #{story_number}\n\n{durable}\n"
-    if pulls:
-        pull = client.update_pr(pulls[0]["number"], body)
-    else:
-        pull = client.create_pr(f"Story #{story_number}: bounded delivery",
-                                branch, default, body)
-    fresh = read_back_pr(client, story_number, durable)
+    try:
+        body = f"Story: #{story_number}\n\n{durable}\n"
+        if pulls:
+            pull = client.update_pr(pulls[0]["number"], body)
+        else:
+            pull = client.create_pr(f"Story #{story_number}: bounded delivery",
+                                    branch, default, body)
+        fresh = read_back_pr(client, story_number, durable)
+    except Exception as exc:
+        if has_recovery:
+            mark_finalization_failure(exc, saved_recovery)
+        raise
     obs.process_event("delivery.pull-request.written", trace_id=delivery_trace,
                       repo=repo, story=story_number, project=project_number,
                       pull_request=fresh["number"], head=head)
