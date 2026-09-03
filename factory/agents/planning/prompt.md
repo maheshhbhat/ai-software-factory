@@ -106,7 +106,10 @@ Produce exactly one coherent project plan:
      created executor must be authorized by the Story scope. `scope` identifies
      the relevant authorized path, `action` is the command or deterministic
      operation Delivery runs and must name that exact executor path, `expected`
-     is its observable success, and `failure` says how it reports failure;
+     is its observable success, and `failure` says how it reports failure. The
+     executor must use a conventional test-file path or `.github/workflows/*.yml`;
+     Delivery runs every automated action through its credential-free trusted
+     subprocess boundary after the canonical repository test command succeeds;
    - use a human record only when no deterministic executor is viable. It has
      exactly `type`, `scope`, `action`, `expected`, `failure`, and `reason`, with
      `type` equal to `human-bell`. State why automation is not viable in `reason`

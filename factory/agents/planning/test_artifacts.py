@@ -81,9 +81,9 @@ def campaign_output():
 
 def project_output():
     verification = json.dumps({
-        "type": "automated", "scope": "src/model/verification.py",
-        "executor": "src/model/verification.py", "executor_source": "create",
-        "action": "python3 src/model/verification.py",
+        "type": "automated", "scope": "src/model/test_verification.py",
+        "executor": "src/model/test_verification.py", "executor_source": "create",
+        "action": "python3 src/model/test_verification.py",
         "expected": "the example assertion passes",
         "failure": "the command exits nonzero",
     }, separators=(",", ":"), sort_keys=True)

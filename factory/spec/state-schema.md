@@ -222,9 +222,12 @@ Parsing rules — one canonical form per field, no alternates:
   `create`; `executor` is a concrete repository test or workflow path; and the
   remaining fields name the authorized surface, deterministic operation,
   observable success, and failure signal. The action names the exact executor
-  path, so a harmless command cannot be paired with an unrelated test. Planning rejects an `existing`
+  path as a shell-free command argument, so a passive command or unrelated file
+  cannot masquerade as a test. Planning rejects an `existing`
   executor absent from repository evidence and a `create` executor outside the
-  Story's Scope. A human-only object has exactly the string fields `type`,
+  Story's Scope. Delivery runs every automated command through its trusted,
+  credential-free subprocess boundary after the canonical repository suite and
+  before commit or push; a nonzero exit stops delivery. A human-only object has exactly the string fields `type`,
   `scope`, `action`, `expected`, `failure`, and `reason`, with `type` equal to
   `human-bell`. Its reason must state why deterministic automation is not viable,
   and each such record adds one to the Project's Expected bells. Missing,

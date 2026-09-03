@@ -28,6 +28,61 @@ class ParsingTests(unittest.TestCase):
                   {"event": "labeled", "label": {"name": "story:claimed"}, "id": 2}]
         self.assertEqual(invoke.state_version(events), "2")
 
+    def verification_body(self, **changes):
+        record = {
+            "type": "automated", "scope": "tests/check.py",
+            "executor": "tests/check.py", "executor_source": "create",
+            "action": "python3 tests/check.py", "expected": "exit zero",
+            "failure": "exit nonzero",
+        }
+        record.update(changes)
+        return ("### Acceptance notes\n\n- criterion || VERIFY "
+                + json.dumps(record) + "\n")
+
+    def test_trusted_wrapper_executes_every_automated_verification(self):
+        body = self.verification_body() + (
+            "- second || VERIFY " + json.dumps({
+                "type": "automated", "scope": "tests/other.test.js",
+                "executor": "tests/other.test.js", "executor_source": "existing",
+                "action": "node --test tests/other.test.js", "expected": "exit zero",
+                "failure": "exit nonzero",
+            }) + "\n")
+        calls = []
+        def runner(command, **kwargs):
+            calls.append((command, kwargs.get("env")))
+            return subprocess.CompletedProcess(command, 0, "", "")
+        with mock.patch.dict(os.environ, {"GH_TOKEN": "secret"}):
+            invoke.run_acceptance_verifications(
+                body, cwd=pathlib.Path("/product"), timeout=30, trace_id="trace",
+                repo="owner/product", story=1, project=2, runner=runner)
+        self.assertEqual([
+            ["python3", "tests/check.py"],
+            ["node", "--test", "tests/other.test.js"],
+        ], [command for command, _ in calls])
+        self.assertTrue(all("GH_TOKEN" not in environment for _, environment in calls))
+
+    def test_failed_acceptance_verification_stops_delivery(self):
+        def runner(command, **kwargs):
+            return subprocess.CompletedProcess(command, 1, "", "criterion failed")
+        with self.assertRaisesRegex(invoke.DeliveryError, "criterion failed"):
+            invoke.run_acceptance_verifications(
+                self.verification_body(), cwd=pathlib.Path("/product"), timeout=30,
+                trace_id="trace", repo="owner/product", story=1, project=2,
+                runner=runner)
+
+    def test_passive_command_and_non_test_executor_are_rejected(self):
+        for changes, message in (
+            ({"action": "echo tests/check.py"}, "does not invoke"),
+            ({"action": "python3 -c pass tests/check.py"}, "does not invoke"),
+            ({"action": "npm --help tests/check.py"}, "does not invoke"),
+            ({"scope": "README.md", "executor": "README.md",
+              "action": "cat README.md"}, "not a test or workflow"),
+        ):
+            with self.subTest(message=message), self.assertRaisesRegex(
+                    invoke.DeliveryError, message):
+                invoke.acceptance_verification_commands(
+                    self.verification_body(**changes))
+
     def test_linked_pr_is_unique(self):
         pulls = [{"number": 1, "body": "Story: #7\n"}]
         self.assertEqual(invoke.linked_prs(7, pulls), pulls)

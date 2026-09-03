@@ -329,14 +329,20 @@ class AcceptanceVerificationTests(unittest.TestCase):
     def test_automated_action_must_invoke_one_concrete_executor(self):
         for changes, message in (
             ({"action": "echo test/app.test.js"}, "does not invoke"),
+            ({"action": "python3 -c pass test/app.test.js"}, "does not invoke"),
+            ({"action": "npm --help test/app.test.js"}, "does not invoke"),
             ({"scope": "test/*.test.js", "executor": "test/*.test.js",
               "action": "node --test test/*.test.js"}, "one concrete path"),
+            ({"scope": "README.md", "executor": "README.md",
+              "action": "cat README.md"}, "not a test or workflow"),
         ):
             with self.subTest(message=message), self.assertRaisesRegex(
                     contract.ContractError, message):
                 contract.validate_output(
                     contract.Altitude.PROJECT,
-                    self.plan(self.record(**changes), scope=["app.js", "test/*.test.js"]),
+                    self.plan(self.record(**changes), scope=(
+                        ["README.md"] if changes.get("executor") == "README.md"
+                        else ["app.js", "test/*.test.js"])),
                     self.repository())
 
     def test_explicit_human_bell_is_accepted_and_counted(self):

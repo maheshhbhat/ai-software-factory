@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 import json
+import pathlib
 import re
 import shlex
 
@@ -57,9 +58,6 @@ AUTOMATED_VERIFICATION_FIELDS = frozenset({
 HUMAN_VERIFICATION_FIELDS = frozenset({
     "type", "scope", "action", "expected", "failure", "reason",
 })
-EXECUTOR_RUNNERS = frozenset({
-    "bash", "node", "npx", "npm", "python", "python3", "pytest", "sh",
-})
 SHELL_CONTROL_TOKENS = frozenset({"&&", "||", ";", "|", "&"})
 
 
@@ -76,6 +74,65 @@ def proposes_raw_browser_launcher(text: str) -> bool:
             continue
         return True
     return False
+
+
+def executable_verification_path(path: str) -> bool:
+    """True only for conventional tests and repository workflow definitions."""
+    lowered = path.lower()
+    name = pathlib.PurePosixPath(lowered).name
+    test = (lowered.startswith(("test/", "tests/", "spec/", "specs/"))
+            or "/test/" in lowered or "/tests/" in lowered
+            or name.startswith("test_") or ".test." in name or ".spec." in name)
+    workflow = (lowered.startswith(".github/workflows/")
+                and lowered.endswith((".yml", ".yaml")))
+    return test or workflow
+
+
+def automated_verification_command(record: dict, key=None) -> list[str]:
+    """Return one shell-free command that actively invokes its declared executor."""
+    executor = record["executor"]
+    if re.search(r"[*?\[\]{}]", executor):
+        raise ContractError(
+            f"Story {key!r} acceptance executor must be one concrete path")
+    if not executable_verification_path(executor):
+        raise ContractError(
+            f"Story {key!r} acceptance executor is not a test or workflow path")
+    try:
+        command = shlex.split(record["action"])
+    except ValueError as error:
+        raise ContractError(
+            f"Story {key!r} acceptance action is not a valid command") from error
+    runner = command[0].rsplit("/", 1)[-1] if command else ""
+    active = command and command[0] == executor
+    if runner in {"bash", "sh"}:
+        active = len(command) > 1 and command[1] == executor
+    elif runner in {"python", "python3"}:
+        active = (len(command) > 1 and command[1] == executor
+                  or len(command) > 3 and command[1:3] in (
+                      ["-m", "pytest"], ["-m", "unittest"])
+                  and executor in command[3:])
+    elif runner == "pytest":
+        active = executor in command[1:]
+    elif runner == "node":
+        active = (len(command) > 1 and command[1] == executor
+                  or "--test" in command[1:] and executor in command[1:])
+    elif runner == "npm":
+        active = (len(command) > 3 and command[1] == "test" and "--" in command[2:]
+                  and executor in command
+                  and command.index("--", 2) < command.index(executor))
+    elif runner == "npx":
+        active = (len(command) > 2 and command[1] in {
+            "cypress", "jest", "playwright", "pytest", "vitest",
+        } and executor in command[2:])
+    elif runner == "act":
+        active = ("-W" in command[1:] and command.index("-W", 1) + 1 < len(command)
+                  and command[command.index("-W", 1) + 1] == executor)
+    if (not active or executor not in command
+            or any(token in SHELL_CONTROL_TOKENS for token in command)):
+        raise ContractError(
+            f"Story {key!r} acceptance action does not invoke its executor")
+    return command
+
 
 CAMPAIGN_JSON_SCHEMA = {
     "type": "object", "additionalProperties": False,
@@ -384,20 +441,7 @@ def validate_acceptance_verification(value: dict, repository: dict) -> dict:
                 human_bells += 1
                 continue
             executor = record["executor"]
-            if re.search(r"[*?\[\]{}]", executor):
-                raise ContractError(
-                    f"Story {key!r} acceptance executor must be one concrete path")
-            try:
-                command = shlex.split(record["action"])
-            except ValueError as error:
-                raise ContractError(
-                    f"Story {key!r} acceptance action is not a valid command") from error
-            runner = command[0].rsplit("/", 1)[-1] if command else ""
-            if (executor not in command or any(token in SHELL_CONTROL_TOKENS
-                                               for token in command)
-                    or command[0] != executor and runner not in EXECUTOR_RUNNERS):
-                raise ContractError(
-                    f"Story {key!r} acceptance action does not invoke its executor")
+            automated_verification_command(record, key)
             source = record["executor_source"]
             if source == "existing":
                 if not _repository_path_resolves(executor, files):

@@ -37,6 +37,7 @@ import merge_gate  # noqa: E402
 import observability as obs  # noqa: E402
 import runlog  # noqa: E402
 import correction_context  # noqa: E402
+from factory.agents.planning import contract as planning_contract  # noqa: E402
 from factory.capacity_pool.executor import CapacityExecutor  # noqa: E402
 from factory.capacity_pool import admission as capacity_admission  # noqa: E402
 from factory.capacity_pool.policy import POLICIES, resolved_registry  # noqa: E402
@@ -197,6 +198,54 @@ def section(body: str, name: str) -> str:
     if not match:
         raise DeliveryError(f"Story is missing ### {name}")
     return match.group(1).strip()
+
+
+def acceptance_verification_commands(body: str) -> list[tuple[str, list[str]]]:
+    """Read automated acceptance commands from the canonical Story section."""
+    commands = []
+    match = re.search(SECTION.format(name=re.escape("Acceptance notes")), body or "",
+                      re.MULTILINE | re.DOTALL)
+    if not match:
+        return commands  # pre-2.4 Story fixture or stored historical Story
+    for line in match.group(1).strip().splitlines():
+        if not line.startswith("- "):
+            raise DeliveryError("Acceptance notes must contain one criterion per bullet")
+        criterion = line[2:]
+        if criterion.count(planning_contract.VERIFICATION_MARKER) != 1:
+            # Pre-2.4 Stories are deliberately readable and have no records.
+            continue
+        _, encoded = criterion.split(planning_contract.VERIFICATION_MARKER, 1)
+        try:
+            record = json.loads(encoded)
+        except json.JSONDecodeError as error:
+            raise DeliveryError("Story acceptance verification is not valid JSON") from error
+        if not isinstance(record, dict):
+            raise DeliveryError("Story acceptance verification must be an object")
+        if record.get("type") == "human-bell":
+            continue
+        if (record.get("type") != "automated"
+                or set(record) != planning_contract.AUTOMATED_VERIFICATION_FIELDS
+                or not all(isinstance(record.get(field), str) and record[field].strip()
+                           for field in planning_contract.AUTOMATED_VERIFICATION_FIELDS)):
+            raise DeliveryError("Story automated acceptance verification is malformed")
+        try:
+            command = planning_contract.automated_verification_command(record)
+        except planning_contract.ContractError as error:
+            raise DeliveryError(str(error)) from error
+        commands.append((record["executor"], command))
+    return commands
+
+
+def run_acceptance_verifications(body: str, *, cwd: pathlib.Path, timeout: int,
+                                 trace_id: str, repo: str, story: int, project: int,
+                                 runner=subprocess.run) -> None:
+    """Execute every declared automated acceptance check in the trusted wrapper."""
+    for executor, command in acceptance_verification_commands(body):
+        with obs.Activity("delivery-worker", "acceptance-verification", "running",
+                          trace_id=trace_id, repo=repo, story=story, project=project,
+                          executor=executor):
+            run(command, cwd=cwd, timeout=timeout,
+                env=tool_environment(), runner=runner)
 
 
 def labels(issue: dict) -> set[str]:
@@ -713,6 +762,10 @@ def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
                               story=story_number, project=project_number):
                 run(tests, cwd=worktree, timeout=bounds.timeout,
                     env=tool_environment(), runner=runner)
+            run_acceptance_verifications(
+                story.get("body") or "", cwd=worktree, timeout=bounds.timeout,
+                trace_id=delivery_trace, repo=repo, story=story_number,
+                project=project_number, runner=runner)
             git(["add", "--", *paths], worktree, runner=runner)
             git(["commit", "-m", f"Deliver Story #{story_number}"], worktree,
                 runner=runner)
