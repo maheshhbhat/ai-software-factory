@@ -565,11 +565,59 @@ def mark_recovery_pushed(patch: pathlib.Path, head: str) -> None:
         raise RecoveryError("recovery checkpoint metadata is unavailable") from exc
     if not isinstance(value, dict):
         raise RecoveryError("recovery checkpoint metadata is not an object")
+    value.pop("pending_head", None)
+    value.pop("push_prepared_at", None)
     value["delivered_head"] = head
     value["delivery_verified_at"] = (
         datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"))
     _write_recovery_file(
         manifest, json.dumps(value, indent=2, sort_keys=True) + "\n")
+
+
+def mark_recovery_push_pending(patch: pathlib.Path, head: str) -> None:
+    """Durably bind the checkpoint to the commit before remote mutation."""
+    if not FULL_COMMIT.fullmatch(head):
+        raise RecoveryError("pending recovery head is invalid")
+    try:
+        manifest = recovery_manifest(patch)
+        value = json.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RecoveryError("recovery checkpoint metadata is unavailable") from exc
+    if not isinstance(value, dict):
+        raise RecoveryError("recovery checkpoint metadata is not an object")
+    value["pending_head"] = head
+    value["push_prepared_at"] = (
+        datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"))
+    _write_recovery_file(
+        manifest, json.dumps(value, indent=2, sort_keys=True) + "\n")
+
+
+def reconcile_recovery_push(patch: pathlib.Path, observed_head: str, *,
+                            repo: str, story_number: int) -> None:
+    """Promote a pre-push marker when the remote proves the push landed."""
+    try:
+        value = json.loads(
+            recovery_manifest(patch).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RecoveryError("recovery checkpoint metadata is unavailable") from exc
+    if not isinstance(value, dict):
+        raise RecoveryError("recovery checkpoint metadata is not an object")
+    pending = value.get("pending_head")
+    if pending is None or pending != observed_head:
+        return
+    expected = {"schema_version": RECOVERY_SCHEMA_VERSION,
+                "trust": RECOVERY_TRUST, "repository": repo,
+                "story": story_number}
+    prepared = value.get("push_prepared_at")
+    try:
+        if (any(value.get(key) != item for key, item in expected.items()) or
+                not FULL_COMMIT.fullmatch(pending) or
+                not prepared.endswith("Z")):
+            raise ValueError("invalid pending recovery provenance")
+        datetime.fromisoformat(prepared.replace("Z", "+00:00"))
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise RecoveryError("pending recovery checkpoint is invalid") from exc
+    mark_recovery_pushed(patch, pending)
 
 
 def pushed_recovery_head(patch: pathlib.Path, *, repo: str, story_number: int,
@@ -832,6 +880,9 @@ def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
         pull = pulls[0]
         if has_recovery:
             try:
+                reconcile_recovery_push(
+                    saved_recovery, pull["head"]["sha"], repo=repo,
+                    story_number=story_number)
                 delivered_head = pushed_recovery_head(
                     saved_recovery, repo=repo, story_number=story_number)
             except RecoveryError as exc:
@@ -874,6 +925,9 @@ def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
         source_ids=[item["comment_id"] for item in packet["records"]])
     if has_recovery:
         try:
+            reconcile_recovery_push(
+                saved_recovery, base_commit, repo=repo,
+                story_number=story_number)
             delivered_head = pushed_recovery_head(
                 saved_recovery, repo=repo, story_number=story_number, scope=scope)
         except RecoveryError as exc:
@@ -1021,9 +1075,12 @@ def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
             git(["add", "--", *paths], worktree, runner=runner)
             git(["commit", "-m", f"Deliver Story #{story_number}"], worktree,
                 runner=runner)
+            head = git(["rev-parse", "HEAD"], worktree,
+                       runner=runner).stdout.strip()
+            if has_recovery:
+                mark_recovery_push_pending(saved_recovery, head)
             git(["push", "origin", f"HEAD:refs/heads/{branch}"], worktree,
                 runner=runner)
-            head = git(["rev-parse", "HEAD"], worktree, runner=runner).stdout.strip()
             if has_recovery:
                 mark_recovery_pushed(saved_recovery, head)
         except Exception as exc:
@@ -1052,6 +1109,8 @@ def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
                                 getattr(exc, "terminal_outcome", "") or
                                 "worker-wrapper-failed"),
                             originating_worker=originating_worker, runner=runner)
+                        if has_recovery and not ref:
+                            ref = str(saved_recovery)
             except Exception as checkpoint_error:
                 # A checkpoint failure must never turn known work into a
                 # definite no-start. Keep the original failure, block fallback,
