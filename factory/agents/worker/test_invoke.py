@@ -580,6 +580,73 @@ class FailedWorkCheckpointTests(unittest.TestCase):
              "vendor/lib"],
             [command for command, _ in runner.calls])
 
+    def test_restore_removes_a_gitlink_deleted_from_the_index(self):
+        class DeletedGitlinkRunner(RecordingRunner):
+            def __call__(self, cmd, **kwargs):
+                result = super().__call__(cmd, **kwargs)
+                if cmd[:2] == ["git", "ls-tree"]:
+                    return subprocess.CompletedProcess(
+                        cmd, 0, "160000 commit " + "c" * 40 +
+                        "\tvendor/lib\n", "")
+                if cmd[:3] == ["git", "ls-files", "--stage"]:
+                    return subprocess.CompletedProcess(cmd, 0, "", "")
+                return result
+
+        with tempfile.TemporaryDirectory() as recovery, \
+             tempfile.TemporaryDirectory() as target, \
+             mock.patch.dict(invoke.os.environ,
+                             {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = DeletedGitlinkRunner(["vendor/lib"])
+            ref = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"),
+                repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit=self.BASE,
+                scope=["vendor/lib"], mutation_state="post-mutation",
+                terminal_outcome="started-mid-work-failed",
+                originating_worker=self.WORKER, runner=runner))
+            worktree = pathlib.Path(target)
+            (worktree / "vendor/lib").mkdir(parents=True)
+            (worktree / "vendor/lib/old").write_text("old checkout")
+            invoke.restore_failed_work(
+                ref, worktree, repo="owner/repo", story_number=214,
+                base_commit=self.BASE, scope=["vendor/lib"], runner=runner)
+            self.assertFalse((worktree / "vendor/lib").exists())
+
+    def test_post_apply_gitlink_failure_preserves_original_manifest(self):
+        class GitlinkFailureRunner(RecordingRunner):
+            def __call__(self, cmd, **kwargs):
+                result = super().__call__(cmd, **kwargs)
+                if cmd[:3] == ["git", "ls-files", "--stage"]:
+                    return subprocess.CompletedProcess(
+                        cmd, 0, "160000 " + "c" * 40 + " 0\tvendor/lib\n", "")
+                if cmd[:3] == ["git", "submodule", "update"]:
+                    return subprocess.CompletedProcess(
+                        cmd, 1, "", "submodule unavailable")
+                return result
+
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = GitlinkFailureRunner(["vendor/lib"])
+            patch = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"),
+                repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit="d" * 40,
+                scope=["vendor/lib"], mutation_state="post-mutation",
+                terminal_outcome="started-mid-work-failed",
+                originating_worker=self.WORKER, runner=runner))
+            manifest = invoke.recovery_manifest(patch)
+            original = manifest.read_bytes()
+            with self.assertRaisesRegex(invoke.RecoveryError,
+                                        "application failed") as caught:
+                invoke.execute(
+                    "owner/repo", 214, "token", pathlib.Path("/checkout"),
+                    runner=runner, client=FakeClient(
+                        story_body=STORY_BODY.replace("src/app.py", "vendor/lib")))
+            self.assertEqual(original, manifest.read_bytes())
+            self.assertEqual(str(patch), caught.exception.recovery_ref)
+            self.assertFalse(any(command and command[0] in ("codex", "claude")
+                                 for command, _ in runner.calls))
+
     def test_invalid_recovery_blocks_execute_before_engine_launch(self):
         with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
                 invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):

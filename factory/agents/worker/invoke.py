@@ -16,6 +16,7 @@ import json
 import os
 import pathlib
 import re
+import shutil
 import shlex
 import stat
 import subprocess
@@ -687,21 +688,40 @@ def recovered_work_state(worktree: pathlib.Path, paths: list[str], *,
     return digest.hexdigest()
 
 
-def checkout_recovered_gitlinks(worktree: pathlib.Path, paths: list[str], *,
-                                runner=subprocess.run) -> None:
-    """Make each staged gitlink's checked-out directory match the index."""
-    staged = git(["ls-files", "--stage", "--", *paths], worktree,
-                 runner=runner).stdout
-    gitlinks = []
-    for line in staged.splitlines():
+def _gitlinks(output: str) -> set[str]:
+    result = set()
+    for line in output.splitlines():
         metadata, separator, relative = line.partition("\t")
         fields = metadata.split()
-        if separator and len(fields) == 3 and fields[0] == "160000":
-            gitlinks.append(relative)
+        if separator and fields and fields[0] == "160000":
+            result.add(relative)
+    return result
+
+
+def checkout_recovered_gitlinks(worktree: pathlib.Path, paths: list[str], *,
+                                base_commit: str,
+                                runner=subprocess.run) -> None:
+    """Make each staged gitlink's checked-out directory match the index."""
+    prior = _gitlinks(git(
+        ["ls-tree", base_commit, "--", *paths], worktree,
+        runner=runner).stdout)
+    gitlinks = _gitlinks(git(
+        ["ls-files", "--stage", "--", *paths], worktree,
+        runner=runner).stdout)
+    root = worktree.resolve()
+    for relative in sorted(prior - gitlinks):
+        target = worktree / relative
+        if not target.resolve().is_relative_to(root):
+            raise RecoveryError("deleted recovery gitlink escapes worktree")
+        if target.is_symlink() or target.is_file():
+            target.unlink()
+        elif target.is_dir():
+            shutil.rmtree(target)
     if gitlinks:
         # Tests and the worker must inspect the dependency revision that will
         # actually be committed, not an older submodule checkout.
-        git(["submodule", "update", "--init", "--checkout", "--", *gitlinks],
+        git(["submodule", "update", "--init", "--checkout", "--",
+             *sorted(gitlinks)],
             worktree, runner=runner)
 
 
@@ -807,9 +827,16 @@ def restore_failed_work(patch: pathlib.Path, worktree: pathlib.Path, *,
         datetime.fromisoformat(recovered_at.replace("Z", "+00:00"))
     except (AttributeError, TypeError, ValueError) as exc:
         raise RecoveryError("recovery checkpoint timestamp is invalid") from exc
-    git(["apply", "--index", str(patch)], worktree, runner=runner)
-    checkout_recovered_gitlinks(worktree, paths, runner=runner)
-    applied_paths = changed_paths(worktree, base_commit, runner=runner)
+    try:
+        git(["apply", "--index", str(patch)], worktree, runner=runner)
+        checkout_recovered_gitlinks(
+            worktree, paths, base_commit=base_commit, runner=runner)
+        applied_paths = changed_paths(worktree, base_commit, runner=runner)
+    except RecoveryError:
+        raise
+    except Exception as exc:
+        raise RecoveryError(
+            f"recovery checkpoint application failed: {exc}") from exc
     if sorted(applied_paths) != sorted(paths):
         raise RecoveryError("recovery checkpoint patch paths do not match its manifest")
     if merge_gate.paths_out_of_scope(applied_paths, scope):
