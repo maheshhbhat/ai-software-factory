@@ -500,6 +500,38 @@ class FailedWorkCheckpointTests(unittest.TestCase):
             self.assertFalse(patch.exists())
             self.assertFalse(manifest.exists())
 
+    def test_interrupted_cleanup_is_reconciled_without_an_orphan(self):
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": directory}):
+            runner = RecordingRunner(["src/app.py"])
+            patch = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"),
+                repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit=self.BASE,
+                scope=["src/app.py"], mutation_state="post-mutation",
+                terminal_outcome="started-mid-work-failed",
+                originating_worker=self.WORKER, runner=runner))
+            invoke.mark_recovery_pushed(patch, "b" * 40)
+            manifest = invoke.recovery_manifest(patch)
+            patch_tombstone = patch.with_name(patch.name + ".deleting")
+            patch.replace(patch_tombstone)
+            self.assertFalse(invoke.recovery_available(patch))
+            self.assertFalse(patch.exists())
+            self.assertFalse(manifest.exists())
+            self.assertFalse(patch_tombstone.exists())
+
+    def test_recovered_gitlink_directory_uses_staged_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            worktree = pathlib.Path(directory)
+            (worktree / "vendor/lib").mkdir(parents=True)
+            runner = RecordingRunner(["vendor/lib"])
+            state = invoke.recovered_work_state(
+                worktree, ["vendor/lib"], base_commit=self.BASE, runner=runner)
+            self.assertEqual(64, len(state))
+            self.assertTrue(any(command[:4] ==
+                                ["git", "diff", "--binary", "--cached"]
+                                for command, _ in runner.calls))
+
     def test_invalid_recovery_blocks_execute_before_engine_launch(self):
         with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
                 invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
@@ -507,10 +539,15 @@ class FailedWorkCheckpointTests(unittest.TestCase):
             patch.parent.mkdir(parents=True)
             patch.write_text("orphan")
             runner = RecordingRunner([])
-            with self.assertRaisesRegex(invoke.DeliveryError, "incomplete"):
+            with self.assertRaisesRegex(invoke.RecoveryError,
+                                        "incomplete") as caught:
                 invoke.execute(
                     "owner/repo", 214, "token", pathlib.Path("/checkout"),
                     runner=runner, client=FakeClient())
+            self.assertEqual("post-mutation", caught.exception.mutation_state)
+            self.assertEqual("recovery-invalid",
+                             caught.exception.terminal_outcome)
+            self.assertEqual(str(patch), caught.exception.recovery_ref)
             self.assertFalse(any(command and command[0] in ("codex", "claude")
                                  for command, _ in runner.calls))
 

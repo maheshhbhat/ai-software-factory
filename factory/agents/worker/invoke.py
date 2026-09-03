@@ -79,6 +79,10 @@ class DeliveryError(RuntimeError):
 class RecoveryError(DeliveryError):
     """Recovery evidence is invalid and must remain untouched for diagnosis."""
 
+    def __init__(self, message: str, output: str = ""):
+        super().__init__(message, output, mutation_state="post-mutation",
+                         terminal_outcome="recovery-invalid")
+
 
 def platform_diagnostics(checkout: pathlib.Path) -> dict:
     """Return non-sensitive facts that explain local filesystem failures.
@@ -484,18 +488,38 @@ def recovery_manifest(patch: pathlib.Path) -> pathlib.Path:
 
 def recovery_available(patch: pathlib.Path) -> bool:
     manifest = recovery_manifest(patch)
+    patch_tombstone = patch.with_name(patch.name + ".deleting")
+    manifest_tombstone = manifest.with_name(manifest.name + ".deleting")
+    if patch_tombstone.exists() or manifest_tombstone.exists():
+        # Cleanup begins only after the recovered delivery is durable. Finish
+        # any interrupted transaction instead of treating its remainder as a
+        # new invalid recovery checkpoint.
+        patch_source = patch if patch.is_file() else patch_tombstone
+        manifest_source = manifest if manifest.is_file() else manifest_tombstone
+        try:
+            value = json.loads(manifest_source.read_text(encoding="utf-8"))
+            patch_text = patch_source.read_text(encoding="utf-8")
+        except (OSError, json.JSONDecodeError) as exc:
+            raise RecoveryError("recovery cleanup transaction is invalid") from exc
+        if (not FULL_COMMIT.fullmatch(value.get("delivered_head", "")) or
+                value.get("patch_sha256") != hashlib.sha256(
+                    patch_text.encode("utf-8")).hexdigest()):
+            raise RecoveryError("recovery cleanup transaction is invalid")
+        for item in (patch, manifest, patch_tombstone, manifest_tombstone):
+            item.unlink(missing_ok=True)
+        return False
     if patch.is_file() != manifest.is_file():
-        raise DeliveryError("recovery checkpoint patch/manifest pair is incomplete")
+        raise RecoveryError("recovery checkpoint patch/manifest pair is incomplete")
     if not patch.is_file():
         return False
     try:
         value = json.loads(manifest.read_text(encoding="utf-8"))
         patch_text = patch.read_text(encoding="utf-8")
     except (OSError, json.JSONDecodeError):
-        raise DeliveryError("recovery checkpoint metadata is unavailable")
+        raise RecoveryError("recovery checkpoint metadata is unavailable")
     if value.get("patch_sha256") != hashlib.sha256(
             patch_text.encode("utf-8")).hexdigest():
-        raise DeliveryError("recovery checkpoint digest does not match its manifest")
+        raise RecoveryError("recovery checkpoint digest does not match its manifest")
     return True
 
 
@@ -507,8 +531,17 @@ def _write_recovery_file(target: pathlib.Path, value: str) -> None:
 
 def remove_recovery(patch: pathlib.Path) -> None:
     """Remove the complete checkpoint pair after successful delivery only."""
-    patch.unlink()
-    recovery_manifest(patch).unlink()
+    manifest = recovery_manifest(patch)
+    patch_tombstone = patch.with_name(patch.name + ".deleting")
+    manifest_tombstone = manifest.with_name(manifest.name + ".deleting")
+    patch.replace(patch_tombstone)
+    try:
+        manifest.replace(manifest_tombstone)
+    except Exception:
+        patch_tombstone.replace(patch)
+        raise
+    patch_tombstone.unlink(missing_ok=True)
+    manifest_tombstone.unlink(missing_ok=True)
 
 
 def mark_recovery_pushed(patch: pathlib.Path, head: str) -> None:
@@ -564,9 +597,13 @@ def pushed_recovery_head(patch: pathlib.Path, *, repo: str, story_number: int,
     return head
 
 
-def recovered_work_state(worktree: pathlib.Path, paths: list[str]) -> str:
+def recovered_work_state(worktree: pathlib.Path, paths: list[str], *,
+                         base_commit: str, runner=subprocess.run) -> str:
     """Digest the exact recovered file state without trusting Git metadata."""
     digest = hashlib.sha256()
+    staged = git(["diff", "--binary", "--cached", base_commit, "--", *paths],
+                 worktree, runner=runner).stdout
+    digest.update(staged.encode("utf-8") + b"\0")
     for relative in sorted(paths):
         path = worktree / relative
         digest.update(relative.encode("utf-8") + b"\0")
@@ -582,7 +619,9 @@ def recovered_work_state(worktree: pathlib.Path, paths: list[str]) -> str:
         elif path.is_file():
             digest.update(path.read_bytes() + b"\0")
         else:
-            raise RecoveryError(f"recovered path is not a file: {relative}")
+            # Git submodules are directories in the worktree but gitlinks in
+            # the index. The staged patch above is their authoritative state.
+            digest.update(b"directory-or-gitlink\0")
     return digest.hexdigest()
 
 
@@ -684,7 +723,6 @@ def restore_failed_work(patch: pathlib.Path, worktree: pathlib.Path, *,
         raise RecoveryError("recovery checkpoint patch paths do not match its manifest")
     if merge_gate.paths_out_of_scope(applied_paths, scope):
         raise RecoveryError("recovery checkpoint patch exceeds Story scope")
-    git(["reset"], worktree, runner=runner)
     return {
         "present": True,
         "trust": RECOVERY_TRUST,
@@ -742,12 +780,20 @@ def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
     durable = marker(story_number, version)
     pulls = linked_prs(story_number, client.pull_requests())
     saved_recovery = recovery_patch(repo, story_number)
-    has_recovery = recovery_available(saved_recovery)
+    try:
+        has_recovery = recovery_available(saved_recovery)
+    except RecoveryError as exc:
+        exc.recovery_ref = str(saved_recovery)
+        raise
     if pulls and durable in (pulls[0].get("body") or ""):
         pull = pulls[0]
         if has_recovery:
-            delivered_head = pushed_recovery_head(
-                saved_recovery, repo=repo, story_number=story_number)
+            try:
+                delivered_head = pushed_recovery_head(
+                    saved_recovery, repo=repo, story_number=story_number)
+            except RecoveryError as exc:
+                exc.recovery_ref = str(saved_recovery)
+                raise
             if delivered_head == pull["head"]["sha"]:
                 remove_recovery(saved_recovery)
         return Delivery(story_number, project_number, pull["head"]["ref"],
@@ -779,8 +825,12 @@ def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
         head=packet["head"], digest=packet["digest"],
         source_ids=[item["comment_id"] for item in packet["records"]])
     if has_recovery:
-        delivered_head = pushed_recovery_head(
-            saved_recovery, repo=repo, story_number=story_number, scope=scope)
+        try:
+            delivered_head = pushed_recovery_head(
+                saved_recovery, repo=repo, story_number=story_number, scope=scope)
+        except RecoveryError as exc:
+            exc.recovery_ref = str(saved_recovery)
+            raise
         if delivered_head:
             if delivered_head != base_commit:
                 raise RecoveryError("pushed recovery head does not match branch head")
@@ -810,7 +860,8 @@ def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
                     story_number=story_number, base_commit=base_commit,
                     scope=scope, runner=runner)
                 restored_state = recovered_work_state(
-                    worktree, recovery_context["recovered_paths"])
+                    worktree, recovery_context["recovered_paths"],
+                    base_commit=base_commit, runner=runner)
             value["recovery_context"] = recovery_context
             prompt = worker_prompt(value)
             owns_state = state is None
@@ -928,7 +979,9 @@ def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
                     recovered_paths = recovery_context.get("recovered_paths", [])
                     recovery_is_unchanged = (
                         has_recovery and restored_state is not None and
-                        recovered_work_state(worktree, recovered_paths) ==
+                        recovered_work_state(
+                            worktree, recovered_paths, base_commit=base_commit,
+                            runner=runner) ==
                         restored_state and
                         sorted(changed_paths(worktree, base_ref, runner=runner)) ==
                         sorted(recovered_paths))
