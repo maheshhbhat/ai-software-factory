@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import pathlib
+import re
 import subprocess
 import sys
 import tempfile
@@ -82,8 +83,9 @@ def read_repository(client: artifacts.GitHubStore) -> tuple[str, list[dict], dic
                  ("/adr" in f"/{path.lower()}" or "/decisions/" in f"/{path.lower()}/")]
     adrs = [{"path": path, "content": content(path)} for path in adr_paths]
     source_paths = [path for path in files if path != product_paths[0] and
-                    path.lower().endswith((".js", ".mjs", ".cjs", ".json", ".md",
-                                           ".yml", ".yaml"))]
+                    path.lower().endswith((".js", ".mjs", ".cjs", ".ts", ".tsx",
+                                           ".jsx", ".py", ".json", ".toml", ".md",
+                                           ".yml", ".yaml", ".html", ".htm", ".css"))]
     sources, total = {}, 0
     for path in source_paths:
         text = content(path)
@@ -92,7 +94,66 @@ def read_repository(client: artifacts.GitHubStore) -> tuple[str, list[dict], dic
             raise InvocationError(
                 "repository read constraint failed: grounded source context exceeds 500KB")
         sources[path] = text
-    return product, adrs, {"default_branch": branch, "files": files, "sources": sources}
+    evidence = repository_evidence(files, sources)
+    return product, adrs, {"default_branch": branch, "files": files,
+                           "sources": sources, **evidence}
+
+
+def repository_evidence(files: list[str], sources: dict[str, str]) -> dict:
+    """Extract only explicit, mechanically checkable ownership and policy facts."""
+    known = set(files)
+    owners, forbidden, assertions = [], set(), []
+    for source_path, text in sources.items():
+        if source_path.lower().endswith((".html", ".htm")):
+            for target in re.findall(
+                    r"<script\b[^>]*\bsrc\s*=\s*['\"]([^'\"]+)['\"]", text, re.I):
+                target = target.split("?", 1)[0].lstrip("./")
+                if target in known:
+                    owners.append({
+                        "path": target,
+                        "terms": ["browser", "visible", "render", "display", "ui",
+                                  "interaction", "text", "disclosure"],
+                        "evidence": f"{source_path} loads {target}",
+                    })
+        if source_path.lower().endswith(".json"):
+            try:
+                manifest = json.loads(text)
+            except json.JSONDecodeError:
+                manifest = None
+            if isinstance(manifest, dict):
+                for container in (manifest.get("factoryPolicy"), manifest.get("policy")):
+                    if isinstance(container, dict):
+                        values = container.get("forbiddenDependencies") or []
+                        if isinstance(values, list):
+                            forbidden.update(item for item in values
+                                             if isinstance(item, str) and item)
+        for line_number, line in enumerate(text.splitlines(), 1):
+            lowered = line.lower()
+            if not re.search(r"\b(?:assert|expect)\b", lowered):
+                continue
+            if not re.search(
+                    r"\b(?:undefined|false|null|empty|not\.|notin|not_in|does not)",
+                    lowered):
+                continue
+            names = re.findall(
+                r"(?:devdependencies|dependencies)(?:\?\.)?(?:\[['\"]|\.)"
+                r"([@A-Za-z0-9_./-]+)", line, re.I)
+            for name in names:
+                forbidden.add(name)
+                assertions.append({
+                    "kind": "forbidden-dependency", "name": name,
+                    "evidence": f"{source_path}:{line_number}",
+                })
+            if (re.search(r"(?:devdependencies|dependencies)", lowered)
+                    and re.search(r"\{\s*\}", line)):
+                forbidden.add("*")
+                assertions.append({
+                    "kind": "forbidden-dependency", "name": "*",
+                    "evidence": f"{source_path}:{line_number}",
+                })
+    return {"production_owners": owners,
+            "forbidden_dependencies": sorted(forbidden),
+            "policy_assertions": assertions}
 
 
 def prompt_version() -> str:
@@ -243,7 +304,7 @@ def run_model(value: dict, timeout: int, max_usd: float,
             def validate(raw):
                 nonlocal parsed
                 parsed = _parse_output(raw)
-                contract.validate_output(altitude, parsed)
+                contract.validate_output(altitude, parsed, value.get("repository"))
             material = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
             result = executor.execute(
                 task_key="planning:" + hashlib.sha256(material).hexdigest(),
@@ -278,7 +339,7 @@ def execute(repo: str, artifact: int, token: str, timeout: int, max_usd: float,
            f"prompt-{prompt_version()}:feedback-{feedback_version(feedback)}")
     output = run_model(value, timeout, max_usd, runner=runner,
                        state=state, registry=registry)
-    contract.validate_output(altitude, output)
+    contract.validate_output(altitude, output, repository)
     artifacts.write(client, value["trigger"], key, output)
     verified = verify_with_retry(client, value["trigger"], key, altitude)
     if altitude is contract.Altitude.PROJECT:

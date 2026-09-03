@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+import fnmatch
 import re
 
 
@@ -179,7 +180,8 @@ def validate_input(value: dict) -> PlanningInput:
     return PlanningInput(trigger, product, tuple(adrs), repository)
 
 
-def validate_output(altitude: Altitude, value: dict) -> dict:
+def validate_output(altitude: Altitude, value: dict,
+                    repository: dict | None = None) -> dict:
     if not isinstance(value, dict):
         raise ContractError("planning output must be an object")
     required = CAMPAIGN_KEYS if altitude is Altitude.CAMPAIGN else PROJECT_KEYS
@@ -315,4 +317,121 @@ def validate_output(altitude: Altitude, value: dict) -> dict:
             raise ContractError(
                 "project digest must contain a plain-language explanation and two Mermaid "
                 "diagrams (system flow and story dependencies)")
+    if repository is not None:
+        validate_repository_compatibility(value, repository)
+    return value
+
+
+PATH_TOKEN = re.compile(
+    r"(?<![A-Za-z0-9_])(?:`|['\"])?([A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.*?{}\[\]-]+)+|"
+    r"[A-Za-z0-9_-]+\.(?:js|mjs|cjs|ts|tsx|jsx|py|json|ya?ml|md|toml))"
+    r"(?:`|['\"])?(?![A-Za-z0-9_./-])")
+EXISTING_CLAIM = re.compile(
+    r"\b(?:existing|current|already|reuse|implementation|manifest|workflow|"
+    r"verification path|test path|policy)\b", re.I)
+DEPENDENCY_PROPOSAL = re.compile(
+    r"\b(?:add|install|introduce|require|use)\s+(?:the\s+)?(?:dependency\s+)?"
+    r"[`'\"]?([A-Za-z0-9@/_.-]+)", re.I)
+
+
+def _story_text(story: dict) -> str:
+    return "\n".join(str(item) for item in (
+        story.get("title") or "", story.get("spec") or "",
+        *(story.get("acceptance_criteria") or []),
+        *(item.get("check", "") for item in
+          (story.get("operating_envelope_checks") or []) if isinstance(item, dict)),
+    ))
+
+
+def _path_resolves(pattern: str, files: set[str]) -> bool:
+    normalized = pattern.removeprefix("./").rstrip("/")
+    recursive_root = normalized[:-3].rstrip("/") if normalized.endswith("/**") else ""
+    return (normalized in files or any(fnmatch.fnmatchcase(path, normalized) for path in files)
+            or any(path.startswith(normalized + "/") for path in files)
+            or bool(recursive_root) and any(
+                path == recursive_root or path.startswith(recursive_root + "/")
+                or path.startswith(recursive_root + ".") for path in files))
+
+
+def _scope_authorizes(path: str, scope: list[str]) -> bool:
+    return any(path == pattern.removeprefix("./").rstrip("/")
+               or fnmatch.fnmatchcase(path, pattern.removeprefix("./"))
+               or path.startswith(pattern.removeprefix("./").rstrip("/") + "/")
+               for pattern in scope if isinstance(pattern, str))
+
+
+def _owner_facts(repository: dict) -> list[dict]:
+    facts = repository.get("production_owners", repository.get("ownership", []))
+    if isinstance(facts, dict):
+        return [{"behavior": behavior, "path": path}
+                for behavior, paths in facts.items()
+                for path in ([paths] if isinstance(paths, str) else paths)]
+    return [item for item in facts if isinstance(item, dict)] if isinstance(facts, list) else []
+
+
+def _forbidden_dependencies(repository: dict) -> set[str]:
+    forbidden = {str(item).lower()
+                 for item in (repository.get("forbidden_dependencies") or [])}
+    assertions = repository.get("policy_assertions") or repository.get("assertions") or []
+    for item in assertions:
+        if not isinstance(item, dict):
+            continue
+        kind = str(item.get("kind") or "").replace("_", "-").lower()
+        subject = str(item.get("subject") or "").lower()
+        if kind == "forbidden-dependency" or (kind == "forbidden" and subject == "dependency"):
+            name = item.get("name", item.get("value"))
+            if isinstance(name, str) and name:
+                forbidden.add(name.lower())
+    return forbidden
+
+
+def validate_repository_compatibility(value: dict, repository: dict) -> dict:
+    """Reject only contradictions mechanically established by repository facts."""
+    if value.get("altitude") != Altitude.PROJECT.value:
+        return value
+    files = {path.removeprefix("./") for path in repository.get("files", [])
+             if isinstance(path, str)}
+    owners = _owner_facts(repository)
+    forbidden = _forbidden_dependencies(repository)
+    for story in value.get("stories", []):
+        key = story.get("key")
+        scope = story.get("scope") or []
+        for pattern in scope:
+            if not isinstance(pattern, str) or not _path_resolves(pattern, files):
+                raise ContractError(
+                    f"Story {key!r} scope path/pattern does not resolve: {pattern!r}")
+        text = _story_text(story)
+        for sentence in re.split(r"[\n;]+", text):
+            if not EXISTING_CLAIM.search(sentence):
+                continue
+            for path in PATH_TOKEN.findall(sentence):
+                if not _path_resolves(path, files):
+                    raise ContractError(
+                        f"Story {key!r} claims an existing repository path that does "
+                        f"not resolve: {path!r}")
+        lowered = text.lower()
+        for fact in owners:
+            path = fact.get("path")
+            behavior = fact.get("behavior", fact.get("claim", ""))
+            required_key = fact.get("story_key")
+            terms = fact.get("terms") or ([behavior] if behavior else [])
+            if isinstance(terms, str):
+                terms = [terms]
+            applies = (required_key == key or any(
+                isinstance(term, str) and term.lower() in lowered for term in terms))
+            if (applies and isinstance(path, str) and _path_resolves(path, files)
+                    and not _scope_authorizes(path, scope)):
+                raise ContractError(
+                    f"Story {key!r} promises behavior owned by {path!r} but omits "
+                    "that production owner from scope")
+        for sentence in re.split(r"[\n;]+", text):
+            if re.search(r"\b(?:do not|must not|without|avoid|forbid)\b", sentence, re.I):
+                continue
+            proposed = {match.group(1).rstrip(".,").lower()
+                        for match in DEPENDENCY_PROPOSAL.finditer(sentence)}
+            contradicted = sorted(proposed if "*" in forbidden else proposed & forbidden)
+            if contradicted:
+                raise ContractError(
+                    f"Story {key!r} proposes forbidden dependency "
+                    f"{contradicted[0]!r} contrary to repository policy evidence")
     return value

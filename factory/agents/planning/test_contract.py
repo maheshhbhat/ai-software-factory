@@ -252,6 +252,69 @@ Text fallback."""
             contract.validate_output(contract.Altitude.PROJECT, value)
 
 
+class RepositoryCompatibilityTests(unittest.TestCase):
+    def plan(self, *, spec="Change allocation disclosure.", scope=None):
+        story = {
+            "key": "disclosure", "title": "Allocation disclosure", "spec": spec,
+            "phase": "hardening", "depends_on": [], "hazard": False,
+            "acceptance_criteria": ["Winning allocation disclosure is visible"],
+            "operating_envelope_ids": [], "operating_envelope_checks": [],
+            "scope": scope or ["app.js", "test/app.test.js"],
+            "spend_cap": "$5 / 60 min",
+        }
+        return {"altitude": "project", "stories": [story]}
+
+    def repository(self):
+        return {"files": ["product.md", "app.js", "test/app.test.js", "package.json"],
+                "production_owners": [{
+                    "behavior": "winning allocation disclosure", "path": "app.js",
+                    "evidence": "repository ownership index"}],
+                "policy_assertions": [{
+                    "kind": "forbidden-dependency", "name": "playwright",
+                    "evidence": "deterministic dependency policy test"}]}
+
+    def test_historical_missing_app_owner_is_rejected(self):
+        value = self.plan(scope=["test/app.test.js"])
+        with self.assertRaisesRegex(contract.ContractError,
+                                    "owned by 'app.js'.*omits"):
+            contract.validate_repository_compatibility(value, self.repository())
+
+    def test_unresolved_scope_pattern_is_rejected(self):
+        value = self.plan(scope=["app.js", "test/missing-*.js"])
+        with self.assertRaisesRegex(contract.ContractError, "does not resolve"):
+            contract.validate_repository_compatibility(value, self.repository())
+
+    def test_claimed_existing_verification_path_must_resolve(self):
+        value = self.plan(
+            spec="Reuse the existing verification path `test/missing.js`.")
+        with self.assertRaisesRegex(contract.ContractError,
+                                    "existing repository path.*does not resolve"):
+            contract.validate_repository_compatibility(value, self.repository())
+
+    def test_explicitly_forbidden_dependency_is_rejected(self):
+        value = self.plan(spec=(
+            "Change winning allocation disclosure in app.js and add dependency playwright."))
+        with self.assertRaisesRegex(contract.ContractError,
+                                    "forbidden dependency 'playwright'"):
+            contract.validate_repository_compatibility(value, self.repository())
+
+    def test_repository_compatible_plan_passes(self):
+        value = self.plan(spec=(
+            "Change winning allocation disclosure in the existing `app.js`; "
+            "reuse the existing verification path `test/app.test.js`."))
+        self.assertIs(value, contract.validate_repository_compatibility(
+            value, self.repository()))
+
+    def test_semantic_inference_is_not_invented(self):
+        value = self.plan(spec="Improve the result explanation.", scope=["app.js"])
+        repository = self.repository()
+        repository["sources"] = {
+            "test/app.test.js": "assert(result.text.includes('explanation'))"}
+        repository["production_owners"] = []
+        self.assertIs(value, contract.validate_repository_compatibility(
+            value, repository))
+
+
 class CanonicalPathTests(unittest.TestCase):
     def test_prompt_has_required_contract_language(self):
         prompt = pathlib.Path(__file__).with_name("prompt.md").read_text()
