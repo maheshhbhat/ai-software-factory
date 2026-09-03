@@ -589,19 +589,83 @@ class TestPollOnce(unittest.TestCase):
                 poller.poll_once("o/r", 54, seen)
 
     def test_confirmed_worker_failure_is_released_immediately(self):
-        failure = poller.WorkerLaunchFailed("worker exited 1", definite=True)
+        failure = poller.WorkerLaunchFailed(
+            "worker exited 1", definite=True, attempt_started=True,
+            mutation_state="post-mutation",
+            terminal_outcome="started-mid-work-failed",
+            recovery_ref="/recovery/story-64.patch")
         with mock.patch.object(poller, "run_dispatcher", return_value=REPORT), \
              mock.patch.object(poller, "wake_worker", side_effect=failure), \
              mock.patch.object(poller, "release_unstarted_reservation",
-                               return_value=False), \
+                               return_value=False) as unstarted, \
              mock.patch.object(poller.dispatcher, "release_definite_failure",
                                return_value=(True, "released")) as release:
             result = poller.poll_once("o/r", 54, set())
         self.assertEqual([], result)
         release.assert_called_once()
+        unstarted.assert_not_called()
+        reason = release.call_args.kwargs["reason"]
+        self.assertIn("mutation_state=post-mutation", reason)
+        self.assertIn("terminal_outcome=started-mid-work-failed", reason)
+        self.assertIn("recovery_ref=/recovery/story-64.patch", reason)
+
+    def test_wake_worker_surfaces_terminal_post_mutation_failure(self):
+        report = poller.workers.LaunchReport(
+            "capacity-delivery", poller.workers.Result.TERMINAL_FAILURE,
+            attempt_started=True, mutation_state="post-mutation",
+            terminal_outcome="started-mid-work-failed",
+            recovery_ref="/recovery/story-64.patch")
+        dispatch = {"story": 64, "project": 55, "agent": "capacity-delivery",
+                    "reservation": "a" * 32}
+        with mock.patch.object(poller.workers, "configured_workers",
+                               return_value=[object()]), \
+             mock.patch.object(poller.workers, "dispatch_to_worker",
+                               return_value=(None, [report])):
+            with self.assertRaises(poller.WorkerLaunchFailed) as caught:
+                poller.wake_worker(dispatch)
+        failure = caught.exception
+        self.assertTrue(failure.definite)
+        self.assertTrue(failure.attempt_started)
+        self.assertEqual("post-mutation", failure.mutation_state)
+        self.assertEqual("started-mid-work-failed", failure.terminal_outcome)
+        self.assertEqual("/recovery/story-64.patch", failure.recovery_ref)
+
+    def test_proven_no_start_restores_attempt(self):
+        failure = poller.WorkerLaunchFailed(
+            "worker did not start", definite=True, attempt_started=False)
+        with mock.patch.object(poller, "run_dispatcher", return_value=REPORT), \
+             mock.patch.object(poller, "wake_worker", side_effect=failure), \
+             mock.patch.object(poller, "release_unstarted_reservation",
+                               return_value=True), \
+             mock.patch.object(poller.dispatcher, "release_unstarted_failure",
+                               return_value=(True, "Attempt 1 -> 0")) as release, \
+             mock.patch.object(poller.dispatcher,
+                               "release_definite_failure") as definite:
+            result = poller.poll_once("o/r", 54, set())
+        self.assertEqual([], result)
+        release.assert_called_once()
+        definite.assert_not_called()
+
+    def test_no_start_without_capacity_proof_keeps_claim(self):
+        failure = poller.WorkerLaunchFailed(
+            "worker did not start", definite=True, attempt_started=False)
+        with mock.patch.object(poller, "run_dispatcher", return_value=REPORT), \
+             mock.patch.object(poller, "wake_worker", side_effect=failure), \
+             mock.patch.object(poller, "release_unstarted_reservation",
+                               return_value=False), \
+             mock.patch.object(poller.dispatcher,
+                               "release_unstarted_failure") as release, \
+             mock.patch.object(poller.dispatcher,
+                               "release_definite_failure") as definite:
+            with self.assertRaisesRegex(poller.WorkerLaunchFailed,
+                                        "not proven safe"):
+                poller.poll_once("o/r", 54, set())
+        release.assert_not_called()
+        definite.assert_not_called()
 
     def test_ambiguous_worker_failure_keeps_the_claim(self):
-        failure = poller.WorkerLaunchFailed("timeout", definite=False)
+        failure = poller.WorkerLaunchFailed(
+            "timeout", definite=False, attempt_started=None)
         with mock.patch.object(poller, "run_dispatcher", return_value=REPORT), \
              mock.patch.object(poller, "wake_worker", side_effect=failure), \
              mock.patch.object(poller.dispatcher,

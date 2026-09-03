@@ -286,7 +286,14 @@ class FailedWorkCheckpointTests(unittest.TestCase):
                 ref = invoke.checkpoint_failed_work(
                     pathlib.Path("/worktree"), pathlib.Path("/checkout"),
                     repo="owner/repo", story_number=214, default="main",
-                    scope=["src/app.py"], runner=runner)
+                    scope=["src/app.py"], mutation_state="post-mutation",
+                    terminal_outcome="started-mid-work-failed", runner=runner)
+                manifest = json.loads(
+                    invoke.recovery_manifest(pathlib.Path(ref)).read_text())
+                self.assertEqual(["src/app.py"], manifest["recovered_paths"])
+                self.assertEqual("started-mid-work-failed",
+                                 manifest["previous_terminal_outcome"])
+                self.assertEqual(invoke.RECOVERY_TRUST, manifest["trust"])
         self.assertTrue(ref.endswith("owner--repo/story-214.patch"))
         commands = [command for command, _ in runner.calls]
         self.assertIn(["git", "add", "--", "src/app.py"], commands)
@@ -295,10 +302,88 @@ class FailedWorkCheckpointTests(unittest.TestCase):
         runner = RecordingRunner(["secrets.txt"])
         ref = invoke.checkpoint_failed_work(
             pathlib.Path("/worktree"), pathlib.Path("/checkout"), repo="owner/repo",
-            story_number=214, default="main", scope=["src/app.py"], runner=runner)
+            story_number=214, default="main", scope=["src/app.py"],
+            mutation_state="post-mutation",
+            terminal_outcome="started-mid-work-failed", runner=runner)
         self.assertEqual("", ref)
         self.assertFalse(any(command[:2] == ["git", "add"]
                              for command, _ in runner.calls))
+
+    def test_restore_returns_explicit_untrusted_worker_context(self):
+        runner = RecordingRunner(["src/app.py"])
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            ref = invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"),
+                repo="owner/repo", story_number=214, default="main",
+                scope=["src/app.py"], mutation_state="post-mutation",
+                terminal_outcome="started-mid-work-failed", runner=runner)
+            value = invoke.restore_failed_work(
+                pathlib.Path(ref), pathlib.Path("/new"), repo="owner/repo",
+                story_number=214, scope=["src/app.py"], runner=runner)
+        self.assertEqual({
+            "present": True,
+            "trust": "untrusted-partial-work-from-failed-worker",
+            "recovered_paths": ["src/app.py"],
+            "previous_mutation_state": "post-mutation",
+            "previous_terminal_outcome": "started-mid-work-failed",
+        }, value)
+
+    def test_restore_rejects_a_patch_that_does_not_match_its_manifest(self):
+        runner = RecordingRunner(["src/app.py"])
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            ref = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"),
+                repo="owner/repo", story_number=214, default="main",
+                scope=["src/app.py"], mutation_state="post-mutation",
+                terminal_outcome="started-mid-work-failed", runner=runner))
+            ref.write_text("altered patch")
+            with self.assertRaisesRegex(invoke.DeliveryError, "digest"):
+                invoke.restore_failed_work(
+                    ref, pathlib.Path("/new"), repo="owner/repo",
+                    story_number=214, scope=["src/app.py"], runner=runner)
+        self.assertFalse(any(command[:3] == ["git", "apply", "--index"]
+                             for command, _ in runner.calls))
+
+    def test_orphaned_patch_or_manifest_is_discarded_for_bounded_progress(self):
+        with tempfile.TemporaryDirectory() as directory:
+            patch = pathlib.Path(directory, "story-214.patch")
+            for orphan in (patch, invoke.recovery_manifest(patch)):
+                with self.subTest(orphan=orphan.name):
+                    patch.unlink(missing_ok=True)
+                    invoke.recovery_manifest(patch).unlink(missing_ok=True)
+                    orphan.write_text("orphan")
+                    self.assertFalse(invoke.recovery_available(patch))
+                    self.assertFalse(patch.exists())
+                    self.assertFalse(invoke.recovery_manifest(patch).exists())
+
+    def test_half_written_checkpoint_pair_is_discarded(self):
+        runner = RecordingRunner(["src/app.py"])
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            patch = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"),
+                repo="owner/repo", story_number=214, default="main",
+                scope=["src/app.py"], mutation_state="post-mutation",
+                terminal_outcome="started-mid-work-failed", runner=runner))
+            patch.write_text("replacement interrupted before manifest update")
+            self.assertFalse(invoke.recovery_available(patch))
+            self.assertFalse(patch.exists())
+            self.assertFalse(invoke.recovery_manifest(patch).exists())
+
+    def test_worker_prompt_discloses_recovered_paths_and_outcome(self):
+        value = {"recovery_context": {
+            "present": True,
+            "trust": invoke.RECOVERY_TRUST,
+            "recovered_paths": ["src/app.py"],
+            "previous_mutation_state": "post-mutation",
+            "previous_terminal_outcome": "started-mid-work-failed",
+        }}
+        prompt = invoke.worker_prompt(value)
+        self.assertIn("`untrusted partial changes`", prompt)
+        self.assertIn('"src/app.py"', prompt)
+        self.assertIn('"started-mid-work-failed"', prompt)
 
 
 class ProductCheckoutTests(unittest.TestCase):
