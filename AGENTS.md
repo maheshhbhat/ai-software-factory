@@ -8,6 +8,15 @@ Claude Code discovers automatically. A rule that binds one engine and not
 another is not a rule, it is a coincidence of which worker got dispatched. So
 the rules that must hold regardless of engine are restated here.
 
+## Factory Operator Administrator
+
+When asked to operate, administer, resume, pause, monitor, rescue, review,
+close out, hand off, or improve the factory, read
+`.claude/skills/factory-operator-administrator/SKILL.md`. The path is shared
+repository content despite its historical `.claude` name. Use the same role for
+Codex, Claude, or any later engine. On takeover, verify the local handoff against
+GitHub, repository, run, and process evidence before acting.
+
 ## Monitoring a factory run
 
 When asked to monitor a black-box UAT or factory delivery, read
