@@ -63,10 +63,11 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 
 DEFAULT_LOG_PATH = os.path.join(HERE, "logs", "runtime.jsonl")
 
-# A single line is a diagnosis, not a transcript. Worker output is tailed rather
-# than truncated from the front: when a process dies, what it said last is what
-# explains it.
+# A single line is a diagnosis, not a transcript. Successful output keeps its
+# tail. Failed output uses ``diagnostic_excerpt`` because command failures often
+# explain themselves first and print a long test summary last.
 MAX_FIELD_CHARS = 2000
+DIAGNOSTIC_OMISSION = "\n… diagnostic middle omitted …\n"
 
 # The log is written by a long-running loop, which makes it a loop without a
 # bound unless something caps it (`architecture-v2.1.md` §4). One rotation, kept
@@ -129,6 +130,20 @@ def tail(value: str | None, limit: int = MAX_FIELD_CHARS) -> str:
     if len(text) <= limit:
         return text
     return "…" + text[-limit:]
+
+
+def diagnostic_excerpt(value: str | None, limit: int = MAX_FIELD_CHARS) -> str:
+    """Keep both ends of a failed stream in one redacted bounded field."""
+    text = redact((value or "").strip())
+    if len(text) <= limit:
+        return text
+    if limit <= len(DIAGNOSTIC_OMISSION):
+        return text[:limit]
+    available = limit - len(DIAGNOSTIC_OMISSION)
+    first = (available + 1) // 2
+    last = available - first
+    suffix = text[-last:] if last else ""
+    return text[:first] + DIAGNOSTIC_OMISSION + suffix
 
 
 def _rotate(path: str) -> None:

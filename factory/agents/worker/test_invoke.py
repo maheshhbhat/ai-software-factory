@@ -369,6 +369,17 @@ class EngineExplanationTests(unittest.TestCase):
                        runner=self.failing(stderr=long_explanation))
         self.assertIn("THE ACTUAL REASON", str(caught.exception))
 
+    def test_failed_test_output_keeps_early_error_and_late_summary(self):
+        error = "browserType.launch: Google Chrome crashed"
+        summary = "tests 189; pass 186; fail 0; skipped 3"
+        stderr = error + "\n" + ("routine output\n" * 400) + summary
+        with self.assertRaises(invoke.DeliveryError) as caught:
+            invoke.run(["npm", "test"], cwd=pathlib.Path("."), timeout=5,
+                       runner=self.failing(stderr=stderr))
+        message = str(caught.exception)
+        self.assertIn(error, message)
+        self.assertIn(summary, message)
+
     def test_a_timeout_keeps_the_stderr_the_engine_managed(self):
         """A timeout's stderr was dropped entirely, and for an engine killed
         mid-explanation that was the half worth reading."""
