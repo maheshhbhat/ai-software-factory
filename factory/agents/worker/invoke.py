@@ -53,6 +53,8 @@ SECTION = r"^### {name}\s*$\n(.*?)(?=^### |\Z)"
 STORY_LINK = re.compile(r"(?m)^Story: #(\d+)$")
 START_MARKER = "<!-- factory-worker-start:v1 -->"
 FAILURE_MARKER = "FACTORY_WORKER_FAILURE_V1="
+RECOVERY_SCHEMA_VERSION = 1
+RECOVERY_TRUST = "untrusted-partial-work-from-failed-worker"
 
 
 class DeliveryError(RuntimeError):
@@ -422,9 +424,27 @@ def recovery_patch(repo: str, story_number: int, environ=None) -> pathlib.Path:
     return root / repo.replace("/", "--") / f"story-{story_number}.patch"
 
 
+def recovery_manifest(patch: pathlib.Path) -> pathlib.Path:
+    return patch.with_suffix(".json")
+
+
+def recovery_available(patch: pathlib.Path) -> bool:
+    manifest = recovery_manifest(patch)
+    if patch.is_file() != manifest.is_file():
+        raise DeliveryError("recovery checkpoint patch and manifest must both exist")
+    return patch.is_file()
+
+
+def _write_recovery_file(target: pathlib.Path, value: str) -> None:
+    temporary = target.with_name(target.name + ".tmp")
+    temporary.write_text(value, encoding="utf-8")
+    temporary.replace(target)
+
+
 def checkpoint_failed_work(worktree: pathlib.Path, checkout: pathlib.Path, *,
                            repo: str, story_number: int, default: str,
-                           scope: list[str],
+                           scope: list[str], mutation_state: str,
+                           terminal_outcome: str,
                            runner=subprocess.run) -> str:
     """Preserve authorized in-scope edits before removing the temp worktree.
 
@@ -442,8 +462,67 @@ def checkpoint_failed_work(worktree: pathlib.Path, checkout: pathlib.Path, *,
         return ""
     target = recovery_patch(repo, story_number)
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(patch, encoding="utf-8")
+    manifest = {
+        "schema_version": RECOVERY_SCHEMA_VERSION,
+        "trust": RECOVERY_TRUST,
+        "repository": repo,
+        "story": story_number,
+        "recovered_paths": paths,
+        "previous_mutation_state": mutation_state,
+        "previous_terminal_outcome": terminal_outcome,
+        "patch_sha256": hashlib.sha256(patch.encode("utf-8")).hexdigest(),
+    }
+    _write_recovery_file(target, patch)
+    _write_recovery_file(
+        recovery_manifest(target),
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n")
     return str(target)
+
+
+def restore_failed_work(patch: pathlib.Path, worktree: pathlib.Path, *,
+                        repo: str, story_number: int, scope: list[str],
+                        runner=subprocess.run) -> dict:
+    """Validate, apply, and describe a failed worker's untrusted checkpoint."""
+    manifest_path = recovery_manifest(patch)
+    try:
+        value = json.loads(manifest_path.read_text(encoding="utf-8"))
+        patch_text = patch.read_text(encoding="utf-8")
+    except (OSError, json.JSONDecodeError) as exc:
+        raise DeliveryError(f"recovery checkpoint metadata is unavailable: {exc}") from exc
+    paths = value.get("recovered_paths")
+    expected = {
+        "schema_version": RECOVERY_SCHEMA_VERSION,
+        "trust": RECOVERY_TRUST,
+        "repository": repo,
+        "story": story_number,
+    }
+    if any(value.get(key) != item for key, item in expected.items()):
+        raise DeliveryError("recovery checkpoint identity is invalid")
+    if (not isinstance(paths, list) or not paths or
+            any(not isinstance(path, str) or not path for path in paths)):
+        raise DeliveryError("recovery checkpoint paths are invalid")
+    if merge_gate.paths_out_of_scope(paths, scope):
+        raise DeliveryError("recovery checkpoint paths exceed Story scope")
+    digest = hashlib.sha256(patch_text.encode("utf-8")).hexdigest()
+    if value.get("patch_sha256") != digest:
+        raise DeliveryError("recovery checkpoint digest does not match its manifest")
+    for key in ("previous_mutation_state", "previous_terminal_outcome"):
+        if not isinstance(value.get(key), str) or not value[key]:
+            raise DeliveryError(f"recovery checkpoint {key} is invalid")
+    git(["apply", "--index", str(patch)], worktree, runner=runner)
+    git(["reset"], worktree, runner=runner)
+    return {
+        "present": True,
+        "trust": RECOVERY_TRUST,
+        "recovered_paths": paths,
+        "previous_mutation_state": value["previous_mutation_state"],
+        "previous_terminal_outcome": value["previous_terminal_outcome"],
+    }
+
+
+def worker_prompt(value: dict) -> str:
+    return (HERE.joinpath("prompt.md").read_text()
+            + "\n\n## Invocation input\n\n" + json.dumps(value, indent=2))
 
 
 def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
@@ -495,6 +574,7 @@ def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
             checkout, runner=runner)
     base_ref = f"origin/{branch}" if remote else f"origin/{default}"
     saved_recovery = recovery_patch(repo, story_number)
+    has_recovery = recovery_available(saved_recovery)
     value = build_input(client, story, project, repo=repo,
                         pull_request=pulls[0] if pulls else None)
     packet = value["correction_context"]
@@ -509,12 +589,13 @@ def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
         git(["worktree", "add", "--detach", str(worktree), base_ref], checkout,
             runner=runner)
         try:
-            if saved_recovery.is_file():
-                git(["apply", "--index", str(saved_recovery)], worktree,
-                    runner=runner)
-                git(["reset"], worktree, runner=runner)
-            prompt = (HERE.joinpath("prompt.md").read_text()
-                      + "\n\n## Invocation input\n\n" + json.dumps(value, indent=2))
+            recovery_context = {"present": False}
+            if has_recovery:
+                recovery_context = restore_failed_work(
+                    saved_recovery, worktree, repo=repo,
+                    story_number=story_number, scope=scope, runner=runner)
+            value["recovery_context"] = recovery_context
+            prompt = worker_prompt(value)
             owns_state = state is None
             if state is None:
                 state_path = capacity_state_path()
@@ -615,7 +696,11 @@ def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
             try:
                 ref = checkpoint_failed_work(
                     worktree, checkout, repo=repo, story_number=story_number,
-                    default=default, scope=scope, runner=runner)
+                    default=default, scope=scope,
+                    mutation_state="post-mutation",
+                    terminal_outcome=(getattr(exc, "terminal_outcome", "") or
+                                      "worker-wrapper-failed"),
+                    runner=runner)
             except Exception as checkpoint_error:
                 # A checkpoint failure must never turn known work into a
                 # definite no-start. Keep the original failure, block fallback,
@@ -633,8 +718,9 @@ def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
             git(["worktree", "remove", "--force", str(worktree)], checkout,
                 runner=runner)
 
-    if saved_recovery.is_file():
+    if has_recovery:
         saved_recovery.unlink()
+        recovery_manifest(saved_recovery).unlink(missing_ok=True)
 
     body = f"Story: #{story_number}\n\n{durable}\n"
     if pulls:
