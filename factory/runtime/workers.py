@@ -116,6 +116,7 @@ class Result:
 
     LAUNCHED = "LAUNCHED"          # the worker definitely accepted the assignment
     FAILED = "FAILED"              # the worker definitely did not start; fallback is safe
+    TERMINAL_FAILURE = "TERMINAL_FAILURE"  # started, changed files, then exited; no fallback
     AMBIGUOUS = "AMBIGUOUS"        # unknown — the worker may be running; never fall back
     UNHEALTHY = "UNHEALTHY"        # probe says unusable; not selected, nothing launched
     INCAPABLE = "INCAPABLE"        # cannot do this kind of work
@@ -172,6 +173,10 @@ class LaunchReport:
     pid: int | None = None
     stdout: str = ""
     stderr: str = ""
+    mutation_state: str = "none"
+    terminal_outcome: str = ""
+    recovery_ref: str = ""
+    attempt_started: bool | None = None
 
     @property
     def launched(self) -> bool:
@@ -380,7 +385,11 @@ def launch(spec: WorkerSpec, story: int, project: int,
         runlog.event("worker.launch.end", worker=spec.name, story=story, project=project,
                      result=report.result, exit=report.exit_code, pid=report.pid,
                      elapsed_ms=report.elapsed_ms, detail=report.detail,
-                     stdout=report.stdout, stderr=report.stderr)
+                     stdout=report.stdout, stderr=report.stderr,
+                     mutation_state=report.mutation_state,
+                     terminal_outcome=report.terminal_outcome,
+                     recovery_ref=report.recovery_ref,
+                     attempt_started=report.attempt_started)
         return report
 
     try:
@@ -427,7 +436,7 @@ def report_from(worker: str, completed, started: float) -> LaunchReport:
     post_mutation = bool(
         failure and failure.get("mutation_state") not in {None, "", "none", "pre-mutation"})
     result = (Result.LAUNCHED if launched else
-              Result.AMBIGUOUS if post_mutation else Result.FAILED)
+              Result.TERMINAL_FAILURE if post_mutation else Result.FAILED)
     if post_mutation:
         detail = ("worker changed repository files before failing; fallback is blocked"
                   + (f" and the work is preserved at {failure.get('recovery_ref')}"
@@ -445,7 +454,11 @@ def report_from(worker: str, completed, started: float) -> LaunchReport:
         stdout=(runlog.tail(completed.stdout) if launched else
                 runlog.diagnostic_excerpt(completed.stdout)),
         stderr=(runlog.tail(completed.stderr) if launched else
-                runlog.diagnostic_excerpt(completed.stderr)))
+                runlog.diagnostic_excerpt(completed.stderr)),
+        mutation_state=(failure or {}).get("mutation_state", "none"),
+        terminal_outcome=(failure or {}).get("terminal_outcome", ""),
+        recovery_ref=(failure or {}).get("recovery_ref", ""),
+        attempt_started=(True if launched or post_mutation else False))
 
 
 def _stream(value) -> str:
@@ -488,17 +501,22 @@ def dispatch_to_worker(specs: list[WorkerSpec], story: int, project: int,
                          reason="the worker accepted the assignment")
             runlog.event("worker.outcome", story=story, project=project,
                          worker=spec.name, result=report.result, detail=report.detail,
-                         exit=report.exit_code, elapsed_ms=report.elapsed_ms)
+                         exit=report.exit_code, elapsed_ms=report.elapsed_ms,
+                         mutation_state=report.mutation_state,
+                         terminal_outcome=report.terminal_outcome,
+                         recovery_ref=report.recovery_ref)
             return report, trail
         if not report.may_fall_back:
-            # AMBIGUOUS: stop. The worker may be running, and starting another
-            # would put two workers on one Story.
+            terminal = report.result == Result.TERMINAL_FAILURE
             runlog.event("worker.failover", story=story, project=project,
                          worker=spec.name, decision="SUPPRESSED",
                          result=report.result, skipped=remaining,
-                         reason="the outcome is ambiguous — the worker may be running, "
-                                "and a second worker on one Story is worse than a late "
-                                "one. The §9.4 lease recovers the claim.")
+                         reason=("the completed worker changed repository files; "
+                                 "delivery ran and fallback is unsafe"
+                                 if terminal else
+                                 "the outcome is ambiguous — the worker may be running, "
+                                 "and a second worker on one Story is worse than a late "
+                                 "one. The §9.4 lease recovers the claim."))
             runlog.event("worker.outcome", story=story, project=project,
                          worker=spec.name, result=report.result, detail=report.detail,
                          exit=report.exit_code, elapsed_ms=report.elapsed_ms)

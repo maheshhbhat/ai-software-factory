@@ -203,8 +203,14 @@ class TestFailoverSafety(unittest.TestCase):
             [self.claude, self.codex], 64, 55, runner=run)
         self.assertIsNone(report)
         launched = [item for item in trail if isinstance(item, w.LaunchReport)]
-        self.assertEqual([w.Result.AMBIGUOUS], [item.result for item in launched])
+        self.assertEqual([w.Result.TERMINAL_FAILURE],
+                         [item.result for item in launched])
         self.assertIn("factory-recovery/story-64", launched[0].detail)
+        self.assertTrue(launched[0].attempt_started)
+        self.assertEqual("post-mutation", launched[0].mutation_state)
+        self.assertEqual("started-mid-work-failed", launched[0].terminal_outcome)
+        self.assertEqual("refs/heads/factory-recovery/story-64",
+                         launched[0].recovery_ref)
         self.assertNotIn("/bin/codex", [command[0] for command in run.calls])
 
     def test_all_workers_failing_launches_nobody(self):

@@ -148,9 +148,16 @@ class WorkerLaunchFailed(Exception):
     """The worker adapter could not be launched. The claim has already landed in
     GitHub, so this is loud: the story is claimed but nothing is working it."""
 
-    def __init__(self, message: str, *, definite: bool = False):
+    def __init__(self, message: str, *, definite: bool = False,
+                 attempt_started: bool | None = None,
+                 mutation_state: str = "none", terminal_outcome: str = "",
+                 recovery_ref: str = ""):
         super().__init__(message)
         self.definite = definite
+        self.attempt_started = attempt_started
+        self.mutation_state = mutation_state
+        self.terminal_outcome = terminal_outcome
+        self.recovery_ref = recovery_ref
 
 
 class RateLimitExhausted(Exception):
@@ -318,6 +325,20 @@ def wake_worker(dispatch: dict,
             reason = getattr(entry, "reason", None) or getattr(entry, "result", "")
             print(f"[worker] {entry.worker}: {reason} {entry.detail}".rstrip(), flush=True)
         if report is None:
+            terminal = [entry for entry in trail
+                        if getattr(entry, "result", "") ==
+                        workers.Result.TERMINAL_FAILURE]
+            if terminal:
+                failed = terminal[-1]
+                detail = (f"{failed.worker} completed after changing files; "
+                          f"terminal_outcome={failed.terminal_outcome}; "
+                          f"mutation_state={failed.mutation_state}; "
+                          f"recovery_ref={failed.recovery_ref}")
+                raise WorkerLaunchFailed(
+                    detail, definite=True, attempt_started=True,
+                    mutation_state=failed.mutation_state,
+                    terminal_outcome=failed.terminal_outcome,
+                    recovery_ref=failed.recovery_ref)
             failures = [entry for entry in trail
                         if getattr(entry, "result", "") == workers.Result.FAILED]
             if failures:
@@ -326,11 +347,14 @@ def wake_worker(dispatch: dict,
                             getattr(failed, "stdout", "") or failed.detail)
                 raise WorkerLaunchFailed(
                     f"{failed.worker} completed with failure: {terminal}",
-                    definite=True)
+                    definite=True, attempt_started=False)
             raise WorkerLaunchFailed(
                 "no worker accepted the assignment; see the [worker] trail above",
                 definite=not any(getattr(item, "result", "") == workers.Result.AMBIGUOUS
-                                 for item in trail))
+                                 for item in trail),
+                attempt_started=(None if any(
+                    getattr(item, "result", "") == workers.Result.AMBIGUOUS
+                    for item in trail) else False))
         return report
 
     cmd = worker_command(dispatch)
@@ -343,21 +367,30 @@ def wake_worker(dispatch: dict,
         runlog.event("worker.launch.end", worker=dispatch["agent"], story=dispatch["story"],
                      project=dispatch["project"], result="FAILED", legacy=True,
                      elapsed_ms=runlog.elapsed_ms(started), detail=str(exc))
-        raise WorkerLaunchFailed(f"{cmd[0]}: {exc}", definite=True) from exc
+        raise WorkerLaunchFailed(
+            f"{cmd[0]}: {exc}", definite=True, attempt_started=False) from exc
     except subprocess.SubprocessError as exc:
         runlog.event("worker.launch.end", worker=dispatch["agent"], story=dispatch["story"],
                      project=dispatch["project"], result="AMBIGUOUS", legacy=True,
                      elapsed_ms=runlog.elapsed_ms(started), detail=str(exc))
-        raise WorkerLaunchFailed(f"{cmd[0]}: {exc}", definite=False) from exc
+        raise WorkerLaunchFailed(
+            f"{cmd[0]}: {exc}", definite=False, attempt_started=None) from exc
     report = workers.report_from(dispatch["agent"], result, started)
     runlog.event("worker.launch.end", worker=report.worker, story=dispatch["story"],
                  project=dispatch["project"], result=report.result, legacy=True,
                  exit=report.exit_code, pid=report.pid, elapsed_ms=report.elapsed_ms,
-                 stdout=report.stdout, stderr=report.stderr)
+                 stdout=report.stdout, stderr=report.stderr,
+                 mutation_state=report.mutation_state,
+                 terminal_outcome=report.terminal_outcome,
+                 recovery_ref=report.recovery_ref,
+                 attempt_started=report.attempt_started)
     if not report.launched:
         raise WorkerLaunchFailed(
             f"{cmd[0]} exited {result.returncode}: {(result.stderr or '').strip()[:200]}",
-            definite=True)
+            definite=True, attempt_started=report.attempt_started,
+            mutation_state=report.mutation_state,
+            terminal_outcome=report.terminal_outcome,
+            recovery_ref=report.recovery_ref)
     return report
 
 
@@ -751,13 +784,33 @@ def poll_once(repo: str, commitment: int, seen: set[int],
                 token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or ""
                 evidence = os.path.join(os.environ.get("FACTORY_RUN_DIR", "run log"),
                                         "process-events.jsonl")
+                recovery_reason = str(exc)
+                if exc.attempt_started is True:
+                    recovery = dispatcher.release_definite_failure
+                    recovery_reason += (
+                        f"; mutation_state={exc.mutation_state}"
+                        f"; terminal_outcome={exc.terminal_outcome}"
+                        f"; recovery_ref={exc.recovery_ref}")
+                elif exc.attempt_started is False:
+                    try:
+                        unstarted = release_unstarted_reservation(
+                            dispatch["reservation"])
+                    except Exception as recovery_error:
+                        raise exc from recovery_error
+                    if not unstarted:
+                        raise WorkerLaunchFailed(
+                            f"{exc}; worker outcome is not proven safe for "
+                            "Attempt release",
+                            definite=False, attempt_started=False) from exc
+                    recovery = dispatcher.release_unstarted_failure
+                else:
+                    raise WorkerLaunchFailed(
+                        "worker outcome is not proven safe for Attempt release",
+                        definite=False, attempt_started=None) from exc
                 try:
-                    unstarted = release_unstarted_reservation(
-                        dispatch["reservation"])
-                    recovery = (dispatcher.release_unstarted_failure
-                                if unstarted else dispatcher.release_definite_failure)
                     released, detail = recovery(
-                        repo, dispatch["story"], token, reason=str(exc), evidence=evidence)
+                        repo, dispatch["story"], token,
+                        reason=recovery_reason, evidence=evidence)
                 except Exception as recovery_error:  # claim remains safe and visible
                     raise exc from recovery_error
                 if not released:
