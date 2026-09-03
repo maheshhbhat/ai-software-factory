@@ -612,6 +612,32 @@ class FailedWorkCheckpointTests(unittest.TestCase):
                 base_commit=self.BASE, scope=["vendor/lib"], runner=runner)
             self.assertFalse((worktree / "vendor/lib").exists())
 
+    def test_gitlink_replacement_files_are_preserved_and_fail_closed(self):
+        class ReplacementRunner(RecordingRunner):
+            def __call__(self, cmd, **kwargs):
+                result = super().__call__(cmd, **kwargs)
+                if cmd[:2] == ["git", "ls-tree"]:
+                    return subprocess.CompletedProcess(
+                        cmd, 0, "160000 commit " + "c" * 40 +
+                        "\tvendor/lib\n", "")
+                if cmd[:3] == ["git", "ls-files", "--stage"]:
+                    return subprocess.CompletedProcess(
+                        cmd, 0, "100644 " + "e" * 40 +
+                        " 0\tvendor/lib/new.py\n", "")
+                return result
+
+        with tempfile.TemporaryDirectory() as target:
+            worktree = pathlib.Path(target)
+            replacement = worktree / "vendor/lib/new.py"
+            replacement.parent.mkdir(parents=True)
+            replacement.write_text("replacement")
+            with self.assertRaisesRegex(invoke.RecoveryError,
+                                        "explicit cleanup"):
+                invoke.checkout_recovered_gitlinks(
+                    worktree, ["vendor/lib"], base_commit=self.BASE,
+                    runner=ReplacementRunner(["vendor/lib"]))
+            self.assertEqual("replacement", replacement.read_text())
+
     def test_post_apply_gitlink_failure_preserves_original_manifest(self):
         class GitlinkFailureRunner(RecordingRunner):
             def __call__(self, cmd, **kwargs):

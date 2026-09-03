@@ -705,11 +705,22 @@ def checkout_recovered_gitlinks(worktree: pathlib.Path, paths: list[str], *,
     prior = _gitlinks(git(
         ["ls-tree", base_commit, "--", *paths], worktree,
         runner=runner).stdout)
-    gitlinks = _gitlinks(git(
+    staged = git(
         ["ls-files", "--stage", "--", *paths], worktree,
-        runner=runner).stdout)
+        runner=runner).stdout
+    gitlinks = _gitlinks(staged)
+    staged_paths = {
+        line.partition("\t")[2] for line in staged.splitlines()
+        if line.partition("\t")[1]
+    }
     root = worktree.resolve()
     for relative in sorted(prior - gitlinks):
+        if any(path == relative or path.startswith(relative + "/")
+               for path in staged_paths):
+            # Removing the old checkout now would also remove regular files
+            # created by the patch. Preserve them and the checkpoint instead.
+            raise RecoveryError(
+                "recovered gitlink replacement requires explicit cleanup")
         target = worktree / relative
         if not target.resolve().is_relative_to(root):
             raise RecoveryError("deleted recovery gitlink escapes worktree")
