@@ -97,7 +97,24 @@ Produce exactly one coherent project plan:
    - the hazard checkbox and matching `hazard` label when its scope touches a
      secrets/credential, dependency, CI/workflow, IAM, migration, destructive,
      branch-protection, factory-spec, or factory-gate path;
-   - falsifiable acceptance criteria and machine-readable scope paths;
+   - falsifiable acceptance criteria and machine-readable scope paths. Append one
+     exact ` || VERIFY <json-object>` record to every criterion. An automated
+     record has exactly `type`, `scope`, `executor`, `executor_source`, `action`,
+     `expected`, and `failure`; `type` is `automated`, `executor_source` is
+     `existing` or `create`, and the executor is a concrete repository test or
+     workflow path. An existing executor must resolve in repository evidence. A
+     created executor must be authorized by the Story scope. `scope` identifies
+     the relevant authorized path, `action` is the command or deterministic
+     operation Delivery runs and must name that exact executor path, `expected`
+     is its observable success, and `failure` says how it reports failure. The
+     executor must use a conventional test-file path or `.github/workflows/*.yml`;
+     Delivery runs every automated action through its credential-free trusted
+     subprocess boundary after the canonical repository test command succeeds;
+   - use a human record only when no deterministic executor is viable. It has
+     exactly `type`, `scope`, `action`, `expected`, `failure`, and `reason`, with
+     `type` equal to `human-bell`. State why automation is not viable in `reason`
+     and add that bell to `expected_bells`. Never use a human bell merely because
+     an automated check is inconvenient or not yet implemented;
    - an `operating_envelope_ids` list naming every Project operating-envelope
      obligation it independently satisfies or verifies within that Story's own
      scope and spend cap; use an empty list only when none apply;
@@ -258,7 +275,7 @@ GitHub numbers—the writer resolves them after issue creation:
       "phase": "build",
       "depends_on": [],
       "hazard": false,
-      "acceptance_criteria": ["falsifiable check"],
+      "acceptance_criteria": ["falsifiable check || VERIFY {\"type\":\"automated\",\"scope\":\"tests/example.test.js\",\"executor\":\"tests/example.test.js\",\"executor_source\":\"create\",\"action\":\"node --test tests/example.test.js\",\"expected\":\"the named assertion passes and the command exits 0\",\"failure\":\"the assertion fails and the command exits nonzero\"}"],
       "operating_envelope_ids": ["OE-SCALE-1"],
       "operating_envelope_checks": [
         {"id": "OE-SCALE-1", "check": "the representative model test exceeds its stated bound"}

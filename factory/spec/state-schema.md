@@ -5,7 +5,7 @@
 > All state lives in GitHub (issues + labels + PRs + issue comments). Any cache is derivable and disposable.
 > No component other than GitHub is authoritative. Ref: `architecture-v2.1.md` §1, §4; `implementation-plan-v1.md` Phase 1.
 >
-> **`SCHEMA_VERSION = 2.3.0`** — §1–§8 are the Phase 1 state model, verified and unchanged in substance. §9 freezes the executable contracts Phase 2 implements (§9.1 defines versioning and compatibility).
+> **`SCHEMA_VERSION = 2.4.0`** — §1–§8 are the Phase 1 state model, verified and unchanged in substance. §9 freezes the executable contracts Phase 2 implements (§9.1 defines versioning and compatibility).
 
 ---
 
@@ -213,6 +213,29 @@ Parsing rules — one canonical form per field, no alternates:
 * **`### Spend cap`** — amount plus unit (e.g. `$40`, `60 min`, `200k tokens`). Enforced per worker invocation in Phase 4; informational in Phase 1.
 * **`### Scope`** — path globs, one per line. Under `SCHEMA_VERSION 2.0.0` the dialect is machine-readable and bullets are **not** permitted: see §9.6, which is the contract the merge gate consumes. (Phase 1 stories were authored under `1.x`, where a leading `- ` was accepted.)
 * **`### Project`** — `#N` link to the parent project issue.
+* **`### Acceptance notes`** — one criterion per bullet. Planning generated under
+  schema 2.4 appends exactly ` || VERIFY ` and a single-line JSON object to each
+  criterion. This binds the human-readable claim to its verification without a
+  parallel requirements subsystem. An automated object has exactly the string
+  fields `type`, `scope`, `executor`, `executor_source`, `action`, `expected`,
+  and `failure`. `type` is `automated`; `executor_source` is `existing` or
+  `create`; `executor` is a concrete repository test or workflow path; and the
+  remaining fields name the authorized surface, deterministic operation,
+  observable success, and failure signal. The action names the exact executor
+  path as a shell-free command argument, so a passive command or unrelated file
+  cannot masquerade as a test. Planning rejects an `existing`
+  executor absent from repository evidence and a `create` executor outside the
+  Story's Scope. Delivery runs every automated command through its trusted,
+  credential-free subprocess boundary after the canonical repository suite and
+  before commit or push; a nonzero exit stops delivery. A human-only object has exactly the string fields `type`,
+  `scope`, `action`, `expected`, `failure`, and `reason`, with `type` equal to
+  `human-bell`. Its reason must state why deterministic automation is not viable,
+  and each such record adds one to the Project's Expected bells. Missing,
+  malformed, empty, unscoped, or unresolvable records fail Planning before any
+  Story is created. Operating-envelope obligations and checks remain separate
+  and unchanged; a criterion may exercise the same executor as an envelope check.
+  Pre-2.4 stored Stories without the marker remain readable as historical data;
+  the 2.4 Planning output schema does not permit creating another one.
 
 `Attempt` and `Scope` are updated by editing the issue body in place; history is preserved by the GitHub issue timeline.
 
@@ -477,7 +500,7 @@ Nothing in §9 rewrites Phase 1: artifacts created before it (Project #1, storie
 This document is the contract, so the contract carries the version:
 
 ```
-SCHEMA_VERSION = 2.3.0
+SCHEMA_VERSION = 2.4.0
 ```
 
 Semantics: **major** changes break a component that has not been updated (a lifecycle label renamed, a field's meaning changed); **minor** adds contract that older components can ignore; **patch** is editorial. Phase 1 was authored under an implicit `1.x`.
@@ -490,10 +513,11 @@ Semantics: **major** changes break a component that has not been updated (a life
 | `2.1.0` | `story:completed` added (§9.16), with the §9.10 dependency rule and the §9.3 cancellation description narrowed to match (#104). **Minor:** a component that does not know the label reads it as not-ready and waits, which is the fail-closed direction. Nothing was renamed and no field changed meaning, so the major stays `2` and every pinned component keeps working |
 | `2.2.0` | Merge-gate checks (a), (d) and (e) and the CODEOWNERS deliverable withdrawn (§9.17); `story:claimed → story:in-review` and `story:in-review → story:merged` promoted to live routes (§9.11); §9.3's poison closure corrected to match §4.3.7 (#114). **Minor:** nothing is renamed and no field changes meaning. The withdrawal removes checks that were never implemented, so no component loses a behaviour it had. The two promoted routes are additive — a component that does not know them leaves those transitions to a human, which is what every component did until now. The §9.3 correction makes a *first* poisoning leave the issue open; a component that expected it closed would have been reading a state the contract never described |
 | `2.3.0` | Exact-revision correction-context markers and the pre-claim retry packet added to the existing findings edge. **Minor:** no label, body field, or existing review-outcome marker changes meaning. Older components ignore the additional marked comments and retain the prior review-finding behavior; updated components fail closed before a retry when the current packet is invalid. |
+| `2.4.0` | Executable verification records added to Planning-generated Story acceptance notes (#656). **Minor:** the existing free-text section and Operating Envelope contract retain their meanings. Older readers preserve the appended text; updated Planning fails closed before creating a Story when a criterion lacks a valid executor or declared human bell. |
 
 Every Phase 2 component pins the major version it implements and, on encountering state written under a different major version, **halts and routes to the human queue** — it must never guess. Fail-closed is the rule wherever §9 is silent.
 
-Version is asserted, not stamped on every issue: issue bodies are rendered forms and carry no room for a marker. The dispatcher records the pinned version in its own run log, and any artifact it writes that has a free-text field carries `schema-version: 2.3.0`.
+Version is asserted, not stamped on every issue: issue bodies are rendered forms and carry no room for a marker. The dispatcher records the pinned version in its own run log, and any artifact it writes that has a free-text field carries `schema-version: 2.4.0`.
 
 ### 9.2 Atomic lifecycle transitions
 
