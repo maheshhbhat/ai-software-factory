@@ -10,6 +10,8 @@ from dataclasses import dataclass
 from enum import Enum
 import re
 
+from factory.gates.merge_gate import match_path
+
 
 class ContractError(ValueError):
     pass
@@ -179,7 +181,8 @@ def validate_input(value: dict) -> PlanningInput:
     return PlanningInput(trigger, product, tuple(adrs), repository)
 
 
-def validate_output(altitude: Altitude, value: dict) -> dict:
+def validate_output(altitude: Altitude, value: dict,
+                    repository: dict | None = None) -> dict:
     if not isinstance(value, dict):
         raise ContractError("planning output must be an object")
     required = CAMPAIGN_KEYS if altitude is Altitude.CAMPAIGN else PROJECT_KEYS
@@ -315,4 +318,140 @@ def validate_output(altitude: Altitude, value: dict) -> dict:
             raise ContractError(
                 "project digest must contain a plain-language explanation and two Mermaid "
                 "diagrams (system flow and story dependencies)")
+    if repository is not None:
+        validate_repository_compatibility(value, repository)
     return value
+
+
+PATH_VALUE = (r"[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.*?{}\[\]-]+)+|"
+              r"[A-Za-z0-9_-]+\.(?:js|mjs|cjs|ts|tsx|jsx|py|json|ya?ml|md|toml)")
+EXISTING_PATH_CLAIM = re.compile(
+    r"\b(?:(?:reuse\s+(?:the\s+)?)?(?:existing|current)\s+"
+    r"(?:(?:implementation|test|manifest|workflow|verification|path|file)\s+){0,3}"
+    r"(?:at\s+|in\s+|from\s+)?|"
+    r"(?:implementation|manifest|workflow|verification path|test path)\s+"
+    r"(?:at\s+|in\s+|from\s+))"
+    rf"(?:`|['\"])?({PATH_VALUE})(?:`|['\"])?(?![A-Za-z0-9_./-])", re.I)
+DEPENDENCY_PROPOSAL = re.compile(
+    r"\b(?:add|install|introduce|require|use)\s+(?:the\s+)?(?:dependency\s+)?"
+    r"[`'\"]?([A-Za-z0-9@/_.-]+)", re.I)
+
+
+def _story_text(story: dict) -> str:
+    return "\n".join(str(item) for item in (
+        story.get("title") or "", story.get("spec") or "",
+        *(story.get("acceptance_criteria") or []),
+        *(item.get("check", "") for item in
+          (story.get("operating_envelope_checks") or []) if isinstance(item, dict)),
+    ))
+
+
+def _repository_path_resolves(pattern: str, files: set[str]) -> bool:
+    normalized = pattern.rstrip("/")
+    return normalized in files or any(match_path(normalized, path) for path in files)
+
+
+def _scope_resolves(pattern: str, files: set[str]) -> bool:
+    normalized = pattern.rstrip("/")
+    recursive_root = normalized[:-3].rstrip("/") if normalized.endswith("/**") else ""
+    parent = normalized.rsplit("/", 1)[0] if "/" in normalized else ""
+    new_file_beside_existing = (not re.search(r"[*?\[]", normalized)
+                                and (not parent or any(
+                                    path.startswith(parent + "/") for path in files)))
+    return (_repository_path_resolves(normalized, files) or new_file_beside_existing
+            or bool(recursive_root) and any(
+                path == recursive_root or path.startswith(recursive_root + "/")
+                or path.startswith(recursive_root + ".") for path in files))
+
+
+def _scope_authorizes(path: str, scope: list[str]) -> bool:
+    return any(match_path(pattern, path)
+               for pattern in scope if isinstance(pattern, str))
+
+
+def _owner_facts(repository: dict) -> list[dict]:
+    facts = repository.get("production_owners", repository.get("ownership", []))
+    if isinstance(facts, dict):
+        return [{"behavior": behavior, "path": path}
+                for behavior, paths in facts.items()
+                for path in ([paths] if isinstance(paths, str) else paths)]
+    if not isinstance(facts, list):
+        return []
+    return [item for item in facts
+            if isinstance(item, dict) and isinstance(item.get("path"), str)
+            and (isinstance(item.get("behavior"), str)
+                 or isinstance(item.get("story_key"), str))]
+
+
+def _forbidden_dependencies(repository: dict) -> set[str]:
+    forbidden = {str(item).lower()
+                 for item in (repository.get("forbidden_dependencies") or [])}
+    assertions = repository.get("policy_assertions") or repository.get("assertions") or []
+    for item in assertions:
+        if not isinstance(item, dict):
+            continue
+        kind = str(item.get("kind") or "").replace("_", "-").lower()
+        subject = str(item.get("subject") or "").lower()
+        if kind == "forbidden-dependency" or (kind == "forbidden" and subject == "dependency"):
+            name = item.get("name", item.get("value"))
+            if isinstance(name, str) and name:
+                forbidden.add(name.lower())
+    return forbidden
+
+
+def validate_repository_compatibility(value: dict, repository: dict) -> dict:
+    """Reject only contradictions mechanically established by repository facts."""
+    if value.get("altitude") != Altitude.PROJECT.value:
+        return value
+    files = {path for path in repository.get("files", [])
+             if isinstance(path, str)}
+    owners = _owner_facts(repository)
+    forbidden = _forbidden_dependencies(repository)
+    for story in value.get("stories", []):
+        key = story.get("key")
+        scope = story.get("scope") or []
+        for pattern in scope:
+            if not isinstance(pattern, str) or not _scope_resolves(pattern, files):
+                raise ContractError(
+                    f"Story {key!r} scope path/pattern does not resolve: {pattern!r}")
+        text = _story_text(story)
+        for claim in EXISTING_PATH_CLAIM.finditer(text):
+            path = claim.group(1).rstrip(".,")
+            if not _repository_path_resolves(path, files):
+                raise ContractError(
+                    f"Story {key!r} claims an existing repository path that does "
+                    f"not resolve: {path!r}")
+        lowered = text.lower()
+        for fact in owners:
+            path = fact.get("path")
+            behavior = fact.get("behavior", fact.get("claim", ""))
+            required_key = fact.get("story_key")
+            applies = (required_key == key or
+                       isinstance(behavior, str) and bool(behavior)
+                       and behavior.lower() in lowered)
+            if (applies and isinstance(path, str)
+                    and _repository_path_resolves(path, files)
+                    and not _scope_authorizes(path, scope)):
+                raise ContractError(
+                    f"Story {key!r} promises behavior owned by {path!r} but omits "
+                    "that production owner from scope")
+        proposed = set()
+        for match in DEPENDENCY_PROPOSAL.finditer(text):
+            prefix = text[max(0, match.start() - 24):match.start()]
+            if re.search(r"\b(?:do not|must not|avoid|forbid)\s*$", prefix, re.I):
+                continue
+            proposed.add(_dependency_name(match.group(1)))
+        contradicted = sorted(proposed if "*" in forbidden else proposed & forbidden)
+        if contradicted:
+            raise ContractError(
+                f"Story {key!r} proposes forbidden dependency "
+                f"{contradicted[0]!r} contrary to repository policy evidence")
+    return value
+
+
+def _dependency_name(value: str) -> str:
+    candidate = value.rstrip(".,").lower()
+    if candidate.startswith("@"):
+        separator = candidate.find("@", 1)
+        return candidate if separator < 0 else candidate[:separator]
+    return candidate.split("@", 1)[0]

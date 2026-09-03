@@ -46,7 +46,8 @@ class ProjectClient(Client):
         FakeStore.__init__(self, [project_issue()])
         self.issues[0]["labels"] = ["type:project", "project:planning"]
         self.repo, self.token = "o/r", "token"
-        self.product_paths, self.product_text = ["product.md"], "# Product"
+        self.product_paths = ["product.md", "src/model/core.js"]
+        self.product_text = "# Product"
 
     def _pages(self, path):
         if path.endswith("/timeline"):
@@ -64,6 +65,54 @@ def capacity():
 
 
 class InvocationTests(unittest.TestCase):
+    def test_repository_evidence_extracts_explicit_owner_and_dependency_policy(self):
+        evidence = invoke.repository_evidence(
+            ["index.html", "app.js", "test/policy.test.js", "package.json"],
+            {"index.html": '<script type="module" src="/app.js"></script>',
+             "app.js": "export const render = () => {};",
+             "test/policy.test.js": (
+                 "assert.equal(packageJson.devDependencies.playwright, undefined);"),
+             "package.json": json.dumps({
+                 "factoryPlanning": {"productionOwners": [{
+                     "behavior": "winning allocation disclosure",
+                     "path": "app.js"}]},
+                 "factoryPolicy": {"forbiddenDependencies": ["puppeteer"]}})})
+        self.assertEqual("app.js", evidence["production_owners"][0]["path"])
+        self.assertEqual(["playwright", "puppeteer"],
+                         evidence["forbidden_dependencies"])
+
+    def test_html_script_relationship_does_not_infer_production_ownership(self):
+        evidence = invoke.repository_evidence(
+            ["index.html", "app.js"],
+            {"index.html": '<script type="module" src="/app.js"></script>',
+             "app.js": "export const render = () => {};"})
+        self.assertEqual([], evidence["production_owners"])
+
+    def test_positive_dependency_presence_assertion_is_not_a_ban(self):
+        lines = [
+            "expect(packageJson.dependencies.react).not.toBeNull();",
+            "expect(packageJson.dependencies).not.toEqual({});",
+        ]
+        for line in lines:
+            with self.subTest(line=line):
+                self.assertEqual(set(), invoke.forbidden_dependency_assertions(line))
+        line = lines[0]
+        evidence = invoke.repository_evidence(
+            ["test/policy.test.js"], {"test/policy.test.js": line})
+        self.assertEqual([], evidence["forbidden_dependencies"])
+
+    def test_explicit_dependency_absence_assertion_is_a_ban(self):
+        line = "assert.equal(packageJson.devDependencies.playwright, undefined);"
+        self.assertEqual(
+            {"playwright"}, invoke.forbidden_dependency_assertions(line))
+
+    def test_assertion_shaped_text_outside_executable_tests_is_not_policy(self):
+        assertion = "assert.equal(packageJson.devDependencies.playwright, undefined);"
+        for path in ("README.md", "src/example.js"):
+            with self.subTest(path=path):
+                evidence = invoke.repository_evidence([path], {path: assertion})
+                self.assertEqual([], evidence["forbidden_dependencies"])
+
     def test_product_preflight_requires_exactly_one_nonempty_product(self):
         for client, error in ((Client(product_paths=[]), invoke.InvocationError),
                               (Client(product_paths=["product.md", "Product.md"]),
@@ -115,6 +164,37 @@ class InvocationTests(unittest.TestCase):
                                state=state, registry=registry)
         finally:
             state.close()
+        self.assertIn("project:planning", client.get_issue(10)["labels"])
+        self.assertEqual({}, client.comments)
+
+    def test_repository_contradiction_fails_before_artifact_write(self):
+        client, (state, registry) = ProjectClient(), capacity()
+        client.product_paths.extend(["app.js", "test/app.test.js"])
+        output = project_output()
+        output["stories"][0]["scope"] = ["test/app.test.js"]
+        output["stories"][0]["spec"] = "Change winning allocation disclosure."
+        repository_facts = [{"behavior": "winning allocation disclosure",
+                             "path": "app.js"}]
+        original_read = invoke.read_repository
+
+        def read_with_facts(store):
+            product, adrs, repository = original_read(store)
+            repository["production_owners"] = repository_facts
+            return product, adrs, repository
+
+        try:
+            with mock.patch.object(invoke.artifacts, "GitHubStore", return_value=client), \
+                    mock.patch.object(invoke, "read_repository",
+                                      side_effect=read_with_facts), \
+                    mock.patch.object(invoke.artifacts, "write") as write, \
+                    self.assertRaisesRegex(invoke.InvocationError, "schema-invalid"):
+                invoke.execute(
+                    "o/r", 10, "token", 30, 2.5,
+                    runner=mock.Mock(return_value=Result(stdout=json.dumps(output))),
+                    state=state, registry=registry)
+        finally:
+            state.close()
+        write.assert_not_called()
         self.assertIn("project:planning", client.get_issue(10)["labels"])
         self.assertEqual({}, client.comments)
 

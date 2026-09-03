@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import pathlib
+import re
 import subprocess
 import sys
 import tempfile
@@ -82,8 +83,9 @@ def read_repository(client: artifacts.GitHubStore) -> tuple[str, list[dict], dic
                  ("/adr" in f"/{path.lower()}" or "/decisions/" in f"/{path.lower()}/")]
     adrs = [{"path": path, "content": content(path)} for path in adr_paths]
     source_paths = [path for path in files if path != product_paths[0] and
-                    path.lower().endswith((".js", ".mjs", ".cjs", ".json", ".md",
-                                           ".yml", ".yaml"))]
+                    path.lower().endswith((".js", ".mjs", ".cjs", ".ts", ".tsx",
+                                           ".jsx", ".py", ".json", ".toml", ".md",
+                                           ".yml", ".yaml", ".html", ".htm", ".css"))]
     sources, total = {}, 0
     for path in source_paths:
         text = content(path)
@@ -92,7 +94,101 @@ def read_repository(client: artifacts.GitHubStore) -> tuple[str, list[dict], dic
             raise InvocationError(
                 "repository read constraint failed: grounded source context exceeds 500KB")
         sources[path] = text
-    return product, adrs, {"default_branch": branch, "files": files, "sources": sources}
+    evidence = repository_evidence(files, sources)
+    return product, adrs, {"default_branch": branch, "files": files,
+                           "sources": sources, **evidence}
+
+
+def repository_evidence(files: list[str], sources: dict[str, str]) -> dict:
+    """Extract explicit structured ownership and mechanically provable policy facts."""
+    known = set(files)
+    owners, forbidden, assertions = [], set(), []
+    for source_path, text in sources.items():
+        if source_path.lower().endswith(".json"):
+            try:
+                manifest = json.loads(text)
+            except json.JSONDecodeError:
+                manifest = None
+            if isinstance(manifest, dict):
+                containers = (manifest.get("factoryPlanning"),
+                              manifest.get("factoryPolicy"), manifest.get("policy"))
+                for container in containers:
+                    if isinstance(container, dict):
+                        values = container.get("forbiddenDependencies") or []
+                        if isinstance(values, list):
+                            forbidden.update(item for item in values
+                                             if isinstance(item, str) and item)
+                        ownership = container.get("productionOwners") or []
+                        if isinstance(ownership, dict):
+                            ownership = [{"behavior": behavior, "path": path}
+                                         for behavior, path in ownership.items()]
+                        if isinstance(ownership, list):
+                            for fact in ownership:
+                                if not isinstance(fact, dict):
+                                    continue
+                                path = fact.get("path")
+                                behavior = fact.get("behavior")
+                                story_key = fact.get("storyKey", fact.get("story_key"))
+                                if (not isinstance(path, str) or path not in known
+                                        or not ((isinstance(behavior, str) and behavior)
+                                                or (isinstance(story_key, str)
+                                                    and story_key))):
+                                    continue
+                                owners.append({
+                                    "path": path, "behavior": behavior or "",
+                                    "story_key": story_key or "",
+                                    "evidence": (f"{source_path}:"
+                                                 "productionOwners"),
+                                })
+        if executable_test_path(source_path):
+            for line_number, line in enumerate(text.splitlines(), 1):
+                names = forbidden_dependency_assertions(line)
+                for name in names:
+                    forbidden.add(name)
+                    assertions.append({
+                        "kind": "forbidden-dependency", "name": name,
+                        "evidence": f"{source_path}:{line_number}",
+                    })
+    return {"production_owners": owners,
+            "forbidden_dependencies": sorted(forbidden),
+            "policy_assertions": assertions}
+
+
+DEPENDENCY_ACCESS = (r"(?:devDependencies|dependencies)(?:\?\.)?"
+                     r"(?:\.([@A-Za-z0-9_/-]+)|\[['\"]([@A-Za-z0-9_./-]+)['\"]\])")
+
+
+def executable_test_path(path: str) -> bool:
+    """True for conventional executable test files, never prose or product source."""
+    lowered = path.lower()
+    name = pathlib.PurePosixPath(lowered).name
+    return (lowered.startswith(("test/", "tests/", "spec/", "specs/"))
+            or "/test/" in lowered or "/tests/" in lowered
+            or name.startswith("test_") or ".test." in name or ".spec." in name)
+
+
+def forbidden_dependency_assertions(line: str) -> set[str]:
+    """Names denied by explicit assertion shapes; positive assertions yield none."""
+    names = set()
+    patterns = (
+        rf"assert\.(?:equal|strictEqual)\s*\([^,]*{DEPENDENCY_ACCESS}\s*,\s*"
+        r"(?:undefined|null|false)\b",
+        rf"expect\s*\([^)]*{DEPENDENCY_ACCESS}[^)]*\)\."
+        r"(?:toBeUndefined|toBeFalsy|toBeNull)\s*\(",
+        rf"assert(?:\.ok)?\s*\(\s*!\s*[^)]*{DEPENDENCY_ACCESS}",
+    )
+    for pattern in patterns:
+        for match in re.finditer(pattern, line, re.I):
+            names.add(next(value for value in match.groups() if value))
+    empty_map_patterns = (
+        r"assert\.(?:deepEqual|deepStrictEqual)\s*\([^,]*"
+        r"(?:devDependencies|dependencies)\s*,\s*\{\s*\}",
+        r"expect\s*\([^)]*(?:devDependencies|dependencies)[^)]*\)\."
+        r"(?:toEqual|toStrictEqual)\s*\(\s*\{\s*\}\s*\)",
+    )
+    if any(re.search(pattern, line, re.I) for pattern in empty_map_patterns):
+        names.add("*")
+    return names
 
 
 def prompt_version() -> str:
@@ -243,7 +339,7 @@ def run_model(value: dict, timeout: int, max_usd: float,
             def validate(raw):
                 nonlocal parsed
                 parsed = _parse_output(raw)
-                contract.validate_output(altitude, parsed)
+                contract.validate_output(altitude, parsed, value.get("repository"))
             material = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
             result = executor.execute(
                 task_key="planning:" + hashlib.sha256(material).hexdigest(),
@@ -278,7 +374,7 @@ def execute(repo: str, artifact: int, token: str, timeout: int, max_usd: float,
            f"prompt-{prompt_version()}:feedback-{feedback_version(feedback)}")
     output = run_model(value, timeout, max_usd, runner=runner,
                        state=state, registry=registry)
-    contract.validate_output(altitude, output)
+    contract.validate_output(altitude, output, repository)
     artifacts.write(client, value["trigger"], key, output)
     verified = verify_with_retry(client, value["trigger"], key, altitude)
     if altitude is contract.Altitude.PROJECT:
