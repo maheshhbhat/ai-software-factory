@@ -32,7 +32,7 @@ from factory.capacity_pool.providers import (  # noqa: E402
     AttemptResult, InvocationPayload, ProviderAdapter, cli_adapter,
     provider_environment,
 )
-from factory.capacity_pool.state import CapacityState  # noqa: E402
+from factory.capacity_pool.state import CapacityState, default_state_path  # noqa: E402
 from factory.runtime import operating_envelope  # noqa: E402
 
 class ReviewError(RuntimeError):
@@ -425,9 +425,7 @@ def execute(repo: str, pull_number: int, token: str, *, client=None,
         store_outcome(staging_path, output_path)
         owns_state = state is None
         if state is None:
-            configured = os.environ.get("FACTORY_CAPACITY_STATE", "").strip()
-            state_path = (pathlib.Path(configured) if configured else
-                          ROOT / "runs" / "capacity-pool.sqlite")
+            state_path = default_state_path(ROOT)
             state_path.parent.mkdir(parents=True, exist_ok=True)
             state = CapacityState(state_path, uri=False)
         try:

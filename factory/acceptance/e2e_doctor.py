@@ -42,7 +42,7 @@ import status as live_status  # noqa: E402
 from factory.capacity_pool.policy import POLICIES, resolved_registry  # noqa: E402
 from factory.capacity_pool.providers import cli_adapter, provider_environment  # noqa: E402
 from factory.capacity_pool.router import route  # noqa: E402
-from factory.capacity_pool.state import CapacityState  # noqa: E402
+from factory.capacity_pool.state import CapacityState, default_state_path  # noqa: E402
 
 DEFAULT_REPO = "maheshhbhat/ai-software-factory"
 FORBIDDEN_EXACT = {
@@ -167,9 +167,7 @@ class Doctor:
     def worker_engine_start(self):
         """Probe every model, exclude failures, and prove Delivery still routes."""
         configured = [item for item in resolved_registry(self.env) if item.available]
-        state_path = self.env.get("FACTORY_CAPACITY_STATE", "").strip()
-        state_path = pathlib.Path(state_path) if state_path else \
-            ROOT / "runs" / "capacity-pool.sqlite"
+        state_path = default_state_path(ROOT, self.env)
         state_path.parent.mkdir(parents=True, exist_ok=True)
         state = CapacityState(state_path, uri=False)
         try:

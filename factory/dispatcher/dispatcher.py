@@ -47,7 +47,7 @@ import observability as obs  # noqa: E402
 import correction_context  # noqa: E402
 from factory.capacity_pool import admission as capacity_admission  # noqa: E402
 from factory.capacity_pool.policy import resolved_registry  # noqa: E402
-from factory.capacity_pool.state import CapacityState  # noqa: E402
+from factory.capacity_pool.state import CapacityState, default_state_path  # noqa: E402
 
 WIP_LIMIT = 2                      # §9.10 — a contract value, not a runtime tweak
 ATTEMPT_MAX = 3                    # §4.3.5 — checked at dispatch time, before incrementing
@@ -1036,9 +1036,8 @@ def main(argv: list[str]) -> int:
             if decision.reason == Reason.ATTEMPT_EXHAUSTED:
                 ok, note = poison(args.repo, stories[decision.number], token)
                 recovery_notes.append(f"POISON #{decision.number}: {'APPLIED' if ok else 'SKIP'} {note}")
-        configured = os.environ.get("FACTORY_CAPACITY_STATE", "").strip()
         root = pathlib.Path(__file__).resolve().parents[2]
-        state_path = pathlib.Path(configured) if configured else root / "runs" / "capacity-pool.sqlite"
+        state_path = default_state_path(root)
         state_path.parent.mkdir(parents=True, exist_ok=True)
         state = CapacityState(state_path, uri=False)
         try:

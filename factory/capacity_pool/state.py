@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import hashlib
+import os
+import pathlib
 import sqlite3
 import time
 import uuid
@@ -36,6 +38,47 @@ class DuplicateTask(CapacityStateError):
 
 class CapacityUnavailable(CapacityStateError):
     pass
+
+
+def default_state_path(root, environ=None) -> pathlib.Path:
+    """Return one Capacity Pool database shared by all Git worktrees.
+
+    Linked worktrees each have their own checkout directory, but their Git
+    administrative directories point to one common directory.  Store the
+    operational database there so a clean-worktree change cannot erase model
+    health or same-Story attempt history.  Explicit operator configuration
+    remains authoritative, and non-Git installations retain the old fallback.
+    """
+    env = os.environ if environ is None else environ
+    configured = env.get("FACTORY_CAPACITY_STATE", "").strip()
+    if configured:
+        return pathlib.Path(configured)
+    root = pathlib.Path(root)
+    dotgit = root / ".git"
+    try:
+        if dotgit.is_dir():
+            git_dir = dotgit.resolve()
+        elif dotgit.is_file():
+            marker = dotgit.read_text().strip()
+            if not marker.startswith("gitdir:"):
+                raise ValueError("invalid Git worktree marker")
+            git_dir = pathlib.Path(marker.removeprefix("gitdir:").strip())
+            if not git_dir.is_absolute():
+                git_dir = dotgit.parent / git_dir
+            git_dir = git_dir.resolve()
+        else:
+            raise FileNotFoundError("Git metadata unavailable")
+        common_marker = git_dir / "commondir"
+        if common_marker.is_file():
+            common_dir = pathlib.Path(common_marker.read_text().strip())
+            if not common_dir.is_absolute():
+                common_dir = git_dir / common_dir
+            common_dir = common_dir.resolve()
+        else:
+            common_dir = git_dir
+        return common_dir / "factory" / "capacity-pool.sqlite"
+    except (OSError, ValueError):
+        return root / "runs" / "capacity-pool.sqlite"
 
 
 class CapacityState:

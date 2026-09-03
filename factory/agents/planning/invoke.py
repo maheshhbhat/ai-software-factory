@@ -27,7 +27,7 @@ from factory.capacity_pool.policy import POLICIES, resolved_registry  # noqa: E4
 from factory.capacity_pool.providers import (  # noqa: E402
     InvocationPayload, cli_adapter, provider_environment,
 )
-from factory.capacity_pool.state import CapacityState  # noqa: E402
+from factory.capacity_pool.state import CapacityState, default_state_path  # noqa: E402
 
 DEFAULT_TIMEOUT = 900
 DEFAULT_MAX_USD = 5.0
@@ -195,8 +195,7 @@ def _parse_output(raw: str) -> dict:
 
 
 def _capacity_state() -> CapacityState:
-    configured = os.environ.get("FACTORY_CAPACITY_STATE", "").strip()
-    path = pathlib.Path(configured) if configured else ROOT / "runs" / "capacity-pool.sqlite"
+    path = default_state_path(ROOT)
     path.parent.mkdir(parents=True, exist_ok=True)
     return CapacityState(path, uri=False)
 

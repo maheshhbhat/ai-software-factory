@@ -81,7 +81,7 @@ import readiness_receipt  # noqa: E402
 import runlog       # noqa: E402  — operational record (#104)
 import sequencer    # noqa: E402  — dependency/project lifecycle sequencing (#193)
 import workers      # noqa: E402  — standard worker contract (#84)
-from factory.capacity_pool.state import CapacityState  # noqa: E402
+from factory.capacity_pool.state import CapacityState, default_state_path  # noqa: E402
 
 DISPATCHER = os.path.join(HERE, "..", "dispatcher", "dispatcher.py")
 
@@ -280,9 +280,9 @@ def story_launch_bound(repo: str, story: int) -> int | None:
 
 def release_unstarted_reservation(reservation: str) -> bool:
     """Return true only when durable capacity state proves no model start."""
-    configured = os.environ.get("FACTORY_CAPACITY_STATE", "").strip()
     root = pathlib.Path(__file__).resolve().parents[2]
-    path = pathlib.Path(configured) if configured else root / "runs" / "capacity-pool.sqlite"
+    path = default_state_path(root)
+    path.parent.mkdir(parents=True, exist_ok=True)
     state = CapacityState(path, uri=False)
     try:
         status = state.lease_status(reservation)

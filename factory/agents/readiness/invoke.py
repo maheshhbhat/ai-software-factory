@@ -24,7 +24,7 @@ from factory.agents.review.invoke import (  # noqa: E402
 from factory.capacity_pool.executor import CapacityExecutor  # noqa: E402
 from factory.capacity_pool.policy import POLICIES, resolved_registry  # noqa: E402
 from factory.capacity_pool.providers import InvocationPayload  # noqa: E402
-from factory.capacity_pool.state import CapacityState  # noqa: E402
+from factory.capacity_pool.state import CapacityState, default_state_path  # noqa: E402
 from factory.runtime import operating_envelope, production_readiness  # noqa: E402
 
 DEFAULT_TIMEOUT = 300
@@ -142,9 +142,7 @@ def execute(repo: str, project_number: int, token: str, *, client=None,
         store_outcome(staging, durable)
         owns_state = state is None
         if state is None:
-            configured = os.environ.get("FACTORY_CAPACITY_STATE", "").strip()
-            state_path = pathlib.Path(configured) if configured else \
-                ROOT / "runs" / "capacity-pool.sqlite"
+            state_path = default_state_path(ROOT)
             state_path.parent.mkdir(parents=True, exist_ok=True)
             state = CapacityState(state_path, uri=False)
         try:
