@@ -116,6 +116,35 @@ class TestOutputIsBounded(LogToTemp):
         self.assertLessEqual(len(kept), runlog.MAX_FIELD_CHARS + 1)
         self.assertTrue(kept.endswith("line4999"))
 
+    def test_failed_diagnostic_keeps_the_error_and_summary(self):
+        error = "browserType.launch: Google Chrome crashed"
+        summary = "tests 189; pass 186; fail 0; skipped 3"
+        text = error + "\n" + ("routine output\n" * 400) + summary
+        kept = runlog.diagnostic_excerpt(text)
+        self.assertIn(error, kept)
+        self.assertIn(summary, kept)
+        self.assertIn(runlog.DIAGNOSTIC_OMISSION.strip(), kept)
+        self.assertLessEqual(len(kept), runlog.MAX_FIELD_CHARS)
+
+    def test_failed_diagnostic_is_stable_when_bounded_again(self):
+        text = "primary failure\n" + ("noise" * 1000) + "\nfinal summary"
+        once = runlog.diagnostic_excerpt(text)
+        self.assertEqual(once, runlog.diagnostic_excerpt(once))
+
+    def test_failed_diagnostic_redacts_before_selecting_ends(self):
+        secret = "ghp_" + "a" * 40
+        text = f"launch failed with {secret}\n" + ("noise" * 1000) + "\nend"
+        with mock.patch.dict(runlog.os.environ, {"GH_TOKEN": secret}):
+            kept = runlog.diagnostic_excerpt(text)
+        self.assertNotIn(secret, kept)
+        self.assertIn(runlog.REDACTED, kept)
+
+    def test_failed_diagnostic_honors_a_tiny_bound(self):
+        for limit in range(len(runlog.DIAGNOSTIC_OMISSION) + 2):
+            self.assertLessEqual(
+                len(runlog.diagnostic_excerpt("abcdefghijklmnopqrstuvwxyz", limit)),
+                limit)
+
     def test_the_file_rotates_rather_than_growing_without_bound(self):
         """A long-running loop appending forever is a loop without a bound."""
         with open(self.path, "w", encoding="utf-8") as handle:

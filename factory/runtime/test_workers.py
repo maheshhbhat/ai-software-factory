@@ -308,6 +308,16 @@ class TestLaunchIsObservable(unittest.TestCase):
             self.assertEqual("out", report.stdout)
             self.assertEqual("err", report.stderr)
 
+    def test_failed_launch_keeps_early_error_and_late_summary(self):
+        error = "browserType.launch: Google Chrome crashed"
+        summary = "tests 189; pass 186; fail 0; skipped 3"
+        stderr = error + "\n" + ("routine output\n" * 400) + summary
+        report = w.launch(spec(), 107, 100,
+                          runner=runner_returning(1, stderr=stderr))
+        self.assertIn(error, report.stderr)
+        self.assertIn(summary, report.stderr)
+        self.assertLessEqual(len(report.stderr), w.runlog.MAX_FIELD_CHARS)
+
     def test_a_timeout_keeps_whatever_the_worker_managed_to_print(self):
         """The ambiguous case is the one that most needs its output kept."""
         timeout = subprocess.TimeoutExpired(cmd="w", timeout=1,

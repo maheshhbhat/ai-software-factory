@@ -290,9 +290,9 @@ def run(cmd: list[str], *, cwd: pathlib.Path, timeout: int, env=None,
         # Keep both streams. A timeout's stderr was dropped entirely, and for
         # an engine killed mid-explanation that was the half worth reading.
         detail = f"bounded execution exhausted after {timeout}s"
-        stderr_tail = runlog.tail(printed(exc.stderr))
-        if stderr_tail:
-            detail += f"; stderr tail: {stderr_tail}"
+        stderr_excerpt = runlog.diagnostic_excerpt(printed(exc.stderr))
+        if stderr_excerpt:
+            detail += f"; stderr diagnostic: {stderr_excerpt}"
         raise DeliveryError(detail, printed(exc.stdout)) from exc
     if result.returncode:
         # The engine's own explanation lives in these streams. A 300-character
@@ -303,8 +303,8 @@ def run(cmd: list[str], *, cwd: pathlib.Path, timeout: int, env=None,
         # redacts credentials — both properties wanted here.
         raise DeliveryError(
             f"command failed ({result.returncode})"
-            f"; stderr tail: {runlog.tail(result.stderr)}"
-            f"; stdout tail: {runlog.tail(result.stdout)}",
+            f"; stderr diagnostic: {runlog.diagnostic_excerpt(result.stderr)}"
+            f"; stdout diagnostic: {runlog.diagnostic_excerpt(result.stdout)}",
             printed(result.stdout))
     return result
 

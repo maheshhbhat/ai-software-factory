@@ -392,8 +392,8 @@ def launch(spec: WorkerSpec, story: int, project: int,
             f"worse than a late one. The §9.4 lease will recover the claim "
             f"if nothing was started.",
             elapsed_ms=runlog.elapsed_ms(started),
-            stdout=runlog.tail(_stream(exc.output)),
-            stderr=runlog.tail(_stream(exc.stderr))))
+            stdout=runlog.diagnostic_excerpt(_stream(exc.output)),
+            stderr=runlog.diagnostic_excerpt(_stream(exc.stderr))))
     except FileNotFoundError as exc:
         return finish(LaunchReport(spec.name, Result.FAILED, f"not launchable: {exc}",
                                    elapsed_ms=runlog.elapsed_ms(started)))
@@ -421,8 +421,10 @@ def report_from(worker: str, completed, started: float) -> LaunchReport:
         exit_code=completed.returncode,
         elapsed_ms=runlog.elapsed_ms(started),
         pid=getattr(completed, "pid", None),
-        stdout=runlog.tail(completed.stdout),
-        stderr=runlog.tail(completed.stderr))
+        stdout=(runlog.tail(completed.stdout) if launched else
+                runlog.diagnostic_excerpt(completed.stdout)),
+        stderr=(runlog.tail(completed.stderr) if launched else
+                runlog.diagnostic_excerpt(completed.stderr)))
 
 
 def _stream(value) -> str:
