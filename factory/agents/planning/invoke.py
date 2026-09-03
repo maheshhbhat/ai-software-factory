@@ -141,32 +141,44 @@ def repository_evidence(files: list[str], sources: dict[str, str]) -> dict:
                                                  "productionOwners"),
                                 })
         for line_number, line in enumerate(text.splitlines(), 1):
-            lowered = line.lower()
-            if not re.search(r"\b(?:assert|expect)\b", lowered):
-                continue
-            if not re.search(
-                    r"\b(?:undefined|false|null|empty|not\.|notin|not_in|does not)",
-                    lowered):
-                continue
-            names = re.findall(
-                r"(?:devdependencies|dependencies)(?:\?\.)?(?:\[['\"]|\.)"
-                r"([@A-Za-z0-9_./-]+)", line, re.I)
+            names = forbidden_dependency_assertions(line)
             for name in names:
                 forbidden.add(name)
                 assertions.append({
                     "kind": "forbidden-dependency", "name": name,
                     "evidence": f"{source_path}:{line_number}",
                 })
-            if (re.search(r"(?:devdependencies|dependencies)", lowered)
-                    and re.search(r"\{\s*\}", line)):
-                forbidden.add("*")
-                assertions.append({
-                    "kind": "forbidden-dependency", "name": "*",
-                    "evidence": f"{source_path}:{line_number}",
-                })
     return {"production_owners": owners,
             "forbidden_dependencies": sorted(forbidden),
             "policy_assertions": assertions}
+
+
+DEPENDENCY_ACCESS = (r"(?:devDependencies|dependencies)(?:\?\.)?"
+                     r"(?:\.([@A-Za-z0-9_/-]+)|\[['\"]([@A-Za-z0-9_./-]+)['\"]\])")
+
+
+def forbidden_dependency_assertions(line: str) -> set[str]:
+    """Names denied by explicit assertion shapes; positive assertions yield none."""
+    names = set()
+    patterns = (
+        rf"assert\.(?:equal|strictEqual)\s*\([^,]*{DEPENDENCY_ACCESS}\s*,\s*"
+        r"(?:undefined|null|false)\b",
+        rf"expect\s*\([^)]*{DEPENDENCY_ACCESS}[^)]*\)\."
+        r"(?:toBeUndefined|toBeFalsy|toBeNull)\s*\(",
+        rf"assert(?:\.ok)?\s*\(\s*!\s*[^)]*{DEPENDENCY_ACCESS}",
+    )
+    for pattern in patterns:
+        for match in re.finditer(pattern, line, re.I):
+            names.add(next(value for value in match.groups() if value))
+    empty_map_patterns = (
+        r"assert\.(?:deepEqual|deepStrictEqual)\s*\([^,]*"
+        r"(?:devDependencies|dependencies)\s*,\s*\{\s*\}",
+        r"expect\s*\([^)]*(?:devDependencies|dependencies)[^)]*\)\."
+        r"(?:toEqual|toStrictEqual)\s*\(\s*\{\s*\}\s*\)",
+    )
+    if any(re.search(pattern, line, re.I) for pattern in empty_map_patterns):
+        names.add("*")
+    return names
 
 
 def prompt_version() -> str:

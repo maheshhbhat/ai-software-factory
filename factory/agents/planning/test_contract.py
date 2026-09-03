@@ -284,12 +284,28 @@ class RepositoryCompatibilityTests(unittest.TestCase):
         with self.assertRaisesRegex(contract.ContractError, "does not resolve"):
             contract.validate_repository_compatibility(value, self.repository())
 
+    def test_scope_star_does_not_cross_path_segments(self):
+        value = self.plan(scope=["src/*.py"])
+        repository = {"files": ["product.md", "src/nested/app.py"]}
+        with self.assertRaisesRegex(contract.ContractError, "does not resolve"):
+            contract.validate_repository_compatibility(value, repository)
+
     def test_claimed_existing_verification_path_must_resolve(self):
         value = self.plan(
             spec="Reuse the existing verification path `test/missing.js`.")
         with self.assertRaisesRegex(contract.ContractError,
                                     "existing repository path.*does not resolve"):
             contract.validate_repository_compatibility(value, self.repository())
+
+    def test_new_path_is_not_misclassified_by_later_existing_path_claim(self):
+        value = self.plan(
+            spec="Create src/new.py. Reuse existing src/base.py.",
+            scope=["src/new.py", "src/base.py"])
+        repository = self.repository()
+        repository["files"].append("src/base.py")
+        repository["production_owners"] = []
+        self.assertIs(value, contract.validate_repository_compatibility(
+            value, repository))
 
     def test_explicitly_forbidden_dependency_is_rejected(self):
         value = self.plan(spec=(

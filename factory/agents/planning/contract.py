@@ -8,8 +8,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-import fnmatch
 import re
+
+from factory.gates.merge_gate import match_path
 
 
 class ContractError(ValueError):
@@ -322,13 +323,15 @@ def validate_output(altitude: Altitude, value: dict,
     return value
 
 
-PATH_TOKEN = re.compile(
-    r"(?<![A-Za-z0-9_])(?:`|['\"])?([A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.*?{}\[\]-]+)+|"
-    r"[A-Za-z0-9_-]+\.(?:js|mjs|cjs|ts|tsx|jsx|py|json|ya?ml|md|toml))"
-    r"(?:`|['\"])?(?![A-Za-z0-9_./-])")
-EXISTING_CLAIM = re.compile(
-    r"\b(?:existing|current|already|reuse|implementation|manifest|workflow|"
-    r"verification path|test path|policy)\b", re.I)
+PATH_VALUE = (r"[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.*?{}\[\]-]+)+|"
+              r"[A-Za-z0-9_-]+\.(?:js|mjs|cjs|ts|tsx|jsx|py|json|ya?ml|md|toml)")
+EXISTING_PATH_CLAIM = re.compile(
+    r"\b(?:(?:reuse\s+(?:the\s+)?)?(?:existing|current)\s+"
+    r"(?:(?:implementation|test|manifest|workflow|verification|path|file)\s+){0,3}"
+    r"(?:at\s+|in\s+|from\s+)?|"
+    r"(?:implementation|manifest|workflow|verification path|test path)\s+"
+    r"(?:at\s+|in\s+|from\s+))"
+    rf"(?:`|['\"])?({PATH_VALUE})(?:`|['\"])?(?![A-Za-z0-9_./-])", re.I)
 DEPENDENCY_PROPOSAL = re.compile(
     r"\b(?:add|install|introduce|require|use)\s+(?:the\s+)?(?:dependency\s+)?"
     r"[`'\"]?([A-Za-z0-9@/_.-]+)", re.I)
@@ -343,20 +346,26 @@ def _story_text(story: dict) -> str:
     ))
 
 
-def _path_resolves(pattern: str, files: set[str]) -> bool:
+def _repository_path_resolves(pattern: str, files: set[str]) -> bool:
+    normalized = pattern.removeprefix("./").rstrip("/")
+    return normalized in files or any(match_path(normalized, path) for path in files)
+
+
+def _scope_resolves(pattern: str, files: set[str]) -> bool:
     normalized = pattern.removeprefix("./").rstrip("/")
     recursive_root = normalized[:-3].rstrip("/") if normalized.endswith("/**") else ""
-    return (normalized in files or any(fnmatch.fnmatchcase(path, normalized) for path in files)
-            or any(path.startswith(normalized + "/") for path in files)
+    parent = normalized.rsplit("/", 1)[0] if "/" in normalized else ""
+    new_file_beside_existing = (not re.search(r"[*?\[]", normalized)
+                                and (not parent or any(
+                                    path.startswith(parent + "/") for path in files)))
+    return (_repository_path_resolves(normalized, files) or new_file_beside_existing
             or bool(recursive_root) and any(
                 path == recursive_root or path.startswith(recursive_root + "/")
                 or path.startswith(recursive_root + ".") for path in files))
 
 
 def _scope_authorizes(path: str, scope: list[str]) -> bool:
-    return any(path == pattern.removeprefix("./").rstrip("/")
-               or fnmatch.fnmatchcase(path, pattern.removeprefix("./"))
-               or path.startswith(pattern.removeprefix("./").rstrip("/") + "/")
+    return any(match_path(pattern.removeprefix("./"), path)
                for pattern in scope if isinstance(pattern, str))
 
 
@@ -402,18 +411,16 @@ def validate_repository_compatibility(value: dict, repository: dict) -> dict:
         key = story.get("key")
         scope = story.get("scope") or []
         for pattern in scope:
-            if not isinstance(pattern, str) or not _path_resolves(pattern, files):
+            if not isinstance(pattern, str) or not _scope_resolves(pattern, files):
                 raise ContractError(
                     f"Story {key!r} scope path/pattern does not resolve: {pattern!r}")
         text = _story_text(story)
-        for sentence in re.split(r"[\n;]+", text):
-            if not EXISTING_CLAIM.search(sentence):
-                continue
-            for path in PATH_TOKEN.findall(sentence):
-                if not _path_resolves(path, files):
-                    raise ContractError(
-                        f"Story {key!r} claims an existing repository path that does "
-                        f"not resolve: {path!r}")
+        for claim in EXISTING_PATH_CLAIM.finditer(text):
+            path = claim.group(1).rstrip(".,")
+            if not _repository_path_resolves(path, files):
+                raise ContractError(
+                    f"Story {key!r} claims an existing repository path that does "
+                    f"not resolve: {path!r}")
         lowered = text.lower()
         for fact in owners:
             path = fact.get("path")
@@ -422,7 +429,8 @@ def validate_repository_compatibility(value: dict, repository: dict) -> dict:
             applies = (required_key == key or
                        isinstance(behavior, str) and bool(behavior)
                        and behavior.lower() in lowered)
-            if (applies and isinstance(path, str) and _path_resolves(path, files)
+            if (applies and isinstance(path, str)
+                    and _repository_path_resolves(path, files)
                     and not _scope_authorizes(path, scope)):
                 raise ContractError(
                     f"Story {key!r} promises behavior owned by {path!r} but omits "

@@ -88,6 +88,24 @@ class InvocationTests(unittest.TestCase):
              "app.js": "export const render = () => {};"})
         self.assertEqual([], evidence["production_owners"])
 
+    def test_positive_dependency_presence_assertion_is_not_a_ban(self):
+        lines = [
+            "expect(packageJson.dependencies.react).not.toBeNull();",
+            "expect(packageJson.dependencies).not.toEqual({});",
+        ]
+        for line in lines:
+            with self.subTest(line=line):
+                self.assertEqual(set(), invoke.forbidden_dependency_assertions(line))
+        line = lines[0]
+        evidence = invoke.repository_evidence(
+            ["test/policy.test.js"], {"test/policy.test.js": line})
+        self.assertEqual([], evidence["forbidden_dependencies"])
+
+    def test_explicit_dependency_absence_assertion_is_a_ban(self):
+        line = "assert.equal(packageJson.devDependencies.playwright, undefined);"
+        self.assertEqual(
+            {"playwright"}, invoke.forbidden_dependency_assertions(line))
+
     def test_product_preflight_requires_exactly_one_nonempty_product(self):
         for client, error in ((Client(product_paths=[]), invoke.InvocationError),
                               (Client(product_paths=["product.md", "Product.md"]),
