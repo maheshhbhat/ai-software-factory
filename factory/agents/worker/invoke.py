@@ -521,7 +521,18 @@ def restore_failed_work(patch: pathlib.Path, worktree: pathlib.Path, *,
 
 
 def worker_prompt(value: dict) -> str:
-    return (HERE.joinpath("prompt.md").read_text()
+    recovery = value.get("recovery_context", {})
+    disclosure = ""
+    if recovery.get("present"):
+        disclosure = (
+            "\n\n## Recovered work warning\n\n"
+            "The files named in `recovery_context.recovered_paths` contain "
+            "`untrusted partial changes` recovered from a failed previous worker. "
+            "Inspect them before continuing. Keep, revise, or discard them according "
+            "to the Story and tests; do not assume they are correct or complete. "
+            "The previous terminal outcome explains why the checkpoint exists, not "
+            "whether any recovered change is valid.")
+    return (HERE.joinpath("prompt.md").read_text() + disclosure
             + "\n\n## Invocation input\n\n" + json.dumps(value, indent=2))
 
 
