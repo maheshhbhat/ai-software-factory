@@ -1,4 +1,5 @@
 import copy
+import json
 import re
 import unittest
 
@@ -79,8 +80,16 @@ def campaign_output():
 
 
 def project_output():
+    verification = json.dumps({
+        "type": "automated", "scope": "src/model/verification.py",
+        "executor": "src/model/verification.py", "executor_source": "create",
+        "action": "python3 src/model/verification.py",
+        "expected": "the example assertion passes",
+        "failure": "the command exits nonzero",
+    }, separators=(",", ":"), sort_keys=True)
     base = {"phase": "build", "hazard": False, "spend_cap": "$5 / 60 min",
-            "scope": ["src/model/**"], "acceptance_criteria": ["Example passes"]}
+            "scope": ["src/model/**"],
+            "acceptance_criteria": ["Example passes || VERIFY " + verification]}
     return {"altitude": "project",
             "acceptance_criteria": ["A verified projection is returned or refusal is explicit"],
             "operating_envelope": [{"id": "OE-SCALE-1",

@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from enum import Enum
 import json
 import re
+import shlex
 
 from factory.gates.merge_gate import match_path
 
@@ -56,6 +57,10 @@ AUTOMATED_VERIFICATION_FIELDS = frozenset({
 HUMAN_VERIFICATION_FIELDS = frozenset({
     "type", "scope", "action", "expected", "failure", "reason",
 })
+EXECUTOR_RUNNERS = frozenset({
+    "bash", "node", "npx", "npm", "python", "python3", "pytest", "sh",
+})
+SHELL_CONTROL_TOKENS = frozenset({"&&", "||", ";", "|", "&"})
 
 
 def proposes_raw_browser_launcher(text: str) -> bool:
@@ -338,14 +343,6 @@ def validate_acceptance_verification(value: dict, repository: dict) -> dict:
     """Bind every planned Story criterion to a deterministic executor or bell."""
     if value.get("altitude") != Altitude.PROJECT.value:
         return value
-    criteria = [criterion for story in value.get("stories", [])
-                for criterion in (story.get("acceptance_criteria") or [])]
-    # Stored pre-2.4 plans have no marker and remain readable. The structured-output
-    # schema requires the marker for every newly generated plan; this check prevents
-    # a partially annotated plan from using that compatibility rule as an escape.
-    if not any(isinstance(item, str) and VERIFICATION_MARKER in item
-               for item in criteria):
-        return value
     files = {path for path in repository.get("files", []) if isinstance(path, str)}
     human_bells = 0
     for story in value.get("stories", []):
@@ -390,7 +387,15 @@ def validate_acceptance_verification(value: dict, repository: dict) -> dict:
             if re.search(r"[*?\[\]{}]", executor):
                 raise ContractError(
                     f"Story {key!r} acceptance executor must be one concrete path")
-            if executor not in record["action"]:
+            try:
+                command = shlex.split(record["action"])
+            except ValueError as error:
+                raise ContractError(
+                    f"Story {key!r} acceptance action is not a valid command") from error
+            runner = command[0].rsplit("/", 1)[-1] if command else ""
+            if (executor not in command or any(token in SHELL_CONTROL_TOKENS
+                                               for token in command)
+                    or command[0] != executor and runner not in EXECUTOR_RUNNERS):
                 raise ContractError(
                     f"Story {key!r} acceptance action does not invoke its executor")
             source = record["executor_source"]

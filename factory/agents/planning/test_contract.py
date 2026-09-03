@@ -292,11 +292,10 @@ class AcceptanceVerificationTests(unittest.TestCase):
         return {"files": ["app.js", "test/app.test.js"]}
 
     def test_criterion_without_executor_record_is_rejected(self):
-        value = self.plan("The disclosure is visible")
-        value["stories"][0]["acceptance_criteria"].insert(0, self.record())
         with self.assertRaisesRegex(contract.ContractError, "lacks one verification"):
             contract.validate_output(
-                contract.Altitude.PROJECT, value, self.repository())
+                contract.Altitude.PROJECT, self.plan("The disclosure is visible"),
+                self.repository())
 
     def test_structured_output_requires_verification_on_new_story_criteria(self):
         story_schema = contract.PROJECT_JSON_SCHEMA["properties"]["stories"]["items"]
@@ -329,7 +328,7 @@ class AcceptanceVerificationTests(unittest.TestCase):
 
     def test_automated_action_must_invoke_one_concrete_executor(self):
         for changes, message in (
-            ({"action": "python3 -m unittest"}, "does not invoke"),
+            ({"action": "echo test/app.test.js"}, "does not invoke"),
             ({"scope": "test/*.test.js", "executor": "test/*.test.js",
               "action": "node --test test/*.test.js"}, "one concrete path"),
         ):
