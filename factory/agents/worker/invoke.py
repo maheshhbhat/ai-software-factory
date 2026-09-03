@@ -498,9 +498,17 @@ def recovery_available(patch: pathlib.Path) -> bool:
         manifest_source = manifest if manifest.is_file() else manifest_tombstone
         try:
             value = json.loads(manifest_source.read_text(encoding="utf-8"))
-            patch_text = patch_source.read_text(encoding="utf-8")
         except (OSError, json.JSONDecodeError) as exc:
             raise RecoveryError("recovery cleanup transaction is invalid") from exc
+        if not isinstance(value, dict):
+            raise RecoveryError("recovery cleanup transaction is invalid")
+        if not patch_source.is_file():
+            if (manifest_source == manifest_tombstone and
+                    FULL_COMMIT.fullmatch(value.get("delivered_head", ""))):
+                manifest_tombstone.unlink(missing_ok=True)
+                return False
+            raise RecoveryError("recovery cleanup transaction is invalid")
+        patch_text = patch_source.read_text(encoding="utf-8")
         if (not FULL_COMMIT.fullmatch(value.get("delivered_head", "")) or
                 value.get("patch_sha256") != hashlib.sha256(
                     patch_text.encode("utf-8")).hexdigest()):
@@ -517,6 +525,8 @@ def recovery_available(patch: pathlib.Path) -> bool:
         patch_text = patch.read_text(encoding="utf-8")
     except (OSError, json.JSONDecodeError):
         raise RecoveryError("recovery checkpoint metadata is unavailable")
+    if not isinstance(value, dict):
+        raise RecoveryError("recovery checkpoint metadata is not an object")
     if value.get("patch_sha256") != hashlib.sha256(
             patch_text.encode("utf-8")).hexdigest():
         raise RecoveryError("recovery checkpoint digest does not match its manifest")
@@ -553,6 +563,8 @@ def mark_recovery_pushed(patch: pathlib.Path, head: str) -> None:
         value = json.loads(manifest.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise RecoveryError("recovery checkpoint metadata is unavailable") from exc
+    if not isinstance(value, dict):
+        raise RecoveryError("recovery checkpoint metadata is not an object")
     value["delivered_head"] = head
     value["delivery_verified_at"] = (
         datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"))
@@ -567,6 +579,8 @@ def pushed_recovery_head(patch: pathlib.Path, *, repo: str, story_number: int,
         value = json.loads(recovery_manifest(patch).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise RecoveryError("recovery checkpoint metadata is unavailable") from exc
+    if not isinstance(value, dict):
+        raise RecoveryError("recovery checkpoint metadata is not an object")
     head = value.get("delivered_head")
     if head is None:
         return None
@@ -681,6 +695,8 @@ def restore_failed_work(patch: pathlib.Path, worktree: pathlib.Path, *,
         patch_text = patch.read_text(encoding="utf-8")
     except (OSError, json.JSONDecodeError) as exc:
         raise RecoveryError(f"recovery checkpoint metadata is unavailable: {exc}") from exc
+    if not isinstance(value, dict):
+        raise RecoveryError("recovery checkpoint metadata is not an object")
     paths = value.get("recovered_paths")
     expected = {
         "schema_version": RECOVERY_SCHEMA_VERSION,
@@ -833,7 +849,10 @@ def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
             raise
         if delivered_head:
             if delivered_head != base_commit:
-                raise RecoveryError("pushed recovery head does not match branch head")
+                exc = RecoveryError(
+                    "pushed recovery head does not match branch head")
+                exc.recovery_ref = str(saved_recovery)
+                raise exc
             body = f"Story: #{story_number}\n\n{durable}\n"
             pull = (client.update_pr(pulls[0]["number"], body) if pulls else
                     client.create_pr(f"Story #{story_number}: bounded delivery",
