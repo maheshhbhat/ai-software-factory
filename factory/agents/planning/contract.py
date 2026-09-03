@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+import json
 import re
 
 from factory.gates.merge_gate import match_path
@@ -47,6 +48,14 @@ RAW_BROWSER_LAUNCH_PATTERNS = (
     r"--remote-debugging", r"child_process", r"\bspawn\s*\(",
     r"\bexecfile\s*\(",
 )
+
+VERIFICATION_MARKER = " || VERIFY "
+AUTOMATED_VERIFICATION_FIELDS = frozenset({
+    "type", "scope", "executor", "executor_source", "action", "expected", "failure",
+})
+HUMAN_VERIFICATION_FIELDS = frozenset({
+    "type", "scope", "action", "expected", "failure", "reason",
+})
 
 
 def proposes_raw_browser_launcher(text: str) -> bool:
@@ -112,7 +121,8 @@ PROJECT_JSON_SCHEMA = {
                           "enum": ["build", "ship", "shadow", "cutover", "hardening"]},
                 "depends_on": {"type": "array", "items": {"type": "string"}},
                 "hazard": {"type": "boolean"},
-                "acceptance_criteria": {"type": "array", "items": {"type": "string"},
+                "acceptance_criteria": {"type": "array", "items": {
+                    "type": "string", "pattern": r" \|\| VERIFY \{"},
                                         "minItems": 1},
                 "operating_envelope_ids": {"type": "array",
                                            "items": {"type": "string"}},
@@ -319,7 +329,88 @@ def validate_output(altitude: Altitude, value: dict,
                 "project digest must contain a plain-language explanation and two Mermaid "
                 "diagrams (system flow and story dependencies)")
     if repository is not None:
+        validate_acceptance_verification(value, repository)
         validate_repository_compatibility(value, repository)
+    return value
+
+
+def validate_acceptance_verification(value: dict, repository: dict) -> dict:
+    """Bind every planned Story criterion to a deterministic executor or bell."""
+    if value.get("altitude") != Altitude.PROJECT.value:
+        return value
+    criteria = [criterion for story in value.get("stories", [])
+                for criterion in (story.get("acceptance_criteria") or [])]
+    # Stored pre-2.4 plans have no marker and remain readable. The structured-output
+    # schema requires the marker for every newly generated plan; this check prevents
+    # a partially annotated plan from using that compatibility rule as an escape.
+    if not any(isinstance(item, str) and VERIFICATION_MARKER in item
+               for item in criteria):
+        return value
+    files = {path for path in repository.get("files", []) if isinstance(path, str)}
+    human_bells = 0
+    for story in value.get("stories", []):
+        key = story.get("key")
+        scope = story.get("scope") or []
+        for criterion in story.get("acceptance_criteria") or []:
+            if not isinstance(criterion, str) or criterion.count(VERIFICATION_MARKER) != 1:
+                raise ContractError(
+                    f"Story {key!r} acceptance criterion lacks one verification record")
+            claim, encoded = criterion.split(VERIFICATION_MARKER, 1)
+            if not claim.strip():
+                raise ContractError(f"Story {key!r} acceptance criterion is empty")
+            try:
+                record = json.loads(encoded)
+            except (TypeError, json.JSONDecodeError) as error:
+                raise ContractError(
+                    f"Story {key!r} acceptance verification is not valid JSON") from error
+            if not isinstance(record, dict):
+                raise ContractError(
+                    f"Story {key!r} acceptance verification must be an object")
+            kind = record.get("type")
+            expected_fields = (AUTOMATED_VERIFICATION_FIELDS if kind == "automated"
+                               else HUMAN_VERIFICATION_FIELDS if kind == "human-bell"
+                               else None)
+            if expected_fields is None or set(record) != expected_fields:
+                raise ContractError(
+                    f"Story {key!r} acceptance verification has an invalid executor type "
+                    "or fields")
+            if not all(isinstance(record.get(field), str) and record[field].strip()
+                       for field in expected_fields):
+                raise ContractError(
+                    f"Story {key!r} acceptance verification fields must be non-empty strings")
+            verification_scope = record["scope"]
+            if not _scope_authorizes(verification_scope, scope):
+                raise ContractError(
+                    f"Story {key!r} acceptance verification scope "
+                    f"{verification_scope!r} is not authorized by Story scope")
+            if kind == "human-bell":
+                human_bells += 1
+                continue
+            executor = record["executor"]
+            if re.search(r"[*?\[\]{}]", executor):
+                raise ContractError(
+                    f"Story {key!r} acceptance executor must be one concrete path")
+            if executor not in record["action"]:
+                raise ContractError(
+                    f"Story {key!r} acceptance action does not invoke its executor")
+            source = record["executor_source"]
+            if source == "existing":
+                if not _repository_path_resolves(executor, files):
+                    raise ContractError(
+                        f"Story {key!r} acceptance executor does not exist: {executor!r}")
+            elif source == "create":
+                if executor in files or not _scope_authorizes(executor, scope):
+                    raise ContractError(
+                        f"Story {key!r} acceptance executor is not created within "
+                        f"authorized scope: {executor!r}")
+            else:
+                raise ContractError(
+                    f"Story {key!r} acceptance executor_source must be 'existing' or 'create'")
+    expected_bells = value.get("expected_bells")
+    if human_bells and (not isinstance(expected_bells, int)
+                        or expected_bells < 2 + human_bells):
+        raise ContractError(
+            "project expected_bells must count every declared human acceptance bell")
     return value
 
 

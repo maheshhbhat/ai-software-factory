@@ -1,4 +1,6 @@
+import json
 import pathlib
+import re
 import unittest
 
 import contract
@@ -252,12 +254,150 @@ Text fallback."""
             contract.validate_output(contract.Altitude.PROJECT, value)
 
 
+class AcceptanceVerificationTests(unittest.TestCase):
+    DIGEST = OutputTests.DIGEST
+
+    def record(self, **changes):
+        executor = changes.get("executor", "test/app.test.js")
+        record = {
+            "type": "automated", "scope": "test/app.test.js",
+            "executor": "test/app.test.js", "executor_source": "existing",
+            "action": f"python3 -m unittest {executor}",
+            "expected": "the named assertion passes",
+            "failure": "the command exits nonzero",
+        }
+        record.update(changes)
+        return "The disclosure is visible || VERIFY " + json.dumps(
+            record, separators=(",", ":"), sort_keys=True)
+
+    def plan(self, criterion=None, *, scope=None, expected_bells=2,
+             envelope=None, checks=None):
+        story = {
+            "key": "disclosure", "title": "Allocation disclosure",
+            "spec": "Change the disclosure.", "phase": "hardening",
+            "depends_on": [], "hazard": False,
+            "acceptance_criteria": [criterion or self.record()],
+            "operating_envelope_ids": ["OE-1"] if envelope else [],
+            "operating_envelope_checks": checks or [],
+            "scope": scope or ["app.js", "test/app.test.js"],
+            "spend_cap": "$5 / 60 min",
+        }
+        return {
+            "altitude": "project", "acceptance_criteria": ["criterion"],
+            "operating_envelope": envelope or [], "adr": {}, "stories": [story],
+            "expected_bells": expected_bells, "risks": "risk", "digest": self.DIGEST,
+        }
+
+    def repository(self):
+        return {"files": ["app.js", "test/app.test.js"]}
+
+    def test_criterion_without_executor_record_is_rejected(self):
+        value = self.plan("The disclosure is visible")
+        value["stories"][0]["acceptance_criteria"].insert(0, self.record())
+        with self.assertRaisesRegex(contract.ContractError, "lacks one verification"):
+            contract.validate_output(
+                contract.Altitude.PROJECT, value, self.repository())
+
+    def test_structured_output_requires_verification_on_new_story_criteria(self):
+        story_schema = contract.PROJECT_JSON_SCHEMA["properties"]["stories"]["items"]
+        pattern = story_schema["properties"]["acceptance_criteria"]["items"]["pattern"]
+        self.assertIsNone(re.search(pattern, "The disclosure is visible"))
+        self.assertIsNotNone(re.search(pattern, self.record()))
+
+    def test_nonexistent_existing_executor_is_rejected(self):
+        criterion = self.record(scope="test/missing.test.js",
+                                executor="test/missing.test.js")
+        with self.assertRaisesRegex(contract.ContractError, "executor does not exist"):
+            contract.validate_output(
+                contract.Altitude.PROJECT, self.plan(
+                    criterion, scope=["app.js", "test/*.test.js"]), self.repository())
+
+    def test_executor_created_within_authorized_scope_is_accepted(self):
+        criterion = self.record(scope="test/new.test.js", executor="test/new.test.js",
+                                executor_source="create")
+        value = self.plan(criterion, scope=["app.js", "test/*.test.js"])
+        self.assertIs(value, contract.validate_output(
+            contract.Altitude.PROJECT, value, self.repository()))
+
+    def test_automated_record_requires_action_result_and_failure_detection(self):
+        for field in ("action", "expected", "failure"):
+            with self.subTest(field=field):
+                criterion = self.record(**{field: ""})
+                with self.assertRaisesRegex(contract.ContractError, "non-empty strings"):
+                    contract.validate_output(
+                        contract.Altitude.PROJECT, self.plan(criterion), self.repository())
+
+    def test_automated_action_must_invoke_one_concrete_executor(self):
+        for changes, message in (
+            ({"action": "python3 -m unittest"}, "does not invoke"),
+            ({"scope": "test/*.test.js", "executor": "test/*.test.js",
+              "action": "node --test test/*.test.js"}, "one concrete path"),
+        ):
+            with self.subTest(message=message), self.assertRaisesRegex(
+                    contract.ContractError, message):
+                contract.validate_output(
+                    contract.Altitude.PROJECT,
+                    self.plan(self.record(**changes), scope=["app.js", "test/*.test.js"]),
+                    self.repository())
+
+    def test_explicit_human_bell_is_accepted_and_counted(self):
+        record = {
+            "type": "human-bell", "scope": "app.js",
+            "action": "owner judges whether the legal wording is acceptable",
+            "expected": "owner explicitly accepts or rejects the wording",
+            "failure": "no explicit owner decision is recorded",
+            "reason": "legal acceptability has no deterministic repository oracle",
+        }
+        criterion = "The legal wording is acceptable || VERIFY " + json.dumps(record)
+        value = self.plan(criterion, expected_bells=3)
+        self.assertIs(value, contract.validate_output(
+            contract.Altitude.PROJECT, value, self.repository()))
+        with self.assertRaisesRegex(contract.ContractError, "count every declared human"):
+            contract.validate_output(
+                contract.Altitude.PROJECT,
+                self.plan(criterion, expected_bells=2), self.repository())
+
+    def test_human_bell_without_automation_reason_is_rejected(self):
+        record = {
+            "type": "human-bell", "scope": "app.js", "action": "owner reviews",
+            "expected": "owner decides", "failure": "no decision", "reason": "",
+        }
+        criterion = "The wording is acceptable || VERIFY " + json.dumps(record)
+        with self.assertRaisesRegex(contract.ContractError, "non-empty strings"):
+            contract.validate_output(
+                contract.Altitude.PROJECT, self.plan(criterion, expected_bells=3),
+                self.repository())
+
+    def test_existing_operating_envelope_verification_remains_compatible(self):
+        envelope = [{
+            "id": "OE-1", "category": "work-bound",
+            "requirement": "processing remains bounded",
+            "failure_condition": "the bounded test exceeds one second",
+        }]
+        checks = [{"id": "OE-1", "check": "bounded test exceeds one second"}]
+        value = self.plan(envelope=envelope, checks=checks)
+        self.assertIs(value, contract.validate_output(
+            contract.Altitude.PROJECT, value, self.repository()))
+
+
 class RepositoryCompatibilityTests(unittest.TestCase):
+    def criterion(self, *, executor="test/app.test.js", source="existing",
+                  action="python3 -m unittest test/app.test.js",
+                  expected="the disclosure assertion passes",
+                  failure="the command exits nonzero"):
+        record = {
+            "type": "automated", "scope": executor, "executor": executor,
+            "executor_source": source, "action": action, "expected": expected,
+            "failure": failure,
+        }
+        return "Winning allocation disclosure is visible || VERIFY " + json.dumps(
+            record, separators=(",", ":"), sort_keys=True)
+
     def plan(self, *, spec="Change allocation disclosure.", scope=None):
         story = {
             "key": "disclosure", "title": "Allocation disclosure", "spec": spec,
             "phase": "hardening", "depends_on": [], "hazard": False,
-            "acceptance_criteria": ["Winning allocation disclosure is visible"],
+            "acceptance_criteria": [self.criterion()],
             "operating_envelope_ids": [], "operating_envelope_checks": [],
             "scope": scope or ["app.js", "test/app.test.js"],
             "spend_cap": "$5 / 60 min",
