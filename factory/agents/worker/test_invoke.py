@@ -467,6 +467,29 @@ class FailedWorkCheckpointTests(unittest.TestCase):
                     story_number=214, base_commit=self.BASE,
                     scope=["src/**"], runner=runner)
 
+    def test_rejected_restore_does_not_rewrite_invalid_checkpoint(self):
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = RecordingRunner(["src/app.py"])
+            base = "d" * 40
+            patch = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"),
+                repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit=base,
+                scope=["src/app.py"], mutation_state="post-mutation",
+                terminal_outcome="started-mid-work-failed",
+                originating_worker=self.WORKER, runner=runner))
+            manifest = invoke.recovery_manifest(patch)
+            original = manifest.read_bytes()
+            runner.changed = ["src/other.py"]
+            with self.assertRaisesRegex(invoke.RecoveryError, "do not match"):
+                invoke.execute(
+                    "owner/repo", 214, "token", pathlib.Path("/checkout"),
+                    runner=runner, client=FakeClient())
+            self.assertEqual(original, manifest.read_bytes())
+            self.assertFalse(any(command and command[0] in ("codex", "claude")
+                                 for command, _ in runner.calls))
+
     def test_success_cleanup_removes_patch_and_manifest_together(self):
         with tempfile.TemporaryDirectory() as directory:
             patch = pathlib.Path(directory, "story-214.patch")
@@ -580,6 +603,16 @@ class FailedWorkCheckpointTests(unittest.TestCase):
                             registry=[SimpleNamespace(provider="openai")])
                     self.assertTrue(patch.exists())
                     self.assertTrue(invoke.recovery_manifest(patch).exists())
+                    self.assertEqual(
+                        base, json.loads(invoke.recovery_manifest(
+                            patch).read_text())["delivered_head"])
+                    invoke.execute(
+                        "owner/repo", 214, "token", pathlib.Path("/checkout"),
+                        runner=runner, client=FakeClient(), state=State(),
+                        registry=[SimpleNamespace(provider="openai")])
+                    self.assertEqual(1, executor.execute.call_count)
+                    self.assertFalse(patch.exists())
+                    self.assertFalse(invoke.recovery_manifest(patch).exists())
                 else:
                     invoke.execute(
                         "owner/repo", 214, "token", pathlib.Path("/checkout"),

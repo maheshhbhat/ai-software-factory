@@ -76,6 +76,10 @@ class DeliveryError(RuntimeError):
         self.recovery_ref = ""
 
 
+class RecoveryError(DeliveryError):
+    """Recovery evidence is invalid and must remain untouched for diagnosis."""
+
+
 def platform_diagnostics(checkout: pathlib.Path) -> dict:
     """Return non-sensitive facts that explain local filesystem failures.
 
@@ -507,6 +511,59 @@ def remove_recovery(patch: pathlib.Path) -> None:
     recovery_manifest(patch).unlink()
 
 
+def mark_recovery_pushed(patch: pathlib.Path, head: str) -> None:
+    """Record that verified recovered work is durable on an exact branch head."""
+    if not FULL_COMMIT.fullmatch(head):
+        raise RecoveryError("pushed recovery head is invalid")
+    try:
+        manifest = recovery_manifest(patch)
+        value = json.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RecoveryError("recovery checkpoint metadata is unavailable") from exc
+    value["delivered_head"] = head
+    value["delivery_verified_at"] = (
+        datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"))
+    _write_recovery_file(
+        manifest, json.dumps(value, indent=2, sort_keys=True) + "\n")
+
+
+def pushed_recovery_head(patch: pathlib.Path, *, repo: str, story_number: int,
+                         scope: list[str] | None = None) -> str | None:
+    """Return a validated durable head, if this checkpoint was already pushed."""
+    try:
+        value = json.loads(recovery_manifest(patch).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RecoveryError("recovery checkpoint metadata is unavailable") from exc
+    head = value.get("delivered_head")
+    if head is None:
+        return None
+    expected = {"schema_version": RECOVERY_SCHEMA_VERSION,
+                "trust": RECOVERY_TRUST, "repository": repo,
+                "story": story_number}
+    if any(value.get(key) != item for key, item in expected.items()):
+        raise RecoveryError("pushed recovery checkpoint identity is invalid")
+    paths = value.get("recovered_paths")
+    if (not FULL_COMMIT.fullmatch(value.get("base_commit", "")) or
+            not FULL_COMMIT.fullmatch(head) or
+            not isinstance(paths, list) or not paths or
+            any(not isinstance(path, str) or not path for path in paths) or
+            (scope is not None and merge_gate.paths_out_of_scope(paths, scope))):
+        raise RecoveryError("pushed recovery checkpoint provenance is invalid")
+    worker = value.get("originating_worker")
+    if (not isinstance(worker, dict) or
+            not isinstance(worker.get("task"), str) or not worker["task"]):
+        raise RecoveryError("pushed recovery worker identity is invalid")
+    for key in ("recovered_at", "delivery_verified_at"):
+        timestamp = value.get(key)
+        try:
+            if not timestamp.endswith("Z"):
+                raise ValueError("timestamp is not UTC")
+            datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise RecoveryError(f"pushed recovery {key} is invalid") from exc
+    return head
+
+
 def recovered_work_state(worktree: pathlib.Path, paths: list[str]) -> str:
     """Digest the exact recovered file state without trusting Git metadata."""
     digest = hashlib.sha256()
@@ -525,7 +582,7 @@ def recovered_work_state(worktree: pathlib.Path, paths: list[str]) -> str:
         elif path.is_file():
             digest.update(path.read_bytes() + b"\0")
         else:
-            raise DeliveryError(f"recovered path is not a file: {relative}")
+            raise RecoveryError(f"recovered path is not a file: {relative}")
     return digest.hexdigest()
 
 
@@ -584,7 +641,7 @@ def restore_failed_work(patch: pathlib.Path, worktree: pathlib.Path, *,
         value = json.loads(manifest_path.read_text(encoding="utf-8"))
         patch_text = patch.read_text(encoding="utf-8")
     except (OSError, json.JSONDecodeError) as exc:
-        raise DeliveryError(f"recovery checkpoint metadata is unavailable: {exc}") from exc
+        raise RecoveryError(f"recovery checkpoint metadata is unavailable: {exc}") from exc
     paths = value.get("recovered_paths")
     expected = {
         "schema_version": RECOVERY_SCHEMA_VERSION,
@@ -594,39 +651,39 @@ def restore_failed_work(patch: pathlib.Path, worktree: pathlib.Path, *,
         "base_commit": base_commit,
     }
     if any(value.get(key) != item for key, item in expected.items()):
-        raise DeliveryError("recovery checkpoint identity is invalid")
+        raise RecoveryError("recovery checkpoint identity is invalid")
     if not FULL_COMMIT.fullmatch(value["base_commit"]):
-        raise DeliveryError("recovery checkpoint base commit is invalid")
+        raise RecoveryError("recovery checkpoint base commit is invalid")
     if (not isinstance(paths, list) or not paths or
             any(not isinstance(path, str) or not path for path in paths)):
-        raise DeliveryError("recovery checkpoint paths are invalid")
+        raise RecoveryError("recovery checkpoint paths are invalid")
     if merge_gate.paths_out_of_scope(paths, scope):
-        raise DeliveryError("recovery checkpoint paths exceed Story scope")
+        raise RecoveryError("recovery checkpoint paths exceed Story scope")
     digest = hashlib.sha256(patch_text.encode("utf-8")).hexdigest()
     if value.get("patch_sha256") != digest:
-        raise DeliveryError("recovery checkpoint digest does not match its manifest")
+        raise RecoveryError("recovery checkpoint digest does not match its manifest")
     for key in ("previous_mutation_state", "previous_terminal_outcome"):
         if not isinstance(value.get(key), str) or not value[key]:
-            raise DeliveryError(f"recovery checkpoint {key} is invalid")
+            raise RecoveryError(f"recovery checkpoint {key} is invalid")
     worker = value.get("originating_worker")
     if (not isinstance(worker, dict) or
             not isinstance(worker.get("task"), str) or not worker["task"] or
             any(key in worker and (not isinstance(worker[key], str) or not worker[key])
                 for key in ("invocation_id", "reservation_id", "provider", "model"))):
-        raise DeliveryError("recovery checkpoint worker identity is invalid")
+        raise RecoveryError("recovery checkpoint worker identity is invalid")
     recovered_at = value.get("recovered_at")
     try:
         if not recovered_at.endswith("Z"):
             raise ValueError("timestamp is not UTC")
         datetime.fromisoformat(recovered_at.replace("Z", "+00:00"))
     except (AttributeError, TypeError, ValueError) as exc:
-        raise DeliveryError("recovery checkpoint timestamp is invalid") from exc
+        raise RecoveryError("recovery checkpoint timestamp is invalid") from exc
     git(["apply", "--index", str(patch)], worktree, runner=runner)
     applied_paths = changed_paths(worktree, base_commit, runner=runner)
     if sorted(applied_paths) != sorted(paths):
-        raise DeliveryError("recovery checkpoint patch paths do not match its manifest")
+        raise RecoveryError("recovery checkpoint patch paths do not match its manifest")
     if merge_gate.paths_out_of_scope(applied_paths, scope):
-        raise DeliveryError("recovery checkpoint patch exceeds Story scope")
+        raise RecoveryError("recovery checkpoint patch exceeds Story scope")
     git(["reset"], worktree, runner=runner)
     return {
         "present": True,
@@ -684,8 +741,15 @@ def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
     delivery_trace = obs.story_trace_id(repo, story_number, events)
     durable = marker(story_number, version)
     pulls = linked_prs(story_number, client.pull_requests())
+    saved_recovery = recovery_patch(repo, story_number)
+    has_recovery = recovery_available(saved_recovery)
     if pulls and durable in (pulls[0].get("body") or ""):
         pull = pulls[0]
+        if has_recovery:
+            delivered_head = pushed_recovery_head(
+                saved_recovery, repo=repo, story_number=story_number)
+            if delivered_head == pull["head"]["sha"]:
+                remove_recovery(saved_recovery)
         return Delivery(story_number, project_number, pull["head"]["ref"],
                         pull["number"], pull["head"]["sha"], True)
 
@@ -705,8 +769,6 @@ def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
             checkout, runner=runner)
     base_ref = f"origin/{branch}" if remote else f"origin/{default}"
     base_commit = git(["rev-parse", base_ref], checkout, runner=runner).stdout.strip()
-    saved_recovery = recovery_patch(repo, story_number)
-    has_recovery = recovery_available(saved_recovery)
     value = build_input(client, story, project, repo=repo,
                         pull_request=pulls[0] if pulls else None)
     packet = value["correction_context"]
@@ -716,6 +778,24 @@ def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
         retry=packet["retry"], pull_request=packet["pull_request"],
         head=packet["head"], digest=packet["digest"],
         source_ids=[item["comment_id"] for item in packet["records"]])
+    if has_recovery:
+        delivered_head = pushed_recovery_head(
+            saved_recovery, repo=repo, story_number=story_number, scope=scope)
+        if delivered_head:
+            if delivered_head != base_commit:
+                raise RecoveryError("pushed recovery head does not match branch head")
+            body = f"Story: #{story_number}\n\n{durable}\n"
+            pull = (client.update_pr(pulls[0]["number"], body) if pulls else
+                    client.create_pr(f"Story #{story_number}: bounded delivery",
+                                     branch, default, body))
+            fresh = read_back_pr(client, story_number, durable)
+            obs.process_event(
+                "delivery.pull-request.written", trace_id=delivery_trace,
+                repo=repo, story=story_number, project=project_number,
+                pull_request=fresh["number"], head=delivered_head)
+            remove_recovery(saved_recovery)
+            return Delivery(story_number, project_number, branch, fresh["number"],
+                            delivered_head, False)
     originating_worker = {"task": task_key}
     with tempfile.TemporaryDirectory(prefix=f"factory-story-{story_number}-") as temp:
         worktree = pathlib.Path(temp)
@@ -838,26 +918,32 @@ def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
             git(["push", "origin", f"HEAD:refs/heads/{branch}"], worktree,
                 runner=runner)
             head = git(["rev-parse", "HEAD"], worktree, runner=runner).stdout.strip()
+            if has_recovery:
+                mark_recovery_pushed(saved_recovery, head)
         except Exception as exc:
             try:
-                recovered_paths = recovery_context.get("recovered_paths", [])
-                recovery_is_unchanged = (
-                    has_recovery and restored_state is not None and
-                    recovered_work_state(worktree, recovered_paths) == restored_state and
-                    sorted(changed_paths(worktree, base_ref, runner=runner)) ==
-                    sorted(recovered_paths))
-                if recovery_is_unchanged:
+                if isinstance(exc, RecoveryError):
                     ref = str(saved_recovery)
                 else:
-                    ref = checkpoint_failed_work(
-                        worktree, checkout, repo=repo, story_number=story_number,
-                        default=default, base_ref=base_ref, base_commit=base_commit,
-                        scope=scope,
-                        mutation_state="post-mutation",
-                        terminal_outcome=(getattr(exc, "terminal_outcome", "") or
-                                          "worker-wrapper-failed"),
-                        originating_worker=originating_worker,
-                        runner=runner)
+                    recovered_paths = recovery_context.get("recovered_paths", [])
+                    recovery_is_unchanged = (
+                        has_recovery and restored_state is not None and
+                        recovered_work_state(worktree, recovered_paths) ==
+                        restored_state and
+                        sorted(changed_paths(worktree, base_ref, runner=runner)) ==
+                        sorted(recovered_paths))
+                    if recovery_is_unchanged:
+                        ref = str(saved_recovery)
+                    else:
+                        ref = checkpoint_failed_work(
+                            worktree, checkout, repo=repo,
+                            story_number=story_number, default=default,
+                            base_ref=base_ref, base_commit=base_commit, scope=scope,
+                            mutation_state="post-mutation",
+                            terminal_outcome=(
+                                getattr(exc, "terminal_outcome", "") or
+                                "worker-wrapper-failed"),
+                            originating_worker=originating_worker, runner=runner)
             except Exception as checkpoint_error:
                 # A checkpoint failure must never turn known work into a
                 # definite no-start. Keep the original failure, block fallback,
