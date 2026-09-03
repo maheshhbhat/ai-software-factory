@@ -1,0 +1,353 @@
+{
+  "commitment": 99,
+  "kpis": {
+    "acceptance_catches": {
+      "count": 1,
+      "criteria": [
+        {
+          "criterion": "In Google Chrome, the representative illustrative run at `$1,000,000` starting portfolio, `$40,000` first-year withdrawal, and `3%` inflation renders the three named horizons and their projection tables in under 1 second and produces no page-generated console errors.",
+          "result": "fail"
+        }
+      ]
+    },
+    "autonomy": {
+      "autonomous_stories": 0,
+      "autonomous_story_numbers": [],
+      "definition": "merged without human recovery or human code intervention; required governance is measured separately",
+      "non_autonomous_story_numbers": [
+        102,
+        103,
+        107
+      ],
+      "rate": 0.0,
+      "stories": 3
+    },
+    "cycle_time": {
+      "reason": "one approved plan and one passing acceptance are required",
+      "status": "unavailable"
+    },
+    "engine_usage_cost": {
+      "by_engine": {
+        "claude-fable-5": {
+          "input_tokens": 22,
+          "invocations": 5,
+          "normalized_capacity_units": 8.33333333,
+          "output_tokens": 14741,
+          "priced_invocations": 5,
+          "reported_cost_usd": 9.0667055,
+          "reported_invocations": 5,
+          "unpriced_invocations": 0,
+          "unreported_invocations": 0
+        },
+        "claude-opus-4-8": {
+          "input_tokens": 2,
+          "invocations": 1,
+          "normalized_capacity_units": 1.66666667,
+          "output_tokens": 1142,
+          "priced_invocations": 1,
+          "reported_cost_usd": 1.752078,
+          "reported_invocations": 1,
+          "unpriced_invocations": 0,
+          "unreported_invocations": 0
+        },
+        "claude-opus-5": {
+          "input_tokens": 22,
+          "invocations": 1,
+          "normalized_capacity_units": 1.66666667,
+          "output_tokens": 16594,
+          "priced_invocations": 1,
+          "reported_cost_usd": 1.7154895,
+          "reported_invocations": 1,
+          "unpriced_invocations": 0,
+          "unreported_invocations": 0
+        },
+        "gpt-5.4": {
+          "input_tokens": 1184806,
+          "invocations": 5,
+          "normalized_capacity_units": 8.0,
+          "output_tokens": 14020,
+          "priced_invocations": 0,
+          "reported_invocations": 5,
+          "unpriced_invocations": 5,
+          "unreported_invocations": 0
+        },
+        "gpt-5.5": {
+          "input_tokens": 1682965,
+          "invocations": 1,
+          "normalized_capacity_units": 1.66666667,
+          "output_tokens": 13712,
+          "priced_invocations": 0,
+          "reported_invocations": 1,
+          "unpriced_invocations": 1,
+          "unreported_invocations": 0
+        },
+        "gpt-5.6-sol": {
+          "input_tokens": 1607186,
+          "invocations": 1,
+          "normalized_capacity_units": 1.66666667,
+          "output_tokens": 14688,
+          "priced_invocations": 0,
+          "reported_invocations": 1,
+          "unpriced_invocations": 1,
+          "unreported_invocations": 0
+        },
+        "gpt-5.6-terra": {
+          "input_tokens": 351877,
+          "invocations": 2,
+          "normalized_capacity_units": 2.0,
+          "output_tokens": 3612,
+          "priced_invocations": 0,
+          "reported_invocations": 2,
+          "unpriced_invocations": 2,
+          "unreported_invocations": 0
+        }
+      },
+      "cost_per_accepted_story_usd": "unavailable",
+      "cost_status": "provider-pricing-partial",
+      "known_reported_cost_per_accepted_story_usd": 4.178091,
+      "known_reported_cost_usd": 12.534273,
+      "normalized_capacity_units": 25.0,
+      "normalized_capacity_units_per_accepted_story": 8.33333333,
+      "route_invocations": 16,
+      "usage_integrity_findings": [],
+      "usage_receipts_status": "complete"
+    },
+    "escaped_defects": {
+      "count": 0,
+      "observations": []
+    },
+    "human_touches": {
+      "by_classification": {
+        "decision": 7,
+        "rescue": 2
+      },
+      "canonical_bells": 9,
+      "operator_actions": [
+        {
+          "action": "Story 102 lifecycle restoration after Planning changed an already-merged label",
+          "classification": "recovery",
+          "comment": 5516626045,
+          "story": 102,
+          "timestamp": "2026-09-02T21:24:07Z"
+        },
+        {
+          "action": "Story 103 lifecycle restoration after Planning changed an already-merged label",
+          "classification": "recovery",
+          "comment": 5516627959,
+          "story": 103,
+          "timestamp": "2026-09-02T21:24:16Z"
+        },
+        {
+          "action": "Owner-cancelled poisoned Story replacement correction",
+          "classification": "code-intervention",
+          "pull_request": 634,
+          "story": 107,
+          "timestamp": "2026-09-02T21:13:43Z"
+        },
+        {
+          "action": "Delivery diagnostic preservation and same-Story model avoidance correction",
+          "classification": "code-intervention",
+          "pull_request": 636,
+          "story": 107,
+          "timestamp": "2026-09-02T23:53:45Z"
+        },
+        {
+          "action": "Worktree-stable Capacity Pool history correction",
+          "classification": "code-intervention",
+          "pull_request": 638,
+          "story": 107,
+          "timestamp": "2026-09-03T00:38:17Z"
+        },
+        {
+          "action": "Story 107 first bounded poison rescue",
+          "classification": "recovery",
+          "comment": 5518538426,
+          "story": 107,
+          "timestamp": "2026-09-03T00:40:08Z"
+        },
+        {
+          "action": "Beginning-and-end failure diagnostic correction",
+          "classification": "code-intervention",
+          "pull_request": 640,
+          "story": 107,
+          "timestamp": "2026-09-03T02:33:32Z"
+        },
+        {
+          "action": "Story 107 second and final poison rescue",
+          "classification": "recovery",
+          "comment": 5519470929,
+          "story": 107,
+          "timestamp": "2026-09-03T02:35:44Z"
+        },
+        {
+          "action": "Stop Codex-hosted retry after repeated macOS Chrome crash popup",
+          "classification": "recovery",
+          "comment": 5519600951,
+          "story": 107,
+          "timestamp": "2026-09-03T02:49:17Z"
+        },
+        {
+          "action": "Resume the authorized correction from normal macOS Terminal",
+          "classification": "recovery",
+          "comment": 5519622051,
+          "story": 107,
+          "timestamp": "2026-09-03T02:54:00Z"
+        },
+        {
+          "action": "Rung 2 failed-with-findings classification",
+          "classification": "decision",
+          "comment": 5519685344,
+          "timestamp": "2026-09-03T03:02:18Z"
+        }
+      ],
+      "records": [
+        {
+          "actor": "@maheshhbhat",
+          "bell_type": "plan-approval",
+          "classification": "decision",
+          "note": "Mahesh requested Project #100 plan changes in session; duration was not measured and is recorded as 0 rather than invented; provenance=https://github.com/maheshhbhat/income-portfolio-analyzer/issues/100#issuecomment-5501296982; marker=project100-plan-changes-5501296982",
+          "project": "#100",
+          "seconds_spent": 0,
+          "story": null,
+          "timestamp": "2026-09-01T22:30:15.790600Z"
+        },
+        {
+          "actor": "@maheshhbhat",
+          "bell_type": "plan-approval",
+          "classification": "decision",
+          "note": "Mahesh requested Project #100 plan changes again in session; duration was not measured and is recorded as 0 rather than invented; provenance=https://github.com/maheshhbhat/income-portfolio-analyzer/issues/100#issuecomment-5501388415; marker=project100-plan-changes-5501388415",
+          "project": "#100",
+          "seconds_spent": 0,
+          "story": null,
+          "timestamp": "2026-09-01T22:40:05.807085Z"
+        },
+        {
+          "actor": "@maheshhbhat",
+          "bell_type": "plan-approval",
+          "classification": "decision",
+          "note": "project100-plan-changes-5501430626: Mahesh requested changes again; transcribed at issue comment 5501430626",
+          "project": "#100",
+          "seconds_spent": 0,
+          "story": null,
+          "timestamp": "2026-09-01T22:45:00.194159Z"
+        },
+        {
+          "actor": "@maheshhbhat",
+          "bell_type": "plan-approval",
+          "classification": "decision",
+          "note": "plan-approval-receipt:#100:bfef4b9672abae3bcf6901f7109379c5dc9dc4c92405e258aaeca4e5642410e7; plan-approval-fingerprint:bfef4b9672abae3bcf6901f7109379c5dc9dc4c92405e258aaeca4e5642410e7; GitHub plan-approval decision consumed; time unavailable, recorded as 0",
+          "project": "#100",
+          "seconds_spent": 0,
+          "story": null,
+          "timestamp": "2026-09-01T23:07:15Z"
+        },
+        {
+          "actor": "@maheshhbhat",
+          "bell_type": "hazard-ack",
+          "classification": "decision",
+          "note": "pr634-hazard-ack-5516494319: Mahesh acknowledged the hazard and authorized merge of PR #634 in session; recorded at issue comment 5516494319",
+          "project": "#100",
+          "seconds_spent": 0,
+          "story": "maheshhbhat/ai-software-factory#633",
+          "timestamp": "2026-09-02T21:13:32.829080Z"
+        },
+        {
+          "actor": "@maheshhbhat",
+          "bell_type": "plan-approval",
+          "classification": "decision",
+          "note": "Mahesh approved revised Project #100 in session; duration was not measured and is recorded as 0 rather than invented; provenance=https://github.com/maheshhbhat/income-portfolio-analyzer/issues/100#issuecomment-5516931891; marker=project100-revised-plan-approved-5516931891",
+          "project": "#100",
+          "seconds_spent": 0,
+          "story": null,
+          "timestamp": "2026-09-02T21:54:48.841383Z"
+        },
+        {
+          "actor": "@maheshhbhat",
+          "bell_type": "poison-rescue",
+          "classification": "rescue",
+          "note": "Owner authorized rescue after worktree-stable Capacity Pool correction PR #638 merged; duration unmeasured; decision-comment:5518538426; poison-rescue:income-portfolio-analyzer:107:5518538426",
+          "project": "#100",
+          "seconds_spent": 0,
+          "story": "#107",
+          "timestamp": "2026-09-03T00:41:42.656894Z"
+        },
+        {
+          "actor": "@maheshhbhat",
+          "bell_type": "poison-rescue",
+          "classification": "rescue",
+          "note": "Owner authorized second and final rescue after diagnostic PR #640 merged and Story #107 was clarified to require headless branded Chrome; duration unmeasured; decision-comment:5519470929; poison-rescue:income-portfolio-analyzer:107:5519470929",
+          "project": "#100",
+          "seconds_spent": 0,
+          "story": "#107",
+          "timestamp": "2026-09-03T02:36:15.320237Z"
+        },
+        {
+          "actor": "@maheshhbhat",
+          "bell_type": "acceptance",
+          "classification": "decision",
+          "note": "Mahesh classified Project #100 as failed with findings in session; duration was not measured and is recorded as 0 rather than invented; provenance=https://github.com/maheshhbhat/income-portfolio-analyzer/issues/100#issuecomment-5519685344; marker=project100-failed-outcome-5519685344",
+          "project": "#100",
+          "seconds_spent": 0,
+          "story": null,
+          "timestamp": "2026-09-03T03:03:19.193014Z"
+        }
+      ],
+      "relay": 0
+    },
+    "poison_rate": {
+      "poisoned_stories": 1,
+      "rate": 0.3333333333333333,
+      "stories": 3,
+      "story_numbers": [
+        107
+      ]
+    },
+    "worker_attempts_retry_rate": {
+      "attempts": 11,
+      "attempts_by_story": {
+        "102": 1,
+        "103": 1,
+        "107": 9
+      },
+      "attempts_per_story": 3.6666666666666665,
+      "retries": 8,
+      "retry_share_of_attempts": 0.7272727272727273,
+      "stories": 3
+    }
+  },
+  "measurement_integrity": {
+    "findings": [
+      "every measured Story must be merged"
+    ],
+    "passed": false
+  },
+  "product_outcome": "failed-with-findings",
+  "project": 100,
+  "report_phase": "final",
+  "repository": "maheshhbhat/income-portfolio-analyzer",
+  "rung": 2,
+  "rung_verdict": "FAIL",
+  "schema_version": 1,
+  "sources": [
+    "GitHub Project #100 and final Stories #102, #103, and #107 timelines and comments",
+    "Product PR #105 and PR #106 merge records and required checks",
+    "Open unmerged Product PR #108 checks and exact-head independent-review evidence",
+    "GitHub Actions run 33708805322, job 100503687256",
+    "Project #100 initial observability preserved at /private/tmp/project100-rung2-evidence-20260901T231500Z/observability",
+    "Story #107 observability preserved in factory-repository-aware-self-protection, factory-phase5-resume, factory-phase5-story107-rescue, and factory-phase5-story107-final worktrees",
+    "factory/touchlog/touchlog.jsonl entries available at closeout",
+    "macOS DiagnosticReports/Google Chrome-2026-09-02-224746.ips",
+    "Project #100 failed-with-findings outcome comment 5519685344"
+  ],
+  "threshold_results": {
+    "autonomy": false,
+    "escaped_defects": true,
+    "measurement_integrity": false,
+    "relay": true
+  },
+  "thresholds": {
+    "autonomy_minimum": 0.75,
+    "escaped_defects_maximum": 0,
+    "relay_maximum": 0
+  }
+}

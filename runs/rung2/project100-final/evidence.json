@@ -1,0 +1,68 @@
+{
+  "repository": "maheshhbhat/income-portfolio-analyzer",
+  "commitment": 99,
+  "project": 100,
+  "project_ref": "#100",
+  "product_outcome": "failed-with-findings",
+  "stories": [
+    {"number": 102, "merged": true, "poisoned": false, "human_recovery": true, "pull_request": 105},
+    {"number": 103, "merged": true, "poisoned": false, "human_recovery": true, "pull_request": 106},
+    {"number": 107, "merged": false, "poisoned": true, "human_recovery": true, "pull_request": 108}
+  ],
+  "decisions": [
+    {"bell_type": "plan-approval", "result": "changes-requested", "timestamp": "2026-09-01T22:30:00Z", "comment": 5501296982, "superseded": true},
+    {"bell_type": "plan-approval", "result": "changes-requested", "timestamp": "2026-09-01T22:39:59Z", "comment": 5501388415, "superseded": true},
+    {"bell_type": "plan-approval", "result": "changes-requested", "timestamp": "2026-09-01T22:44:48Z", "comment": 5501430626, "superseded": true},
+    {"bell_type": "plan-approval", "result": "approved", "timestamp": "2026-09-01T23:07:15Z", "comment": 5501668056, "superseded": true},
+    {"bell_type": "plan-approval", "result": "approved", "timestamp": "2026-09-02T21:51:01Z", "comment": 5516931891},
+    {"bell_type": "poison-rescue", "result": "approved", "timestamp": "2026-09-03T00:40:08Z", "story": 107, "comment": 5518538426},
+    {"bell_type": "poison-rescue", "result": "approved", "timestamp": "2026-09-03T02:35:44Z", "story": 107, "comment": 5519470929},
+    {"bell_type": "acceptance", "result": "fail", "timestamp": "2026-09-03T03:02:18Z", "comment": 5519685344}
+  ],
+  "operator_actions": [
+    {"action": "Story 102 lifecycle restoration after Planning changed an already-merged label", "story": 102, "timestamp": "2026-09-02T21:24:07Z", "classification": "recovery", "comment": 5516626045},
+    {"action": "Story 103 lifecycle restoration after Planning changed an already-merged label", "story": 103, "timestamp": "2026-09-02T21:24:16Z", "classification": "recovery", "comment": 5516627959},
+    {"action": "Owner-cancelled poisoned Story replacement correction", "story": 107, "timestamp": "2026-09-02T21:13:43Z", "classification": "code-intervention", "pull_request": 634},
+    {"action": "Delivery diagnostic preservation and same-Story model avoidance correction", "story": 107, "timestamp": "2026-09-02T23:53:45Z", "classification": "code-intervention", "pull_request": 636},
+    {"action": "Worktree-stable Capacity Pool history correction", "story": 107, "timestamp": "2026-09-03T00:38:17Z", "classification": "code-intervention", "pull_request": 638},
+    {"action": "Story 107 first bounded poison rescue", "story": 107, "timestamp": "2026-09-03T00:40:08Z", "classification": "recovery", "comment": 5518538426},
+    {"action": "Beginning-and-end failure diagnostic correction", "story": 107, "timestamp": "2026-09-03T02:33:32Z", "classification": "code-intervention", "pull_request": 640},
+    {"action": "Story 107 second and final poison rescue", "story": 107, "timestamp": "2026-09-03T02:35:44Z", "classification": "recovery", "comment": 5519470929},
+    {"action": "Stop Codex-hosted retry after repeated macOS Chrome crash popup", "story": 107, "timestamp": "2026-09-03T02:49:17Z", "classification": "recovery", "comment": 5519600951},
+    {"action": "Resume the authorized correction from normal macOS Terminal", "story": 107, "timestamp": "2026-09-03T02:54:00Z", "classification": "recovery", "comment": 5519622051},
+    {"action": "Rung 2 failed-with-findings classification", "timestamp": "2026-09-03T03:02:18Z", "classification": "decision", "comment": 5519685344}
+  ],
+  "quality_observations": [
+    {"kind": "acceptance-catch", "criterion": "headless branded-Google-Chrome responsiveness and zero-console-error assurance", "classification": "product-assurance", "finding": "GitHub Actions launched the Playwright Chrome project but caught a missing-resource 404 console error before merge."},
+    {"kind": "factory-finding", "classification": "execution-environment", "finding": "Branded Chrome launched under the Codex app aborted during macOS application registration and produced visible crash popups; the same headless Chrome channel launched in GitHub Actions."},
+    {"kind": "factory-finding", "classification": "delivery-control", "finding": "The final correction worker ended after a post-mutation failure that the factory classified as ambiguous-mutation, so no unproven change was pushed."}
+  ],
+  "crash_evidence": {
+    "filename": "Google Chrome-2026-09-02-224746.ips",
+    "sha256": "f6f0c7e23d88e39a34ae61d7141e19c715536bddbc4592671b98f7041b02a734",
+    "preservation": "Original retained in the operator's macOS DiagnosticReports directory; raw host diagnostic metadata is not copied into the repository."
+  },
+  "acceptance": {
+    "criteria": [
+      {"criterion": "A comparison submission for validated illustrative input renders `Short horizon (20 years)`, `Standard horizon (30 years)`, and `Long horizon (40 years)` in that order, and each rendered scenario shows one visible outcome summary plus one year-by-year projection generated from the existing deterministic retirement model and the repository-curated `SECURITIES` set.", "result": "pass"},
+      {"criterion": "In Google Chrome, the representative illustrative run at `$1,000,000` starting portfolio, `$40,000` first-year withdrawal, and `3%` inflation renders the three named horizons and their projection tables in under 1 second and produces no page-generated console errors.", "result": "fail"},
+      {"criterion": "After a valid comparison result is visible, a later invalid submission clears the prior summaries, tables, and money output before the actionable refusal appears, and the visible illustrative / non-advice disclosure remains present.", "result": "pass"}
+    ]
+  },
+  "thresholds": {
+    "autonomy_minimum": 0.75,
+    "relay_maximum": 0,
+    "escaped_defects_maximum": 0
+  },
+  "sources": [
+    "GitHub Project #100 and final Stories #102, #103, and #107 timelines and comments",
+    "Product PR #105 and PR #106 merge records and required checks",
+    "Open unmerged Product PR #108 checks and exact-head independent-review evidence",
+    "GitHub Actions run 33708805322, job 100503687256",
+    "Project #100 initial observability preserved at /private/tmp/project100-rung2-evidence-20260901T231500Z/observability",
+    "Story #107 observability preserved in factory-repository-aware-self-protection, factory-phase5-resume, factory-phase5-story107-rescue, and factory-phase5-story107-final worktrees",
+    "factory/touchlog/touchlog.jsonl entries available at closeout",
+    "macOS DiagnosticReports/Google Chrome-2026-09-02-224746.ips",
+    "Project #100 failed-with-findings outcome comment 5519685344"
+  ]
+}
