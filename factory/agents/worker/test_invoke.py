@@ -346,7 +346,7 @@ class FailedWorkCheckpointTests(unittest.TestCase):
         self.assertFalse(any(command[:3] == ["git", "apply", "--index"]
                              for command, _ in runner.calls))
 
-    def test_orphaned_patch_or_manifest_fails_closed(self):
+    def test_orphaned_patch_or_manifest_is_discarded_for_bounded_progress(self):
         with tempfile.TemporaryDirectory() as directory:
             patch = pathlib.Path(directory, "story-214.patch")
             for orphan in (patch, invoke.recovery_manifest(patch)):
@@ -354,9 +354,23 @@ class FailedWorkCheckpointTests(unittest.TestCase):
                     patch.unlink(missing_ok=True)
                     invoke.recovery_manifest(patch).unlink(missing_ok=True)
                     orphan.write_text("orphan")
-                    with self.assertRaisesRegex(invoke.DeliveryError,
-                                                "must both exist"):
-                        invoke.recovery_available(patch)
+                    self.assertFalse(invoke.recovery_available(patch))
+                    self.assertFalse(patch.exists())
+                    self.assertFalse(invoke.recovery_manifest(patch).exists())
+
+    def test_half_written_checkpoint_pair_is_discarded(self):
+        runner = RecordingRunner(["src/app.py"])
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            patch = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"),
+                repo="owner/repo", story_number=214, default="main",
+                scope=["src/app.py"], mutation_state="post-mutation",
+                terminal_outcome="started-mid-work-failed", runner=runner))
+            patch.write_text("replacement interrupted before manifest update")
+            self.assertFalse(invoke.recovery_available(patch))
+            self.assertFalse(patch.exists())
+            self.assertFalse(invoke.recovery_manifest(patch).exists())
 
     def test_worker_prompt_discloses_recovered_paths_and_outcome(self):
         value = {"recovery_context": {

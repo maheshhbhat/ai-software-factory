@@ -71,6 +71,9 @@ LAUNCH_TIMEOUT_SECONDS = 1800
 # the worker's own setup and teardown around that.
 LAUNCH_GRACE_SECONDS = 120
 FAILURE_MARKER = "FACTORY_WORKER_FAILURE_V1="
+STARTED_TERMINAL_OUTCOMES = {
+    "started-mid-work-failed", "limit-stopped", "validation-failed", "completed",
+}
 
 # The Story section and shape the cap is declared in — a regex mirror of
 # `factory/agents/worker/invoke.py parse_bounds()`, which owns the strict
@@ -435,10 +438,15 @@ def report_from(worker: str, completed, started: float) -> LaunchReport:
                 break
     post_mutation = bool(
         failure and failure.get("mutation_state") not in {None, "", "none", "pre-mutation"})
+    terminal_outcome = (failure or {}).get("terminal_outcome", "")
+    attempt_started = launched or post_mutation or terminal_outcome in STARTED_TERMINAL_OUTCOMES
+    terminal_failure = not launched and attempt_started
     result = (Result.LAUNCHED if launched else
-              Result.TERMINAL_FAILURE if post_mutation else Result.FAILED)
-    if post_mutation:
-        detail = ("worker changed repository files before failing; fallback is blocked"
+              Result.TERMINAL_FAILURE if terminal_failure else Result.FAILED)
+    if terminal_failure:
+        detail = (("worker changed repository files" if post_mutation else
+                   "worker started without changing repository files")
+                  + " before failing; fallback is blocked"
                   + (f" and the work is preserved at {failure.get('recovery_ref')}"
                      if failure.get("recovery_ref") else ""))
     else:
@@ -456,9 +464,9 @@ def report_from(worker: str, completed, started: float) -> LaunchReport:
         stderr=(runlog.tail(completed.stderr) if launched else
                 runlog.diagnostic_excerpt(completed.stderr)),
         mutation_state=(failure or {}).get("mutation_state", "none"),
-        terminal_outcome=(failure or {}).get("terminal_outcome", ""),
+        terminal_outcome=terminal_outcome,
         recovery_ref=(failure or {}).get("recovery_ref", ""),
-        attempt_started=(True if launched or post_mutation else False))
+        attempt_started=attempt_started)
 
 
 def _stream(value) -> str:

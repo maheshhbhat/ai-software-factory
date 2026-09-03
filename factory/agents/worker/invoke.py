@@ -431,8 +431,24 @@ def recovery_manifest(patch: pathlib.Path) -> pathlib.Path:
 def recovery_available(patch: pathlib.Path) -> bool:
     manifest = recovery_manifest(patch)
     if patch.is_file() != manifest.is_file():
-        raise DeliveryError("recovery checkpoint patch and manifest must both exist")
-    return patch.is_file()
+        patch.unlink(missing_ok=True)
+        manifest.unlink(missing_ok=True)
+        return False
+    if not patch.is_file():
+        return False
+    try:
+        value = json.loads(manifest.read_text(encoding="utf-8"))
+        patch_text = patch.read_text(encoding="utf-8")
+    except (OSError, json.JSONDecodeError):
+        patch.unlink(missing_ok=True)
+        manifest.unlink(missing_ok=True)
+        return False
+    if value.get("patch_sha256") != hashlib.sha256(
+            patch_text.encode("utf-8")).hexdigest():
+        patch.unlink(missing_ok=True)
+        manifest.unlink(missing_ok=True)
+        return False
+    return True
 
 
 def _write_recovery_file(target: pathlib.Path, value: str) -> None:

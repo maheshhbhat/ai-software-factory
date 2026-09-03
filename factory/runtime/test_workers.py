@@ -213,6 +213,24 @@ class TestFailoverSafety(unittest.TestCase):
                          launched[0].recovery_ref)
         self.assertNotIn("/bin/codex", [command[0] for command in run.calls])
 
+    def test_started_failure_without_mutation_preserves_attempt_and_blocks_fallback(self):
+        stderr = ("delivery failed\n" + w.FAILURE_MARKER +
+                  '{"mutation_state":"none",'
+                  '"terminal_outcome":"started-mid-work-failed",'
+                  '"recovery_ref":""}\n')
+        run = runner_by_command({
+            "/bin/claude": (1, "", stderr),
+            "/bin/codex": 0,
+        })
+        report, trail = w.dispatch_to_worker(
+            [self.claude, self.codex], 64, 55, runner=run)
+        self.assertIsNone(report)
+        launched = [item for item in trail if isinstance(item, w.LaunchReport)]
+        self.assertEqual([w.Result.TERMINAL_FAILURE],
+                         [item.result for item in launched])
+        self.assertTrue(launched[0].attempt_started)
+        self.assertNotIn("/bin/codex", [command[0] for command in run.calls])
+
     def test_all_workers_failing_launches_nobody(self):
         run = runner_by_command({"/bin/claude": 1, "/bin/codex": 1})
         report, trail = w.dispatch_to_worker([self.claude, self.codex], 64, 55, runner=run)
