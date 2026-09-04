@@ -165,13 +165,26 @@ def review_ledger(evidence, process, numbers, attempts):
     for item in produced:
         pr, head, story = (item.get("pull_request"), item.get("head"),
                            item.get("story"))
-        outcomes = unique(
-            [row for row in process
-             if row.get("event") == REVIEW_OUTCOME_EVENT
-             and row.get("pull_request") == pr and row.get("head") == head
-             and row.get("verdict") in ("approval", "findings")],
-            lambda row: row.get("event_id") or (
-                row.get("pull_request"), row.get("head"), row.get("verdict")))
+        review_candidates = [
+            row for row in process
+            if row.get("event") == REVIEW_OUTCOME_EVENT
+            and row.get("pull_request") == pr and row.get("head") == head
+            and row.get("verdict") in ("approval", "findings")]
+        review_groups = {}
+        for row in review_candidates:
+            review_groups.setdefault(
+                (row.get("pull_request"), row.get("head"), row.get("verdict")),
+                []).append(row)
+        outcomes = []
+        for key in sorted(review_groups, key=lambda value: tuple(str(v) for v in value)):
+            candidates = review_groups[key]
+            durable = unique([row for row in candidates if row.get("event_id")],
+                             lambda row: row.get("event_id"))
+            if len(durable) > 1:
+                findings.append(
+                    f"exact-head review evidence {key!r} has conflicting durable event IDs")
+            outcomes.append(sorted(durable, key=lambda row: row["event_id"])[0]
+                            if durable else candidates[0])
         identity = f"{pr}:{head}"
         if not item.get("production_evidence_missing") and not item.get("event_id"):
             findings.append(

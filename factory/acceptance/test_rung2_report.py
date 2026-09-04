@@ -258,6 +258,19 @@ class Rung2ReportTests(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertNotEqual("INCONCLUSIVE", first["rung_verdict"])
 
+    def test_mixed_legacy_and_durable_review_duplicates_are_order_independent(self):
+        values = list(fixture())
+        reviewed = next(row for row in values[1]
+                        if row.get("event") == "review.outcome.published")
+        legacy = dict(reviewed)
+        legacy.pop("event_id")
+        forward = list(values[1]) + [legacy]
+        reverse = [legacy] + list(values[1])
+        first = report.build(values[0], forward, values[2], values[3])
+        second = report.build(values[0], reverse, values[2], values[3])
+        self.assertEqual(first, second)
+        self.assertNotEqual("INCONCLUSIVE", first["rung_verdict"])
+
     def test_non_object_delivery_detail_yields_inconclusive(self):
         values = list(fixture())
         outcome = next(row for row in values[1]
