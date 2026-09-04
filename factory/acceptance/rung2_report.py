@@ -25,8 +25,8 @@ def unavailable(reason):
 
 
 def valid_commit_id(value):
-    text = str(value or "")
-    return bool(FULL_COMMIT_ID.fullmatch(text) and set(text) != {"0"})
+    return bool(isinstance(value, str) and FULL_COMMIT_ID.fullmatch(value)
+                and set(value) != {"0"})
 
 
 def valid_pull_request(value):
@@ -59,14 +59,26 @@ def evidence_unavailable(evidence, *, kind, story, identity):
 
 def attempt_ledger(evidence, process, numbers):
     repository = evidence.get("repository")
-    claims = unique(
-        [row for row in process if row.get("event") == "story.claimed"
-         and row.get("story") in numbers and row.get("repo") == repository],
-        lambda row: (row.get("story"), row.get("event_id")))
+    rows, findings = [], []
+    claim_groups = {}
+    for row in process:
+        if (row.get("event") == "story.claimed" and
+                row.get("story") in numbers and
+                row.get("repo") == repository):
+            claim_groups.setdefault(
+                (row.get("story"), row.get("event_id")), []).append(row)
+    claims = []
+    for key in sorted(claim_groups, key=lambda value: tuple(str(v) for v in value)):
+        candidates = claim_groups[key]
+        if len({row.get("trace_id") for row in candidates}) > 1:
+            findings.append(
+                f"claim {key[1]!r} for Story {key[0]} has conflicting trace identities")
+        claims.append(sorted(
+            candidates,
+            key=lambda row: json.dumps(row, sort_keys=True, default=str))[0])
     claims.sort(key=lambda row: (
         row.get("story"), str(row.get("trace_id") or ""),
         str(row.get("event_id") or "")))
-    rows, findings = [], []
     claimed_stories = {row.get("story") for row in claims}
     for story in sorted(numbers - claimed_stories):
         findings.append(f"Story {story} has no durable attempt claim evidence")
@@ -248,8 +260,14 @@ def review_ledger(evidence, process, numbers, attempts):
             matching = [row for row in produced
                         if row.get("story") == attempt.get("story")
                         and row.get("trace_id") == attempt.get("trace_id")]
+            outcome_identity = delivered_identity(outcome)
             identity = ((matching[0].get("pull_request"), matching[0].get("head"))
-                        if len(matching) == 1 else delivered_identity(outcome))
+                        if len(matching) == 1 else outcome_identity)
+            if (len(matching) == 1 and outcome_identity and
+                    identity != outcome_identity):
+                findings.append(
+                    f"successful attempt for Story {attempt.get('story')} has "
+                    "conflicting terminal and production PR/head identities")
             if len(matching) != 1:
                 pr, head = identity or (None, None)
                 produced.append({"story": attempt.get("story"),

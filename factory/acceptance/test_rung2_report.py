@@ -182,6 +182,22 @@ class Rung2ReportTests(unittest.TestCase):
         second = report.build(values[0], reversed_process, values[2], values[3])
         self.assertEqual(first, second)
 
+    def test_conflicting_claim_copies_fail_deterministically(self):
+        values = list(fixture())
+        claim = next(row for row in values[1]
+                     if row.get("event") == "story.claimed")
+        conflict = dict(claim)
+        conflict["trace_id"] = "conflicting-trace"
+        forward = list(values[1]) + [conflict]
+        reverse = list(reversed(forward))
+        first = report.build(values[0], forward, values[2], values[3])
+        second = report.build(values[0], reverse, values[2], values[3])
+        self.assertEqual(first, second)
+        self.assertEqual("INCONCLUSIVE", first["rung_verdict"])
+        self.assertTrue(any("conflicting trace identities" in finding
+                            for finding in
+                            first["measurement_integrity"]["findings"]))
+
     def test_produced_pr_without_exact_head_review_is_inconclusive(self):
         values = list(fixture())
         values[1] = [row for row in values[1]
@@ -217,6 +233,26 @@ class Rung2ReportTests(unittest.TestCase):
                 row["head"] = "0" * 40
         result = report.build(*values)
         self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+
+    def test_commit_head_must_be_a_string(self):
+        values = list(fixture())
+        story = values[0]["stories"][0]
+        old_head = story["head"]
+        numeric_head = int("1" * 40)
+        story["head"] = numeric_head
+        for row in values[1]:
+            if row.get("story") != story["number"]:
+                continue
+            if row.get("head") == old_head:
+                row["head"] = numeric_head
+            if row.get("event") == "worker.outcome":
+                row["detail"] = json.dumps({
+                    "pull_request": story["pull_request"],
+                    "head": numeric_head})
+        result = report.build(*values)
+        self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+        self.assertTrue(any("full commit SHA" in finding for finding in
+                            result["measurement_integrity"]["findings"]))
 
     def test_pull_request_identity_must_be_positive_integer(self):
         for invalid in ("not-a-pr", -1, True):
@@ -594,6 +630,18 @@ class Rung2ReportTests(unittest.TestCase):
              "event_id": "review-final-head"}])
         result = report.build(*values)
         self.assertNotEqual("INCONCLUSIVE", result["rung_verdict"])
+
+    def test_successful_outcome_identity_must_match_production_event(self):
+        values = list(fixture())
+        outcome = next(row for row in values[1]
+                       if row.get("event") == "worker.outcome")
+        outcome["detail"] = json.dumps({
+            "pull_request": 999, "head": "f" * 40})
+        result = report.build(*values)
+        self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+        self.assertTrue(any(
+            "conflicting terminal and production PR/head identities" in finding
+            for finding in result["measurement_integrity"]["findings"]))
 
     def test_production_event_without_durable_id_is_inconclusive(self):
         values = list(fixture())
