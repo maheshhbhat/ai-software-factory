@@ -54,11 +54,13 @@ def attempt_ledger(evidence, process, numbers):
         story, claim_id = claim.get("story"), claim.get("event_id")
         trace = claim.get("trace_id")
         identity = trace or claim_id
-        outcomes = [row for row in process
-                    if row.get("event") == TERMINAL_WORKER_EVENT
-                    and row.get("story") == story
-                    and ((trace and row.get("trace_id") == trace) or
-                         (not trace and row.get("claim_event_id") == claim_id))]
+        outcomes = unique(
+            [row for row in process
+             if row.get("event") == TERMINAL_WORKER_EVENT
+             and row.get("story") == story
+             and ((trace and row.get("trace_id") == trace) or
+                  (not trace and row.get("claim_event_id") == claim_id))],
+            lambda row: (row.get("trace_id"), row.get("event_id")))
         unavailable = evidence_unavailable(
             evidence, kind="attempt-terminal-outcome", story=story,
             identity=identity)
@@ -67,12 +69,26 @@ def attempt_ledger(evidence, process, numbers):
                 f"claim {claim_id!r} for Story {story} needs exactly one "
                 "terminal worker outcome or evidence-unavailable record")
         outcome = outcomes[0] if len(outcomes) == 1 else None
+        if outcome and not outcome.get("event_id"):
+            findings.append(
+                f"terminal worker outcome for claim {claim_id!r} needs a durable event ID")
         failed = bool(outcome and (outcome.get("exit") not in (None, 0) or
                                   outcome.get("result") != "LAUNCHED"))
         diagnostic = None
+        diagnostic_unavailable = None
         if failed:
-            diagnostic = (outcome.get("diagnostic_ref") or
-                          outcome.get("recovery_ref") or outcome.get("detail"))
+            diagnostic_events = unique(
+                [row for row in process
+                 if row.get("event") == "worker.launch.end"
+                 and row.get("story") == story
+                 and trace and row.get("trace_id") == trace
+                 and row.get("event_id")
+                 and (row.get("exit") not in (None, 0))
+                 and (row.get("stderr") or row.get("stdout") or row.get("detail"))],
+                lambda row: (row.get("trace_id"), row.get("event_id")))
+            diagnostic = ((outcome.get("diagnostic_ref") or
+                           outcome.get("recovery_ref")) or
+                          diagnostic_events or None)
             diagnostic_unavailable = evidence_unavailable(
                 evidence, kind="attempt-diagnostics", story=story,
                 identity=identity)
@@ -83,7 +99,8 @@ def attempt_ledger(evidence, process, numbers):
         rows.append({"story": story, "claim_event_id": claim_id,
                      "trace_id": trace, "terminal_outcome": outcome,
                      "evidence_unavailable": unavailable,
-                     "diagnostic": diagnostic})
+                     "diagnostic": diagnostic,
+                     "diagnostic_evidence_unavailable": diagnostic_unavailable})
     if any(row.get("event_id") is None for row in claims):
         findings.append("every claim needs a durable event ID")
     return rows, findings
@@ -109,7 +126,7 @@ def review_ledger(evidence, process, numbers):
             [row for row in process
              if row.get("event") == REVIEW_OUTCOME_EVENT
              and row.get("pull_request") == pr and row.get("head") == head
-             and row.get("verdict")],
+             and row.get("verdict") in ("approval", "findings")],
             lambda row: row.get("event_id") or (
                 row.get("pull_request"), row.get("head"), row.get("verdict")))
         identity = f"{pr}:{head}"
@@ -119,6 +136,10 @@ def review_ledger(evidence, process, numbers):
             findings.append(
                 f"produced PR {pr!r} head {head!r} needs exactly one exact-head "
                 "independent review outcome or evidence-unavailable record")
+        if len(outcomes) == 1 and not outcomes[0].get("event_id"):
+            findings.append(
+                f"exact-head review outcome for PR {pr!r} head {head!r} "
+                "needs a durable event ID")
         rows.append({"story": story, "pull_request": pr, "head": head,
                      "review_outcome": outcomes[0] if len(outcomes) == 1 else None,
                      "evidence_unavailable": unavailable})

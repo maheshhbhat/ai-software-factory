@@ -54,7 +54,8 @@ def fixture():
                         "head": head})
         process.append({"event": "review.outcome.published",
                         "story": story["number"], "pull_request": pr,
-                        "head": head, "verdict": "approval"})
+                        "head": head, "verdict": "approval",
+                        "event_id": f"review-{pr}-{head}"})
     telemetry = [
         {"metric": "engine.usage", "story": 20, "engine": "claude",
          "usage_reported": True, "usage": {"total_cost_usd": 4.0}},
@@ -122,6 +123,15 @@ class Rung2ReportTests(unittest.TestCase):
         result = report.build(*values)
         self.assertNotEqual("INCONCLUSIVE", result["rung_verdict"])
 
+    def test_overlapping_fragments_deduplicate_terminal_outcome_by_trace_and_event(self):
+        values = list(fixture())
+        outcome = next(row for row in values[1]
+                       if row.get("event") == "worker.outcome")
+        values[1].append(dict(outcome))
+        result = report.build(*values)
+        self.assertNotEqual("INCONCLUSIVE", result["rung_verdict"])
+        self.assertEqual(11, len(result["attempt_ledger"]))
+
     def test_produced_pr_without_exact_head_review_is_inconclusive(self):
         values = list(fixture())
         values[1] = [row for row in values[1]
@@ -156,6 +166,27 @@ class Rung2ReportTests(unittest.TestCase):
             "identity": outcome["trace_id"], "reason": "legacy log missing"}]
         result = report.build(*values)
         self.assertNotEqual("INCONCLUSIVE", result["rung_verdict"])
+        ledger = next(row for row in result["attempt_ledger"]
+                      if row["trace_id"] == outcome["trace_id"])
+        self.assertEqual("legacy log missing",
+                         ledger["diagnostic_evidence_unavailable"]["reason"])
+
+    def test_failed_attempt_accepts_matching_durable_launch_diagnostic(self):
+        values = list(fixture())
+        outcome = next(row for row in values[1]
+                       if row.get("event") == "worker.outcome")
+        outcome.update({"result": "FAILED", "exit": 1,
+                        "detail": "generic summary is not evidence"})
+        values[1].append({
+            "event": "worker.launch.end", "story": outcome["story"],
+            "trace_id": outcome["trace_id"], "event_id": "launch-failure-20",
+            "exit": 1, "stderr": "durable diagnostic"})
+        result = report.build(*values)
+        self.assertNotEqual("INCONCLUSIVE", result["rung_verdict"])
+        ledger = next(row for row in result["attempt_ledger"]
+                      if row["trace_id"] == outcome["trace_id"])
+        self.assertEqual("launch-failure-20",
+                         ledger["diagnostic"][0]["event_id"])
 
     def test_thresholds_can_pass_but_integrity_is_independent(self):
         values = list(fixture())
