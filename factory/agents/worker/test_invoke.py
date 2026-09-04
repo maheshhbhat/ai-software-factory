@@ -912,6 +912,36 @@ class FailedWorkCheckpointTests(unittest.TestCase):
             self.assertEqual(str(patch), caught.exception.recovery_ref)
             self.assertTrue(patch.exists())
 
+    def test_durable_pr_replay_preserves_invalid_worker_provenance(self):
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = RecordingRunner(["src/app.py"])
+            patch = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"),
+                repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit=self.BASE,
+                scope=["src/app.py"], mutation_state="post-mutation",
+                terminal_outcome="started-mid-work-failed",
+                originating_worker=self.WORKER, runner=runner))
+            invoke.mark_recovery_pushed(patch, "c" * 40)
+            manifest = invoke.recovery_manifest(patch)
+            value = json.loads(manifest.read_text())
+            value["originating_worker"]["model"] = ["not", "a", "model"]
+            manifest.write_text(json.dumps(value))
+            client = FakeClient()
+            client.created = {
+                "number": 9,
+                "body": "Story: #214\n\n" + invoke.marker(214, "5") + "\n",
+                "head": {"ref": "story/214-delivery", "sha": "c" * 40},
+            }
+            with self.assertRaisesRegex(invoke.RecoveryError,
+                                        "worker identity") as caught:
+                invoke.execute(
+                    "owner/repo", 214, "token", pathlib.Path("/checkout"),
+                    runner=runner, client=client)
+            self.assertEqual(str(patch), caught.exception.recovery_ref)
+            self.assertTrue(patch.exists())
+
     def test_pending_push_is_reconciled_without_relaunch(self):
         class RemoteRunner(RecordingRunner):
             def __call__(self, cmd, **kwargs):

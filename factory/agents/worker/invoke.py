@@ -77,6 +77,15 @@ def valid_utc_timestamp(value) -> bool:
     return parsed.utcoffset() == timezone.utc.utcoffset(None)
 
 
+def valid_recovery_worker(value) -> bool:
+    return (isinstance(value, dict) and
+            isinstance(value.get("task"), str) and bool(value["task"]) and
+            not any(key in value and
+                    (not isinstance(value[key], str) or not value[key])
+                    for key in ("invocation_id", "reservation_id",
+                                "provider", "model")))
+
+
 class DeliveryError(RuntimeError):
     """A bounded delivery could not be completed.
 
@@ -644,6 +653,7 @@ def pushed_recovery_head(patch: pathlib.Path, *, repo: str, story_number: int,
     """Return a validated durable head, if this checkpoint was already pushed."""
     try:
         value = json.loads(recovery_manifest(patch).read_text(encoding="utf-8"))
+        patch_text = patch.read_text(encoding="utf-8")
     except (OSError, json.JSONDecodeError) as exc:
         raise RecoveryError("recovery checkpoint metadata is unavailable") from exc
     if not isinstance(value, dict):
@@ -661,11 +671,15 @@ def pushed_recovery_head(patch: pathlib.Path, *, repo: str, story_number: int,
             not valid_commit(head) or
             not isinstance(paths, list) or not paths or
             any(not isinstance(path, str) or not path for path in paths) or
-            (scope is not None and merge_gate.paths_out_of_scope(paths, scope))):
+            (scope is not None and merge_gate.paths_out_of_scope(paths, scope)) or
+            value.get("patch_sha256") != hashlib.sha256(
+                patch_text.encode("utf-8")).hexdigest() or
+            any(not isinstance(value.get(key), str) or not value[key]
+                for key in ("previous_mutation_state",
+                            "previous_terminal_outcome"))):
         raise RecoveryError("pushed recovery checkpoint provenance is invalid")
     worker = value.get("originating_worker")
-    if (not isinstance(worker, dict) or
-            not isinstance(worker.get("task"), str) or not worker["task"]):
+    if not valid_recovery_worker(worker):
         raise RecoveryError("pushed recovery worker identity is invalid")
     for key in ("recovered_at", "delivery_verified_at"):
         timestamp = value.get(key)
@@ -840,10 +854,7 @@ def restore_failed_work(patch: pathlib.Path, worktree: pathlib.Path, *,
         if not isinstance(value.get(key), str) or not value[key]:
             raise RecoveryError(f"recovery checkpoint {key} is invalid")
     worker = value.get("originating_worker")
-    if (not isinstance(worker, dict) or
-            not isinstance(worker.get("task"), str) or not worker["task"] or
-            any(key in worker and (not isinstance(worker[key], str) or not worker[key])
-                for key in ("invocation_id", "reservation_id", "provider", "model"))):
+    if not valid_recovery_worker(worker):
         raise RecoveryError("recovery checkpoint worker identity is invalid")
     recovered_at = value.get("recovered_at")
     if not valid_utc_timestamp(recovered_at):
