@@ -16,6 +16,7 @@ import json
 import os
 import pathlib
 import re
+import shutil
 import shlex
 import stat
 import subprocess
@@ -54,8 +55,39 @@ SECTION = r"^### {name}\s*$\n(.*?)(?=^### |\Z)"
 STORY_LINK = re.compile(r"(?m)^Story: #(\d+)$")
 START_MARKER = "<!-- factory-worker-start:v1 -->"
 FAILURE_MARKER = "FACTORY_WORKER_FAILURE_V1="
-RECOVERY_SCHEMA_VERSION = 1
+RECOVERY_SCHEMA_VERSION = 2
 RECOVERY_TRUST = "untrusted-partial-work-from-failed-worker"
+FULL_COMMIT = re.compile(r"^[0-9a-f]{40}$")
+UTC_TIMESTAMP = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z$")
+
+
+def valid_commit(value) -> bool:
+    return isinstance(value, str) and FULL_COMMIT.fullmatch(value) is not None
+
+
+def valid_utc_timestamp(value) -> bool:
+    """Return whether value is a full ISO datetime with canonical UTC suffix."""
+    if not isinstance(value, str) or UTC_TIMESTAMP.fullmatch(value) is None:
+        return False
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return parsed.utcoffset() == timezone.utc.utcoffset(None)
+
+
+def valid_recovery_worker(value, *, repo: str, story_number: int) -> bool:
+    task_prefix = f"delivery:{repo.lower()}:{story_number}:"
+    task = value.get("task") if isinstance(value, dict) else None
+    suffix = (task.removeprefix(task_prefix)
+              if isinstance(task, str) and task.startswith(task_prefix) else "")
+    return (isinstance(value, dict) and
+            re.fullmatch(r"(?:0|[1-9][0-9]*)", suffix) is not None and
+            not any(key in value and
+                    (not isinstance(value[key], str) or not value[key])
+                    for key in ("invocation_id", "reservation_id",
+                                "provider", "model")))
 
 
 class DeliveryError(RuntimeError):
@@ -75,6 +107,37 @@ class DeliveryError(RuntimeError):
         self.recovery_ref = ""
 
 
+class RecoveryError(DeliveryError):
+    """Recovery evidence is invalid and must remain untouched for diagnosis."""
+
+    def __init__(self, message: str, output: str = ""):
+        super().__init__(message, output, mutation_state="post-mutation",
+                         terminal_outcome="recovery-invalid")
+
+
+def attach_recovery_failure(exc: Exception, patch: pathlib.Path,
+                            terminal_outcome: str) -> None:
+    """Keep a known prior mutation attached to every later setup failure."""
+    if not getattr(exc, "recovery_ref", ""):
+        setattr(exc, "mutation_state", "post-mutation")
+        setattr(exc, "terminal_outcome", terminal_outcome)
+        setattr(exc, "recovery_ref", str(patch))
+
+
+@contextlib.contextmanager
+def recovery_aware_temporary_directory(*, prefix: str, recovery_state):
+    """Account for failures across a temporary directory's full lifecycle."""
+    try:
+        with tempfile.TemporaryDirectory(prefix=prefix) as temp:
+            yield temp
+    except Exception as exc:
+        has_recovery, patch = recovery_state()
+        if has_recovery:
+            attach_recovery_failure(
+                exc, patch, "recovery-delivery-worktree-lifecycle-failed")
+        raise
+
+
 def platform_diagnostics(checkout: pathlib.Path) -> dict:
     """Return non-sensitive facts that explain local filesystem failures.
 
@@ -92,7 +155,7 @@ def platform_diagnostics(checkout: pathlib.Path) -> dict:
                 candidate = pathlib.Path(marker.removeprefix("gitdir:").strip())
                 git_dir = candidate if candidate.is_absolute() else checkout / candidate
         git_dir = git_dir.resolve()
-    except OSError as exc:
+    except (OSError, UnicodeError) as exc:
         resolution_error = f"{type(exc).__name__}: {exc}"
 
     def describe(path: pathlib.Path) -> dict:
@@ -365,8 +428,9 @@ def run(cmd: list[str], *, cwd: pathlib.Path, timeout: int, env=None,
     return result
 
 
-def git(args: list[str], cwd: pathlib.Path, *, timeout=300, runner=subprocess.run):
-    return run(["git", *args], cwd=cwd, timeout=timeout, runner=runner)
+def git(args: list[str], cwd: pathlib.Path, *, timeout=300, env=None,
+        runner=subprocess.run):
+    return run(["git", *args], cwd=cwd, timeout=timeout, env=env, runner=runner)
 
 
 def _remote_repo(url: str) -> str:
@@ -396,17 +460,54 @@ def checkout_for_repo(repo: str, configured: pathlib.Path,
         yield checkout
 
 
-def changed_paths(worktree: pathlib.Path, base: str,
+def pending_paths(worktree: pathlib.Path,
                   runner=subprocess.run) -> list[str]:
-    tracked = git(["diff", "--name-only", f"{base}...HEAD"], worktree,
-                  runner=runner).stdout.splitlines()
+    """Return paths represented by the current index and worktree only."""
     # --untracked-files=all: plain --porcelain collapses a brand-new directory
     # to one `dir/` line, which no `dir/sub/**` scope can match — the worker
     # then refuses its own in-scope work (#358, found live by fixture #357).
-    pending = git(["status", "--porcelain", "--untracked-files=all"], worktree,
-                  runner=runner).stdout.splitlines()
-    paths = tracked + [line[3:] for line in pending if len(line) > 3]
+    pending = [item for item in git(
+        ["status", "--porcelain", "-z", "--untracked-files=all"], worktree,
+        runner=runner).stdout.split("\0") if item]
+    paths = []
+    index = 0
+    while index < len(pending):
+        entry = pending[index]
+        if len(entry) <= 3:
+            raise DeliveryError("Git returned malformed machine-readable status")
+        status = entry[:2]
+        paths.append(entry[3:])
+        if "R" in status or "C" in status:
+            index += 1
+            if index >= len(pending) or not pending[index]:
+                raise DeliveryError("Git returned incomplete rename status")
+            paths.append(pending[index])
+        index += 1
     return sorted(set(path for path in paths if path))
+
+
+def changed_paths(worktree: pathlib.Path, base: str,
+                  runner=subprocess.run) -> list[str]:
+    tracked_items = [item for item in git(
+        ["diff", "--name-status", "-z", f"{base}...HEAD"], worktree,
+        runner=runner).stdout.split("\0") if item]
+    tracked = []
+    index = 0
+    while index < len(tracked_items):
+        status = tracked_items[index]
+        index += 1
+        path_count = 2 if status.startswith(("R", "C")) else 1
+        if index + path_count > len(tracked_items):
+            raise DeliveryError("Git returned incomplete committed path status")
+        tracked.extend(tracked_items[index:index + path_count])
+        index += path_count
+    return sorted(set(tracked + pending_paths(worktree, runner=runner)))
+
+
+def stage_pending_work(worktree: pathlib.Path,
+                       runner=subprocess.run) -> None:
+    """Stage the complete checked worktree state, including rename deletion."""
+    git(["add", "--all", "--", "."], worktree, runner=runner)
 
 
 def repository_test_command(worktree: pathlib.Path) -> list[str]:
@@ -418,7 +519,7 @@ def repository_test_command(worktree: pathlib.Path) -> list[str]:
     if package.is_file():
         try:
             manifest = json.loads(package.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
             raise DeliveryError(f"invalid product package.json: {exc}") from exc
         if ((manifest.get("scripts") or {}).get("test") or "").strip():
             return ["npm", "test"]
@@ -477,39 +578,663 @@ def recovery_manifest(patch: pathlib.Path) -> pathlib.Path:
     return patch.with_suffix(".json")
 
 
-def recovery_available(patch: pathlib.Path) -> bool:
+def recovery_previous(patch: pathlib.Path) -> tuple[pathlib.Path, pathlib.Path]:
     manifest = recovery_manifest(patch)
-    if patch.is_file() != manifest.is_file():
-        patch.unlink(missing_ok=True)
-        manifest.unlink(missing_ok=True)
+    return (patch.with_name(patch.name + ".previous"),
+            manifest.with_name(manifest.name + ".previous"))
+
+
+def _unlink_recovery_files(*paths: pathlib.Path) -> None:
+    for path in paths:
+        path.unlink(missing_ok=True)
+    if paths:
+        _fsync_recovery_directory(paths[0].parent)
+
+
+def _fsync_recovery_directory(directory_path: pathlib.Path) -> None:
+    directory = os.open(directory_path, os.O_RDONLY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+
+
+def recovery_patch_paths(patch: pathlib.Path, *, runner=subprocess.run) -> list[str]:
+    """Read the path set Git records in a checkpoint without applying it."""
+    try:
+        result = runner(
+            ["git", "apply", "--numstat", "-z", str(patch)], cwd=patch.parent,
+            capture_output=True, text=True)
+    except Exception as exc:
+        raise RecoveryError(
+            "recovery checkpoint patch paths are unavailable") from exc
+    if result.returncode:
+        raise RecoveryError("recovery checkpoint patch paths are invalid")
+    paths = []
+    for record in result.stdout.split("\0"):
+        if not record:
+            continue
+        fields = record.split("\t", 2)
+        if len(fields) != 3 or not fields[2]:
+            raise RecoveryError("recovery checkpoint patch paths are invalid")
+        paths.append(fields[2])
+    try:
+        patch_text = patch.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise RecoveryError(
+            "recovery checkpoint patch paths are unavailable") from exc
+    for line in patch_text.splitlines():
+        if line.startswith(("rename from ", "rename to ",
+                            "copy from ", "copy to ")):
+            encoded = line.split(" ", 2)[2]
+            try:
+                if encoded.startswith('"'):
+                    decoded = decode_git_quoted_path(encoded)
+                else:
+                    decoded = encoded
+            except (SyntaxError, ValueError, UnicodeDecodeError,
+                    UnicodeEncodeError) as exc:
+                raise RecoveryError(
+                    "recovery checkpoint patch paths are invalid") from exc
+            if not isinstance(decoded, str) or not decoded:
+                raise RecoveryError("recovery checkpoint patch paths are invalid")
+            paths.append(decoded)
+    if not paths:
+        raise RecoveryError("recovery checkpoint patch paths are invalid")
+    return sorted(set(paths))
+
+
+def decode_git_quoted_path(value: str) -> str:
+    """Decode Git C quoting while preserving literal UTF-8 characters."""
+    if len(value) < 2 or value[0] != '"' or value[-1] != '"':
+        raise ValueError("invalid quoted Git path")
+    escaped = {"a": 7, "b": 8, "t": 9, "n": 10, "v": 11,
+               "f": 12, "r": 13, '"': 34, "\\": 92}
+    result = bytearray()
+    index = 1
+    while index < len(value) - 1:
+        character = value[index]
+        if character != "\\":
+            result.extend(character.encode("utf-8"))
+            index += 1
+            continue
+        index += 1
+        if index >= len(value) - 1:
+            raise ValueError("invalid quoted Git path escape")
+        character = value[index]
+        if character in "01234567":
+            end = index
+            while end < min(index + 3, len(value) - 1) and value[end] in "01234567":
+                end += 1
+            result.append(int(value[index:end], 8))
+            index = end
+        elif character in escaped:
+            result.append(escaped[character])
+            index += 1
+        else:
+            raise ValueError("invalid quoted Git path escape")
+    return result.decode("utf-8")
+
+
+def validate_pushed_recovery(value: dict, patch_text: str | None, *,
+                             repo: str | None, story_number: int | None,
+                             scope: list[str] | None,
+                             patch_paths: list[str] | None = None) -> str:
+    """Validate all provenance needed before durable checkpoint deletion."""
+    expected_repo = repo if repo is not None else value.get("repository")
+    expected_story = (story_number if story_number is not None
+                      else value.get("story"))
+    expected = {"schema_version": RECOVERY_SCHEMA_VERSION,
+                "trust": RECOVERY_TRUST, "repository": expected_repo,
+                "story": expected_story}
+    if (not isinstance(expected_repo, str) or not expected_repo or
+            not isinstance(expected_story, int) or expected_story <= 0 or
+            any(value.get(key) != item for key, item in expected.items())):
+        raise RecoveryError("pushed recovery checkpoint identity is invalid")
+    head = value.get("delivered_head")
+    paths = value.get("recovered_paths")
+    if (not valid_commit(value.get("base_commit")) or
+            not valid_commit(head) or
+            "pending_head" in value or
+            "push_prepared_at" in value or
+            not isinstance(paths, list) or not paths or
+            any(not isinstance(path, str) or not path for path in paths) or
+            (patch_paths is not None and sorted(set(paths)) != patch_paths) or
+            (scope is not None and merge_gate.paths_out_of_scope(paths, scope)) or
+            (patch_text is not None and
+             value.get("patch_sha256") != hashlib.sha256(
+                 patch_text.encode("utf-8")).hexdigest()) or
+            any(not isinstance(value.get(key), str) or not value[key]
+                for key in ("previous_mutation_state",
+                            "previous_terminal_outcome"))):
+        raise RecoveryError("pushed recovery checkpoint provenance is invalid")
+    if not valid_recovery_worker(
+            value.get("originating_worker"), repo=expected_repo,
+            story_number=expected_story):
+        raise RecoveryError("pushed recovery worker identity is invalid")
+    for key in ("recovered_at", "delivery_verified_at"):
+        if not valid_utc_timestamp(value.get(key)):
+            raise RecoveryError(f"pushed recovery {key} is invalid")
+    return head
+
+
+def recovery_available(patch: pathlib.Path, *, repo: str | None = None,
+                       story_number: int | None = None,
+                       scope: list[str] | None = None,
+                       reconcile_cleanup: bool = True,
+                       runner=subprocess.run) -> bool:
+    manifest = recovery_manifest(patch)
+    previous_patch, previous_manifest = recovery_previous(patch)
+    if previous_patch.is_file() and previous_manifest.is_file():
+        # A replacement is not committed until both old-generation backups
+        # are removed. If the host stopped anywhere before then, restore the
+        # complete prior generation and retry from known resumable evidence.
+        try:
+            _write_recovery_file(
+                patch, previous_patch.read_text(encoding="utf-8"))
+            _write_recovery_file(
+                manifest, previous_manifest.read_text(encoding="utf-8"))
+            _unlink_recovery_files(previous_patch, previous_manifest)
+        except Exception as exc:
+            raise RecoveryError(
+                "prior recovery generation could not be restored") from exc
+    patch_tombstone = patch.with_name(patch.name + ".deleting")
+    manifest_tombstone = manifest.with_name(manifest.name + ".deleting")
+    if patch_tombstone.exists() or manifest_tombstone.exists():
+        # Cleanup begins only after the recovered delivery is durable. Finish
+        # any interrupted transaction instead of treating its remainder as a
+        # new invalid recovery checkpoint.
+        patch_source = patch if patch.is_file() else patch_tombstone
+        manifest_source = manifest if manifest.is_file() else manifest_tombstone
+        try:
+            value = json.loads(manifest_source.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise RecoveryError("recovery cleanup transaction is invalid") from exc
+        if not isinstance(value, dict):
+            raise RecoveryError("recovery cleanup transaction is invalid")
+        if not patch_source.is_file():
+            if manifest_source == manifest_tombstone:
+                validate_pushed_recovery(
+                    value, None, repo=repo, story_number=story_number,
+                    scope=scope)
+                if not reconcile_cleanup:
+                    return True
+                try:
+                    _unlink_recovery_files(manifest_tombstone)
+                except OSError as exc:
+                    raise RecoveryError(
+                        "recovery cleanup transaction could not finish") from exc
+                return False
+            raise RecoveryError("recovery cleanup transaction is invalid")
+        try:
+            patch_text = patch_source.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
+            raise RecoveryError(
+                "recovery cleanup patch is unavailable") from exc
+        validate_pushed_recovery(
+            value, patch_text, repo=repo, story_number=story_number, scope=scope,
+            patch_paths=recovery_patch_paths(patch_source, runner=runner))
+        if not reconcile_cleanup:
+            return True
+        try:
+            _unlink_recovery_files(
+                patch, manifest, patch_tombstone, manifest_tombstone)
+        except OSError as exc:
+            raise RecoveryError(
+                "recovery cleanup transaction could not finish") from exc
         return False
+    if patch.is_file() != manifest.is_file():
+        raise RecoveryError("recovery checkpoint patch/manifest pair is incomplete")
     if not patch.is_file():
         return False
     try:
         value = json.loads(manifest.read_text(encoding="utf-8"))
         patch_text = patch.read_text(encoding="utf-8")
-    except (OSError, json.JSONDecodeError):
-        patch.unlink(missing_ok=True)
-        manifest.unlink(missing_ok=True)
-        return False
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        raise RecoveryError("recovery checkpoint metadata is unavailable")
+    if not isinstance(value, dict):
+        raise RecoveryError("recovery checkpoint metadata is not an object")
+    paths = value.get("recovered_paths")
+    expected = {"schema_version": RECOVERY_SCHEMA_VERSION,
+                "trust": RECOVERY_TRUST, "repository": repo,
+                "story": story_number}
     if value.get("patch_sha256") != hashlib.sha256(
             patch_text.encode("utf-8")).hexdigest():
-        patch.unlink(missing_ok=True)
-        manifest.unlink(missing_ok=True)
-        return False
+        raise RecoveryError("recovery checkpoint digest does not match its manifest")
+    if any(value.get(key) != item for key, item in expected.items()):
+        raise RecoveryError("recovery checkpoint identity is invalid")
+    if (not valid_commit(value.get("base_commit")) or
+            not isinstance(paths, list) or not paths or
+            any(not isinstance(path, str) or not path for path in paths) or
+            (scope is not None and merge_gate.paths_out_of_scope(paths, scope)) or
+            any(not isinstance(value.get(key), str) or not value[key]
+                for key in ("previous_mutation_state",
+                            "previous_terminal_outcome"))):
+        raise RecoveryError("recovery checkpoint provenance is invalid")
+    if not valid_recovery_worker(
+            value.get("originating_worker"), repo=repo,
+            story_number=story_number):
+        raise RecoveryError("recovery checkpoint worker identity is invalid")
+    if not valid_utc_timestamp(value.get("recovered_at")):
+        raise RecoveryError("recovery checkpoint timestamp is invalid")
+    # One leftover means the active pair was never replaced or replacement
+    # completed and backup cleanup was interrupted. The active pair has now
+    # been validated, so the incomplete backup cannot be authoritative.
+    try:
+        _unlink_recovery_files(previous_patch, previous_manifest)
+    except OSError as exc:
+        raise RecoveryError(
+            "recovery generation cleanup could not finish") from exc
     return True
 
 
 def _write_recovery_file(target: pathlib.Path, value: str) -> None:
     temporary = target.with_name(target.name + ".tmp")
-    temporary.write_text(value, encoding="utf-8")
+    with temporary.open("w", encoding="utf-8") as handle:
+        handle.write(value)
+        handle.flush()
+        os.fsync(handle.fileno())
     temporary.replace(target)
+    _fsync_recovery_directory(target.parent)
+
+
+def _write_recovery_pair(target: pathlib.Path, patch_text: str,
+                         manifest_text: str) -> None:
+    """Publish a pair while retaining the prior valid generation on failure."""
+    manifest = recovery_manifest(target)
+    previous_patch, previous_manifest = recovery_previous(target)
+    if target.is_file() != manifest.is_file():
+        raise RecoveryError("recovery checkpoint patch/manifest pair is incomplete")
+    if target.is_file():
+        try:
+            prior_patch = target.read_text(encoding="utf-8")
+            prior_manifest = manifest.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
+            raise RecoveryError(
+                "prior recovery generation is unavailable") from exc
+        _write_recovery_file(previous_patch, prior_patch)
+        _write_recovery_file(previous_manifest, prior_manifest)
+    _write_recovery_file(target, patch_text)
+    _write_recovery_file(manifest, manifest_text)
+    _unlink_recovery_files(previous_patch, previous_manifest)
+
+
+def remove_recovery(patch: pathlib.Path) -> None:
+    """Remove the complete checkpoint pair after successful delivery only."""
+    manifest = recovery_manifest(patch)
+    patch_tombstone = patch.with_name(patch.name + ".deleting")
+    manifest_tombstone = manifest.with_name(manifest.name + ".deleting")
+    patch.replace(patch_tombstone)
+    try:
+        manifest.replace(manifest_tombstone)
+    except Exception:
+        patch_tombstone.replace(patch)
+        _fsync_recovery_directory(patch.parent)
+        raise
+    _fsync_recovery_directory(patch.parent)
+    patch_tombstone.unlink(missing_ok=True)
+    manifest_tombstone.unlink(missing_ok=True)
+    _fsync_recovery_directory(patch.parent)
+
+
+def mark_recovery_pushed(patch: pathlib.Path, head: str) -> None:
+    """Record that verified recovered work is durable on an exact branch head."""
+    if not valid_commit(head):
+        raise RecoveryError("pushed recovery head is invalid")
+    try:
+        manifest = recovery_manifest(patch)
+        value = json.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise RecoveryError("recovery checkpoint metadata is unavailable") from exc
+    if not isinstance(value, dict):
+        raise RecoveryError("recovery checkpoint metadata is not an object")
+    value.pop("pending_head", None)
+    value.pop("push_prepared_at", None)
+    value["delivered_head"] = head
+    value["delivery_verified_at"] = (
+        datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"))
+    _write_recovery_file(
+        manifest, json.dumps(value, indent=2, sort_keys=True) + "\n")
+
+
+def mark_recovery_push_pending(patch: pathlib.Path, head: str) -> None:
+    """Durably bind the checkpoint to the commit before remote mutation."""
+    if not valid_commit(head):
+        raise RecoveryError("pending recovery head is invalid")
+    try:
+        manifest = recovery_manifest(patch)
+        value = json.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise RecoveryError("recovery checkpoint metadata is unavailable") from exc
+    if not isinstance(value, dict):
+        raise RecoveryError("recovery checkpoint metadata is not an object")
+    value["pending_head"] = head
+    value["push_prepared_at"] = (
+        datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"))
+    _write_recovery_file(
+        manifest, json.dumps(value, indent=2, sort_keys=True) + "\n")
+
+
+def ensure_recovery_commit_available(commit: str, checkout: pathlib.Path, *,
+                                     runner=subprocess.run) -> None:
+    """Fetch an authenticated checkpoint commit omitted by shallow history."""
+    try:
+        git(["cat-file", "-e", f"{commit}^{{commit}}"], checkout,
+            runner=runner)
+        return
+    except DeliveryError:
+        pass
+    except Exception as exc:
+        raise RecoveryError(
+            "recovery checkpoint commit could not be inspected") from exc
+    try:
+        shallow = git(
+            ["rev-parse", "--is-shallow-repository"], checkout,
+            runner=runner).stdout.strip()
+        if shallow not in ("true", "false"):
+            raise ValueError("invalid shallow-repository response")
+        if shallow == "true":
+            git(["fetch", "--no-tags", "--unshallow", "origin"],
+                checkout, runner=runner)
+        try:
+            git(["cat-file", "-e", f"{commit}^{{commit}}"], checkout,
+                runner=runner)
+        except DeliveryError:
+            git(["fetch", "--no-tags", "origin", commit], checkout,
+                runner=runner)
+            git(["cat-file", "-e", f"{commit}^{{commit}}"], checkout,
+                runner=runner)
+    except Exception as exc:
+        raise RecoveryError(
+            "recovery checkpoint commit could not be fetched") from exc
+
+
+def validate_recovery_head_content(patch: pathlib.Path, head: str,
+                                   checkout: pathlib.Path, *,
+                                   runner=subprocess.run) -> None:
+    """Prove the recorded commit's tree is exactly the checkpoint result."""
+    try:
+        value = json.loads(
+            recovery_manifest(patch).read_text(encoding="utf-8"))
+        patch_text = patch.read_text(encoding="utf-8")
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise RecoveryError("recovery checkpoint metadata is unavailable") from exc
+    base = value.get("base_commit") if isinstance(value, dict) else None
+    if not valid_commit(base) or not valid_commit(head):
+        raise RecoveryError("pushed recovery checkpoint provenance is invalid")
+    try:
+        git(["cat-file", "-e", f"{head}^{{commit}}"], checkout,
+            runner=runner)
+    except DeliveryError:
+        # A valid durable PR can be resumed from a different checkout that has
+        # not fetched its exact head object yet. Fetch that immutable object
+        # before comparing trees; failure remains recovery-aware below.
+        try:
+            git(["fetch", "--no-tags", "origin", head], checkout,
+                runner=runner)
+        except Exception as exc:
+            raise RecoveryError(
+                "recovery checkpoint head could not be fetched") from exc
+    except Exception as exc:
+        raise RecoveryError(
+            "recovery checkpoint head could not be inspected") from exc
+    ensure_recovery_commit_available(base, checkout, runner=runner)
+    try:
+        with tempfile.TemporaryDirectory(
+                prefix="factory-recovery-index-") as temp:
+            environment = os.environ.copy()
+            environment["GIT_INDEX_FILE"] = str(pathlib.Path(temp) / "index")
+            git(["read-tree", base], checkout, env=environment, runner=runner)
+            run(["git", "apply", "--cached", "--binary", str(patch)],
+                cwd=checkout, timeout=300, env=environment, runner=runner)
+            expected_tree = git(["write-tree"], checkout, env=environment,
+                                runner=runner).stdout.strip()
+            delivered_tree = git(["rev-parse", f"{head}^{{tree}}"], checkout,
+                                 runner=runner).stdout.strip()
+    except RecoveryError:
+        raise
+    except Exception as exc:
+        raise RecoveryError(
+            "recovery checkpoint content could not be validated") from exc
+    if expected_tree != delivered_tree:
+        raise RecoveryError("recovery checkpoint does not match recorded head")
+
+
+def reconcile_recovery_push(patch: pathlib.Path, observed_head: str, *,
+                            repo: str, story_number: int,
+                            checkout: pathlib.Path,
+                            runner=subprocess.run) -> None:
+    """Promote a pre-push marker when the remote proves the push landed."""
+    try:
+        value = json.loads(
+            recovery_manifest(patch).read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise RecoveryError("recovery checkpoint metadata is unavailable") from exc
+    if not isinstance(value, dict):
+        raise RecoveryError("recovery checkpoint metadata is not an object")
+    pending = value.get("pending_head")
+    if pending is None:
+        return
+    expected = {"schema_version": RECOVERY_SCHEMA_VERSION,
+                "trust": RECOVERY_TRUST, "repository": repo,
+                "story": story_number}
+    prepared = value.get("push_prepared_at")
+    try:
+        if (any(value.get(key) != item for key, item in expected.items()) or
+                not valid_commit(pending) or
+                not valid_utc_timestamp(prepared)):
+            raise ValueError("invalid pending recovery provenance")
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise RecoveryError("pending recovery checkpoint is invalid") from exc
+    if pending == observed_head:
+        validate_recovery_head_content(
+            patch, pending, checkout, runner=runner)
+    else:
+        if not valid_commit(observed_head):
+            raise RecoveryError("observed recovery branch head is invalid")
+        try:
+            git(["cat-file", "-e", f"{observed_head}^{{commit}}"], checkout,
+                runner=runner)
+        except DeliveryError:
+            try:
+                git(["fetch", "--no-tags", "origin", observed_head], checkout,
+                    runner=runner)
+            except Exception as exc:
+                raise RecoveryError(
+                    "observed recovery branch head could not be fetched") from exc
+        except Exception as exc:
+            raise RecoveryError(
+                "observed recovery branch head could not be inspected") from exc
+        try:
+            shallow = git(
+                ["rev-parse", "--is-shallow-repository"], checkout,
+                runner=runner).stdout.strip()
+            if shallow not in ("true", "false"):
+                raise ValueError("invalid shallow-repository response")
+            if shallow == "true":
+                git(["fetch", "--no-tags", "--unshallow", "origin"],
+                    checkout, runner=runner)
+        except Exception as exc:
+            raise RecoveryError(
+                "observed recovery history could not be completed") from exc
+        try:
+            git(["cat-file", "-e", f"{pending}^{{commit}}"], checkout,
+                runner=runner)
+        except DeliveryError:
+            # Fetching the observed history would have brought in `pending`
+            # if it were an ancestor. Its continued absence proves the push did
+            # not land on this branch, so the authenticated patch may replay.
+            return
+        except Exception as exc:
+            raise RecoveryError(
+                "pending recovery head could not be inspected") from exc
+        validate_recovery_head_content(
+            patch, pending, checkout, runner=runner)
+        try:
+            ancestry = runner(
+                ["git", "merge-base", "--is-ancestor", pending,
+                 observed_head], cwd=str(checkout), capture_output=True,
+                text=True, timeout=300)
+        except Exception as exc:
+            raise RecoveryError(
+                "pending recovery ancestry could not be inspected") from exc
+        if ancestry.returncode == 1:
+            return
+        if ancestry.returncode != 0:
+            raise RecoveryError(
+                "pending recovery ancestry could not be inspected")
+    try:
+        mark_recovery_pushed(patch, pending)
+    except RecoveryError:
+        raise
+    except Exception as exc:
+        raise RecoveryError(
+            "pending recovery promotion could not be recorded") from exc
+
+
+def pushed_recovery_head(patch: pathlib.Path, *, repo: str, story_number: int,
+                         checkout: pathlib.Path,
+                         scope: list[str] | None = None,
+                         runner=subprocess.run) -> str | None:
+    """Return a validated durable head, if this checkpoint was already pushed."""
+    try:
+        value = json.loads(recovery_manifest(patch).read_text(encoding="utf-8"))
+        patch_text = patch.read_text(encoding="utf-8")
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise RecoveryError("recovery checkpoint metadata is unavailable") from exc
+    if not isinstance(value, dict):
+        raise RecoveryError("recovery checkpoint metadata is not an object")
+    head = value.get("delivered_head")
+    if head is None:
+        return None
+    validate_recovery_head_content(
+        patch, head, checkout, runner=runner)
+    return validate_pushed_recovery(
+        value, patch_text, repo=repo, story_number=story_number, scope=scope,
+        patch_paths=recovery_patch_paths(patch, runner=runner))
+
+
+def recovered_work_state(worktree: pathlib.Path, paths: list[str], *,
+                         base_commit: str, runner=subprocess.run) -> str:
+    """Digest the exact recovered file state without trusting Git metadata."""
+    digest = hashlib.sha256()
+    staged = git(["diff", "--binary", "--cached", base_commit, "--", *paths],
+                 worktree, runner=runner).stdout
+    digest.update(staged.encode("utf-8") + b"\0")
+    for relative in sorted(paths):
+        path = worktree / relative
+        digest.update(relative.encode("utf-8") + b"\0")
+        try:
+            metadata = path.lstat()
+        except FileNotFoundError:
+            digest.update(b"missing\0")
+            continue
+        digest.update(f"{stat.S_IFMT(metadata.st_mode)}:{stat.S_IMODE(metadata.st_mode)}"
+                      .encode("ascii") + b"\0")
+        if path.is_symlink():
+            digest.update(os.readlink(path).encode("utf-8") + b"\0")
+        elif path.is_file():
+            digest.update(path.read_bytes() + b"\0")
+        else:
+            # Git submodules are directories in the worktree but gitlinks in
+            # the index. The staged patch above is their authoritative state.
+            digest.update(b"directory-or-gitlink\0")
+    return digest.hexdigest()
+
+
+def _gitlinks(output: str) -> set[str]:
+    result = set()
+    for record in output.split("\0") if "\0" in output else output.splitlines():
+        metadata, separator, relative = record.partition("\t")
+        fields = metadata.split()
+        if separator and fields and fields[0] == "160000":
+            result.add(relative)
+    return result
+
+
+def checkout_recovered_gitlinks(worktree: pathlib.Path, paths: list[str], *,
+                                base_commit: str,
+                                runner=subprocess.run) -> None:
+    """Make each staged gitlink's checked-out directory match the index."""
+    prior = _gitlinks(git(
+        ["ls-tree", "-z", base_commit, "--", *paths], worktree,
+        runner=runner).stdout)
+    staged = git(
+        ["ls-files", "--stage", "-z", "--", *paths], worktree,
+        runner=runner).stdout
+    gitlinks = _gitlinks(staged)
+    staged_paths = {
+        record.partition("\t")[2]
+        for record in (staged.split("\0") if "\0" in staged
+                       else staged.splitlines())
+        if record.partition("\t")[1]
+    }
+    root = worktree.resolve()
+    for relative in sorted(prior - gitlinks):
+        if any(path == relative or path.startswith(relative + "/")
+               for path in staged_paths):
+            # Removing the old checkout now would also remove regular files
+            # created by the patch. Preserve them and the checkpoint instead.
+            raise RecoveryError(
+                "recovered gitlink replacement requires explicit cleanup")
+        target = worktree / relative
+        if not target.resolve().is_relative_to(root):
+            raise RecoveryError("deleted recovery gitlink escapes worktree")
+        if target.is_symlink() or target.is_file():
+            target.unlink()
+        elif target.is_dir():
+            shutil.rmtree(target)
+    if gitlinks:
+        # Tests and the worker must inspect the dependency revision that will
+        # actually be committed, not an older submodule checkout.
+        git(["submodule", "update", "--init", "--checkout", "--",
+             *sorted(gitlinks)],
+            worktree, runner=runner)
+
+
+def ensure_recovered_gitlinks_clean(worktree: pathlib.Path, paths: list[str], *,
+                                    runner=subprocess.run) -> None:
+    """Reject nested edits that the parent repository cannot record."""
+    if not paths:
+        return
+    staged = git(["ls-files", "--stage", "-z", "--", *paths], worktree,
+                 runner=runner).stdout
+    for relative in sorted(_gitlinks(staged)):
+        dirty = git(
+            ["-C", relative, "status", "--porcelain=v1",
+             "--untracked-files=all"], worktree, runner=runner).stdout
+        if dirty:
+            raise DeliveryError(
+                f"recovered submodule has uncommitted changes: {relative}",
+                mutation_state="post-mutation",
+                terminal_outcome="recovered-submodule-dirty")
+
+
+def mark_finalization_failure(exc: Exception, patch: pathlib.Path) -> None:
+    """Keep a pushed recovery retry charged until its PR is durable."""
+    setattr(exc, "mutation_state", "post-mutation")
+    if not getattr(exc, "terminal_outcome", ""):
+        setattr(exc, "terminal_outcome", "delivery-finalization-failed")
+    setattr(exc, "recovery_ref", str(patch))
+
+
+def remove_delivered_recovery(patch: pathlib.Path) -> None:
+    """Clean up durable recovery without losing post-mutation accounting."""
+    try:
+        remove_recovery(patch)
+    except Exception as exc:
+        setattr(exc, "mutation_state", "post-mutation")
+        setattr(exc, "terminal_outcome", "recovery-cleanup-failed")
+        setattr(exc, "recovery_ref", str(patch))
+        raise
 
 
 def checkpoint_failed_work(worktree: pathlib.Path, checkout: pathlib.Path, *,
                            repo: str, story_number: int, default: str,
+                           base_ref: str, base_commit: str,
                            scope: list[str], mutation_state: str,
                            terminal_outcome: str,
+                           originating_worker: dict | None = None,
                            runner=subprocess.run) -> str:
     """Preserve authorized in-scope edits before removing the temp worktree.
 
@@ -517,11 +1242,19 @@ def checkpoint_failed_work(worktree: pathlib.Path, checkout: pathlib.Path, *,
     A later launch for the same Story applies it, then runs the normal scope,
     test, commit, push, and review path.
     """
-    paths = changed_paths(worktree, f"origin/{default}", runner=runner)
+    paths = changed_paths(worktree, base_ref, runner=runner)
     if not paths or merge_gate.paths_out_of_scope(paths, scope):
         return ""
-    git(["add", "--", *paths], worktree, runner=runner)
-    patch = git(["diff", "--binary", "--cached", f"origin/{default}"],
+    if not valid_commit(base_commit):
+        raise DeliveryError("recovery checkpoint base commit is invalid")
+    # A post-commit checkpoint includes historical deletions and rename sources
+    # in `paths`, but those paths no longer exist in HEAD or the index. Only ask
+    # Git to stage changes that are still pending; the base-to-index diff below
+    # continues to preserve every historical path in the recovery patch.
+    pending = pending_paths(worktree, runner=runner)
+    if pending:
+        stage_pending_work(worktree, runner=runner)
+    patch = git(["diff", "--binary", "--cached", base_commit],
                 worktree, runner=runner).stdout
     if not patch:
         return ""
@@ -532,28 +1265,32 @@ def checkpoint_failed_work(worktree: pathlib.Path, checkout: pathlib.Path, *,
         "trust": RECOVERY_TRUST,
         "repository": repo,
         "story": story_number,
+        "base_commit": base_commit,
         "recovered_paths": paths,
         "previous_mutation_state": mutation_state,
         "previous_terminal_outcome": terminal_outcome,
         "patch_sha256": hashlib.sha256(patch.encode("utf-8")).hexdigest(),
+        "originating_worker": dict(originating_worker or {}),
+        "recovered_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     }
-    _write_recovery_file(target, patch)
-    _write_recovery_file(
-        recovery_manifest(target),
-        json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+    _write_recovery_pair(
+        target, patch, json.dumps(manifest, indent=2, sort_keys=True) + "\n")
     return str(target)
 
 
 def restore_failed_work(patch: pathlib.Path, worktree: pathlib.Path, *,
-                        repo: str, story_number: int, scope: list[str],
+                        repo: str, story_number: int, base_commit: str,
+                        scope: list[str],
                         runner=subprocess.run) -> dict:
     """Validate, apply, and describe a failed worker's untrusted checkpoint."""
     manifest_path = recovery_manifest(patch)
     try:
         value = json.loads(manifest_path.read_text(encoding="utf-8"))
         patch_text = patch.read_text(encoding="utf-8")
-    except (OSError, json.JSONDecodeError) as exc:
-        raise DeliveryError(f"recovery checkpoint metadata is unavailable: {exc}") from exc
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise RecoveryError(f"recovery checkpoint metadata is unavailable: {exc}") from exc
+    if not isinstance(value, dict):
+        raise RecoveryError("recovery checkpoint metadata is not an object")
     paths = value.get("recovered_paths")
     expected = {
         "schema_version": RECOVERY_SCHEMA_VERSION,
@@ -562,26 +1299,58 @@ def restore_failed_work(patch: pathlib.Path, worktree: pathlib.Path, *,
         "story": story_number,
     }
     if any(value.get(key) != item for key, item in expected.items()):
-        raise DeliveryError("recovery checkpoint identity is invalid")
+        raise RecoveryError("recovery checkpoint identity is invalid")
+    recorded_base = value.get("base_commit")
+    if not valid_commit(recorded_base):
+        raise RecoveryError("recovery checkpoint base commit is invalid")
     if (not isinstance(paths, list) or not paths or
             any(not isinstance(path, str) or not path for path in paths)):
-        raise DeliveryError("recovery checkpoint paths are invalid")
+        raise RecoveryError("recovery checkpoint paths are invalid")
     if merge_gate.paths_out_of_scope(paths, scope):
-        raise DeliveryError("recovery checkpoint paths exceed Story scope")
+        raise RecoveryError("recovery checkpoint paths exceed Story scope")
     digest = hashlib.sha256(patch_text.encode("utf-8")).hexdigest()
     if value.get("patch_sha256") != digest:
-        raise DeliveryError("recovery checkpoint digest does not match its manifest")
+        raise RecoveryError("recovery checkpoint digest does not match its manifest")
     for key in ("previous_mutation_state", "previous_terminal_outcome"):
         if not isinstance(value.get(key), str) or not value[key]:
-            raise DeliveryError(f"recovery checkpoint {key} is invalid")
-    git(["apply", "--index", str(patch)], worktree, runner=runner)
-    git(["reset"], worktree, runner=runner)
+            raise RecoveryError(f"recovery checkpoint {key} is invalid")
+    worker = value.get("originating_worker")
+    if not valid_recovery_worker(
+            worker, repo=repo, story_number=story_number):
+        raise RecoveryError("recovery checkpoint worker identity is invalid")
+    recovered_at = value.get("recovered_at")
+    if not valid_utc_timestamp(recovered_at):
+        raise RecoveryError("recovery checkpoint timestamp is invalid")
+    try:
+        apply_args = ["apply", "--index", str(patch)]
+        if recorded_base != base_commit:
+            ensure_recovery_commit_available(
+                recorded_base, worktree, runner=runner)
+            git(["merge-base", "--is-ancestor", recorded_base, base_commit],
+                worktree, runner=runner)
+            apply_args = ["apply", "--3way", "--index", str(patch)]
+        git(apply_args, worktree, runner=runner)
+        checkout_recovered_gitlinks(
+            worktree, paths, base_commit=base_commit, runner=runner)
+        applied_paths = changed_paths(worktree, base_commit, runner=runner)
+    except RecoveryError:
+        raise
+    except Exception as exc:
+        raise RecoveryError(
+            f"recovery checkpoint application failed: {exc}") from exc
+    if sorted(applied_paths) != sorted(paths):
+        raise RecoveryError("recovery checkpoint patch paths do not match its manifest")
+    if merge_gate.paths_out_of_scope(applied_paths, scope):
+        raise RecoveryError("recovery checkpoint patch exceeds Story scope")
     return {
         "present": True,
         "trust": RECOVERY_TRUST,
         "recovered_paths": paths,
         "previous_mutation_state": value["previous_mutation_state"],
         "previous_terminal_outcome": value["previous_terminal_outcome"],
+        "base_commit": value["base_commit"],
+        "originating_worker": worker,
+        "recovered_at": recovered_at,
     }
 
 
@@ -606,70 +1375,205 @@ def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
             runner=subprocess.run, client: GitHub | None = None,
             state: CapacityState | None = None, registry=None,
             reservation: str | None = None) -> Delivery:
+    saved_recovery = recovery_patch(repo, story_number)
+    try:
+        discovered_recovery = recovery_available(
+            saved_recovery, repo=repo, story_number=story_number, scope=None,
+            reconcile_cleanup=False, runner=runner)
+    except RecoveryError as exc:
+        exc.recovery_ref = str(saved_recovery)
+        raise
     client = client or GitHub(repo, token)
-    metadata = client.api("")  # read preflight before any write
-    default = metadata.get("default_branch")
-    if not default:
-        raise DeliveryError("repository access constraint failed: default branch unavailable")
-    story = client.issue(story_number)
-    project_number = int(section(story.get("body") or "", "Project").removeprefix("#"))
-    project = client.issue(project_number)
-    bounds = parse_bounds(story.get("body") or "")
-    if timeout is not None:
-        bounds = Bounds(bounds.max_usd, min(bounds.timeout, timeout))
-    if max_usd is not None:
-        bounds = Bounds(min(bounds.max_usd, max_usd), bounds.timeout)
-    if bounds.timeout <= 0 or bounds.max_usd <= 0:
-        raise DeliveryError("effective timeout and spend bounds must be positive")
-    events = client.pages(f"/issues/{story_number}/timeline")
-    version = state_version(events)
-    task_key = (capacity_admission.delivery_task_key(
-                    repo, story, next_attempt=False)
-                if reservation else f"delivery:{repo}:{story_number}:{version}")
-    delivery_trace = obs.story_trace_id(repo, story_number, events)
-    durable = marker(story_number, version)
-    pulls = linked_prs(story_number, client.pull_requests())
+    try:
+        metadata = client.api("")  # read preflight before any write
+        default = metadata.get("default_branch")
+        if not default:
+            raise DeliveryError(
+                "repository access constraint failed: default branch unavailable")
+        story = client.issue(story_number)
+        project_number = int(
+            section(story.get("body") or "", "Project").removeprefix("#"))
+        project = client.issue(project_number)
+        bounds = parse_bounds(story.get("body") or "")
+        if timeout is not None:
+            bounds = Bounds(bounds.max_usd, min(bounds.timeout, timeout))
+        if max_usd is not None:
+            bounds = Bounds(min(bounds.max_usd, max_usd), bounds.timeout)
+        if bounds.timeout <= 0 or bounds.max_usd <= 0:
+            raise DeliveryError("effective timeout and spend bounds must be positive")
+        events = client.pages(f"/issues/{story_number}/timeline")
+        version = state_version(events)
+        task_key = (capacity_admission.delivery_task_key(
+                        repo, story, next_attempt=False)
+                    if reservation else f"delivery:{repo}:{story_number}:{version}")
+        delivery_trace = obs.story_trace_id(repo, story_number, events)
+        durable = marker(story_number, version)
+        scope, error = merge_gate.parse_scope(story.get("body") or "")
+        if error:
+            raise DeliveryError(f"invalid Story scope: {error}")
+        pulls = linked_prs(story_number, client.pull_requests())
+    except Exception as exc:
+        if discovered_recovery:
+            setattr(exc, "mutation_state", "post-mutation")
+            setattr(exc, "terminal_outcome", "recovery-initial-preflight-failed")
+            setattr(exc, "recovery_ref", str(saved_recovery))
+        raise
+    try:
+        has_recovery = recovery_available(
+            saved_recovery, repo=repo, story_number=story_number, scope=scope,
+            runner=runner)
+    except RecoveryError as exc:
+        exc.recovery_ref = str(saved_recovery)
+        raise
     if pulls and durable in (pulls[0].get("body") or ""):
         pull = pulls[0]
+        if has_recovery:
+            try:
+                reconcile_recovery_push(
+                    saved_recovery, pull["head"]["sha"], repo=repo,
+                    story_number=story_number, checkout=checkout, runner=runner)
+                delivered_head = pushed_recovery_head(
+                    saved_recovery, repo=repo, story_number=story_number,
+                    checkout=checkout, scope=scope, runner=runner)
+            except RecoveryError as exc:
+                exc.recovery_ref = str(saved_recovery)
+                raise
+            if delivered_head is not None and delivered_head != pull["head"]["sha"]:
+                exc = RecoveryError(
+                    "durable recovery head does not match pull request head")
+                exc.recovery_ref = str(saved_recovery)
+                raise exc
+            if delivered_head == pull["head"]["sha"]:
+                try:
+                    pull = read_back_pr(client, story_number, durable)
+                except Exception as exc:
+                    setattr(exc, "mutation_state", "post-mutation")
+                    setattr(exc, "terminal_outcome",
+                            "recovery-pr-read-back-failed")
+                    setattr(exc, "recovery_ref", str(saved_recovery))
+                    raise
+                if delivered_head != pull["head"]["sha"]:
+                    exc = RecoveryError(
+                        "durable recovery head does not match refreshed "
+                        "pull request head")
+                    exc.recovery_ref = str(saved_recovery)
+                    raise exc
+                remove_delivered_recovery(saved_recovery)
         return Delivery(story_number, project_number, pull["head"]["ref"],
                         pull["number"], pull["head"]["sha"], True)
 
-    scope, error = merge_gate.parse_scope(story.get("body") or "")
-    if error:
-        raise DeliveryError(f"invalid Story scope: {error}")
     protected = protected_control_scope(repo, scope)
     if protected:
         raise DeliveryError(
             "FACTORY_SELF_MODIFICATION_FORBIDDEN: protected Story scope: "
             + ", ".join(protected))
     branch = pulls[0]["head"]["ref"] if pulls else f"story/{story_number}-delivery"
-    remote = git(["ls-remote", "--heads", "origin", branch], checkout,
-                 runner=runner).stdout.strip()
-    if remote:
-        git(["fetch", "origin", f"refs/heads/{branch}:refs/remotes/origin/{branch}"],
-            checkout, runner=runner)
-    base_ref = f"origin/{branch}" if remote else f"origin/{default}"
-    saved_recovery = recovery_patch(repo, story_number)
-    has_recovery = recovery_available(saved_recovery)
-    value = build_input(client, story, project, repo=repo,
-                        pull_request=pulls[0] if pulls else None)
+    try:
+        remote = git(["ls-remote", "--heads", "origin", branch], checkout,
+                     runner=runner).stdout.strip()
+        if remote:
+            git(["fetch", "origin",
+                 f"refs/heads/{branch}:refs/remotes/origin/{branch}"],
+                checkout, runner=runner)
+        base_ref = f"origin/{branch}" if remote else f"origin/{default}"
+        base_commit = git(["rev-parse", base_ref], checkout,
+                          runner=runner).stdout.strip()
+    except Exception as exc:
+        if has_recovery:
+            setattr(exc, "mutation_state", "post-mutation")
+            setattr(exc, "terminal_outcome", "recovery-base-resolution-failed")
+            setattr(exc, "recovery_ref", str(saved_recovery))
+        raise
+    try:
+        value = build_input(client, story, project, repo=repo,
+                            pull_request=pulls[0] if pulls else None)
+    except Exception as exc:
+        if has_recovery:
+            setattr(exc, "mutation_state", "post-mutation")
+            setattr(exc, "terminal_outcome", "recovery-input-preflight-failed")
+            setattr(exc, "recovery_ref", str(saved_recovery))
+        raise
     packet = value["correction_context"]
-    obs.process_event(
-        "delivery.correction-context", trace_id=delivery_trace,
-        repo=repo, story=story_number, project=project_number,
-        retry=packet["retry"], pull_request=packet["pull_request"],
-        head=packet["head"], digest=packet["digest"],
-        source_ids=[item["comment_id"] for item in packet["records"]])
-    with tempfile.TemporaryDirectory(prefix=f"factory-story-{story_number}-") as temp:
-        worktree = pathlib.Path(temp)
-        git(["worktree", "add", "--detach", str(worktree), base_ref], checkout,
-            runner=runner)
+    try:
+        obs.process_event(
+            "delivery.correction-context", trace_id=delivery_trace,
+            repo=repo, story=story_number, project=project_number,
+            retry=packet["retry"], pull_request=packet["pull_request"],
+            head=packet["head"], digest=packet["digest"],
+            source_ids=[item["comment_id"] for item in packet["records"]])
+    except Exception as exc:
+        if has_recovery:
+            setattr(exc, "mutation_state", "post-mutation")
+            setattr(exc, "terminal_outcome", "recovery-correction-event-failed")
+            setattr(exc, "recovery_ref", str(saved_recovery))
+        raise
+    if has_recovery:
         try:
-            recovery_context = {"present": False}
+            reconcile_recovery_push(
+                saved_recovery, base_commit, repo=repo,
+                story_number=story_number, checkout=checkout, runner=runner)
+            delivered_head = pushed_recovery_head(
+                saved_recovery, repo=repo, story_number=story_number, scope=scope,
+                checkout=checkout, runner=runner)
+        except RecoveryError as exc:
+            exc.recovery_ref = str(saved_recovery)
+            raise
+        if delivered_head:
+            if delivered_head != base_commit:
+                exc = RecoveryError(
+                    "pushed recovery head does not match branch head")
+                exc.recovery_ref = str(saved_recovery)
+                raise exc
+            try:
+                body = f"Story: #{story_number}\n\n{durable}\n"
+                pull = (client.update_pr(pulls[0]["number"], body) if pulls else
+                        client.create_pr(f"Story #{story_number}: bounded delivery",
+                                         branch, default, body))
+                fresh = read_back_pr(client, story_number, durable)
+            except Exception as exc:
+                mark_finalization_failure(exc, saved_recovery)
+                raise
+            try:
+                if fresh.get("head", {}).get("sha") != delivered_head:
+                    raise RecoveryError(
+                        "read-back pull request head does not match recovery head")
+                obs.process_event(
+                    "delivery.pull-request.written", trace_id=delivery_trace,
+                    repo=repo, story=story_number, project=project_number,
+                    pull_request=fresh["number"], head=delivered_head)
+                remove_delivered_recovery(saved_recovery)
+            except Exception as exc:
+                if not getattr(exc, "recovery_ref", ""):
+                    mark_finalization_failure(exc, saved_recovery)
+                raise
+            return Delivery(story_number, project_number, branch, fresh["number"],
+                            delivered_head, False)
+    originating_worker = {"task": task_key}
+    with recovery_aware_temporary_directory(
+            prefix=f"factory-story-{story_number}-",
+            recovery_state=lambda: (has_recovery, saved_recovery)) as temp:
+        worktree = pathlib.Path(temp)
+        recovery_context = {"present": False}
+        restored_state = None
+        try:
+            git(["worktree", "add", "--detach", str(worktree), base_ref],
+                checkout, runner=runner)
+        except Exception as exc:
+            if has_recovery:
+                setattr(exc, "mutation_state", "post-mutation")
+                setattr(exc, "terminal_outcome", "recovery-worktree-creation-failed")
+                setattr(exc, "recovery_ref", str(saved_recovery))
+            raise
+        failure_for_cleanup = None
+        try:
             if has_recovery:
                 recovery_context = restore_failed_work(
                     saved_recovery, worktree, repo=repo,
-                    story_number=story_number, scope=scope, runner=runner)
+                    story_number=story_number, base_commit=base_commit,
+                    scope=scope, runner=runner)
+                restored_state = recovered_work_state(
+                    worktree, recovery_context["recovered_paths"],
+                    base_commit=base_commit, runner=runner)
             value["recovery_context"] = recovery_context
             prompt = worker_prompt(value)
             owns_state = state is None
@@ -707,6 +1611,13 @@ def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
                     telemetry=lambda **fields: obs.telemetry(
                         component="delivery-worker", operation="capacity-route",
                         story=story_number, project=project_number, **fields))
+                started_leases = []
+
+                def record_worker_start(lease):
+                    started_leases.append(lease.lease_id)
+                    publish_worker_start(
+                        client, repo=repo, story=story_number, version=version,
+                        reservation=lease.lease_id, invocation=task_key)
 
                 def validate(_output):
                     produced = changed_paths(
@@ -726,11 +1637,16 @@ def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
                         request=request, registry=available,
                         payload=InvocationPayload(prompt, access="workspace-write"),
                         validate=validate, reservation_id=reservation,
-                        on_started=(lambda lease: publish_worker_start(
-                            client, repo=repo, story=story_number, version=version,
-                            reservation=lease.lease_id, invocation=task_key)))
+                        on_started=record_worker_start)
                 if result.attempts:
                     final_attempt = result.attempts[-1]
+                    originating_worker.update({
+                        key: final_attempt[key] for key in (
+                            "invocation_id", "provider", "model")
+                        if final_attempt.get(key) is not None
+                    })
+                    if started_leases:
+                        originating_worker["reservation_id"] = started_leases[-1]
                     runlog.engine_usage(
                         story=story_number, project=project_number,
                         engine=final_attempt["model"], phase="worker",
@@ -747,6 +1663,9 @@ def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
             finally:
                 if owns_state:
                     state.close()
+            ensure_recovered_gitlinks_clean(
+                worktree, recovery_context.get("recovered_paths", []),
+                runner=runner)
             paths = changed_paths(worktree, f"origin/{default}", runner=runner)
             if not paths:
                 raise DeliveryError("worker produced no repository changes")
@@ -766,21 +1685,81 @@ def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
                 story.get("body") or "", cwd=worktree, timeout=bounds.timeout,
                 trace_id=delivery_trace, repo=repo, story=story_number,
                 project=project_number, runner=runner)
-            git(["add", "--", *paths], worktree, runner=runner)
+            # All pending paths were just enumerated and scope-checked. Stage
+            # their complete repository state so a vanished rename source is
+            # recorded as a deletion instead of rejected as a pathspec.
+            stage_pending_work(worktree, runner=runner)
             git(["commit", "-m", f"Deliver Story #{story_number}"], worktree,
                 runner=runner)
-            git(["push", "origin", f"HEAD:refs/heads/{branch}"], worktree,
-                runner=runner)
-            head = git(["rev-parse", "HEAD"], worktree, runner=runner).stdout.strip()
+            head = git(["rev-parse", "HEAD"], worktree,
+                       runner=runner).stdout.strip()
+            # Replace even an existing partial checkpoint with the validated
+            # commit that is actually about to be pushed. If the remote rejects
+            # the push, the completed retry must remain resumable rather than
+            # falling back to the older partial worker output.
+            ref = checkpoint_failed_work(
+                worktree, checkout, repo=repo, story_number=story_number,
+                default=default, base_ref=base_ref,
+                base_commit=base_commit, scope=scope,
+                mutation_state="post-mutation",
+                terminal_outcome="completed-awaiting-push",
+                originating_worker=originating_worker, runner=runner)
+            if not ref:
+                raise RecoveryError(
+                    "pre-push recovery checkpoint could not be created")
+            saved_recovery = pathlib.Path(ref)
+            has_recovery = True
+            mark_recovery_push_pending(saved_recovery, head)
+            try:
+                git(["push", "origin", f"HEAD:refs/heads/{branch}"], worktree,
+                    runner=runner)
+            except Exception as exc:
+                if has_recovery:
+                    setattr(exc, "mutation_state", "ambiguous")
+                    setattr(exc, "terminal_outcome", "push-outcome-ambiguous")
+                    setattr(exc, "recovery_ref", str(saved_recovery))
+                raise
+            if has_recovery:
+                try:
+                    mark_recovery_pushed(saved_recovery, head)
+                except Exception as exc:
+                    # Git reported success, but without the durable promotion
+                    # marker a retry must reconcile the remote before deciding
+                    # whether another worker may run.
+                    setattr(exc, "mutation_state", "ambiguous")
+                    setattr(exc, "terminal_outcome", "push-outcome-ambiguous")
+                    setattr(exc, "recovery_ref", str(saved_recovery))
+                    raise
         except Exception as exc:
             try:
-                ref = checkpoint_failed_work(
-                    worktree, checkout, repo=repo, story_number=story_number,
-                    default=default, scope=scope,
-                    mutation_state="post-mutation",
-                    terminal_outcome=(getattr(exc, "terminal_outcome", "") or
-                                      "worker-wrapper-failed"),
-                    runner=runner)
+                if (isinstance(exc, RecoveryError) or
+                        (has_recovery and getattr(exc, "recovery_ref", "") ==
+                         str(saved_recovery))):
+                    ref = str(saved_recovery)
+                else:
+                    recovered_paths = recovery_context.get("recovered_paths", [])
+                    recovery_is_unchanged = (
+                        has_recovery and restored_state is not None and
+                        recovered_work_state(
+                            worktree, recovered_paths, base_commit=base_commit,
+                            runner=runner) ==
+                        restored_state and
+                        sorted(changed_paths(worktree, base_ref, runner=runner)) ==
+                        sorted(recovered_paths))
+                    if recovery_is_unchanged:
+                        ref = str(saved_recovery)
+                    else:
+                        ref = checkpoint_failed_work(
+                            worktree, checkout, repo=repo,
+                            story_number=story_number, default=default,
+                            base_ref=base_ref, base_commit=base_commit, scope=scope,
+                            mutation_state="post-mutation",
+                            terminal_outcome=(
+                                getattr(exc, "terminal_outcome", "") or
+                                "worker-wrapper-failed"),
+                            originating_worker=originating_worker, runner=runner)
+                        if has_recovery and not ref:
+                            ref = str(saved_recovery)
             except Exception as checkpoint_error:
                 # A checkpoint failure must never turn known work into a
                 # definite no-start. Keep the original failure, block fallback,
@@ -791,27 +1770,60 @@ def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
                                          str(checkpoint_error)).strip())
                 ref = ""
             if ref:
-                setattr(exc, "mutation_state", "post-mutation")
+                # Cleanup is still ahead. Make a checkpoint created while
+                # handling this failure visible to that cleanup guard before
+                # it can replace the original exception.
+                saved_recovery = pathlib.Path(ref)
+                has_recovery = True
+                if getattr(exc, "mutation_state", "") != "ambiguous":
+                    setattr(exc, "mutation_state", "post-mutation")
                 setattr(exc, "recovery_ref", ref)
+            failure_for_cleanup = exc
             raise
         finally:
-            git(["worktree", "remove", "--force", str(worktree)], checkout,
-                runner=runner)
+            try:
+                git(["worktree", "remove", "--force", str(worktree)], checkout,
+                    runner=runner)
+            except Exception as exc:
+                if (failure_for_cleanup is not None and
+                        getattr(failure_for_cleanup, "mutation_state", "") ==
+                        "ambiguous" and not has_recovery):
+                    prior = getattr(failure_for_cleanup, "output", "")
+                    setattr(
+                        failure_for_cleanup, "output",
+                        (prior + "\nworktree cleanup failed: " + str(exc)).strip())
+                else:
+                    if has_recovery:
+                        setattr(exc, "mutation_state", "post-mutation")
+                        setattr(exc, "terminal_outcome", "worktree-cleanup-failed")
+                        setattr(exc, "recovery_ref", str(saved_recovery))
+                    raise
 
-    if has_recovery:
-        saved_recovery.unlink()
-        recovery_manifest(saved_recovery).unlink(missing_ok=True)
-
-    body = f"Story: #{story_number}\n\n{durable}\n"
-    if pulls:
-        pull = client.update_pr(pulls[0]["number"], body)
-    else:
-        pull = client.create_pr(f"Story #{story_number}: bounded delivery",
-                                branch, default, body)
-    fresh = read_back_pr(client, story_number, durable)
-    obs.process_event("delivery.pull-request.written", trace_id=delivery_trace,
-                      repo=repo, story=story_number, project=project_number,
-                      pull_request=fresh["number"], head=head)
+    try:
+        body = f"Story: #{story_number}\n\n{durable}\n"
+        if pulls:
+            pull = client.update_pr(pulls[0]["number"], body)
+        else:
+            pull = client.create_pr(f"Story #{story_number}: bounded delivery",
+                                    branch, default, body)
+        fresh = read_back_pr(client, story_number, durable)
+    except Exception as exc:
+        if has_recovery:
+            mark_finalization_failure(exc, saved_recovery)
+        raise
+    try:
+        if fresh.get("head", {}).get("sha") != head:
+            raise DeliveryError(
+                "read-back pull request head does not match delivered head")
+        obs.process_event("delivery.pull-request.written", trace_id=delivery_trace,
+                          repo=repo, story=story_number, project=project_number,
+                          pull_request=fresh["number"], head=head)
+        if has_recovery:
+            remove_delivered_recovery(saved_recovery)
+    except Exception as exc:
+        if has_recovery and not getattr(exc, "recovery_ref", ""):
+            mark_finalization_failure(exc, saved_recovery)
+        raise
     return Delivery(story_number, project_number, branch, fresh["number"], head, False)
 
 
@@ -832,12 +1844,24 @@ def main(argv=None) -> int:
         print("delivery failed: a valid admission reservation is required",
               file=sys.stderr)
         return 2
+    saved_recovery = recovery_patch(args.repo, args.story)
+    discovered_recovery = False
     try:
+        try:
+            discovered_recovery = recovery_available(
+                saved_recovery, repo=args.repo, story_number=args.story,
+                scope=None, reconcile_cleanup=False)
+        except RecoveryError as exc:
+            exc.recovery_ref = str(saved_recovery)
+            raise
         with checkout_for_repo(args.repo, pathlib.Path(args.checkout)) as checkout:
             result = execute(args.repo, args.story, token, checkout,
                              timeout=args.timeout, max_usd=args.max_usd,
                              reservation=args.reservation)
     except Exception as exc:
+        if discovered_recovery:
+            attach_recovery_failure(
+                exc, saved_recovery, "recovery-checkout-selection-failed")
         obs.operational_log("ERROR", "delivery worker failed", exc=exc,
                             component="delivery-worker", operation="delivery",
                             repo=args.repo, story=args.story,

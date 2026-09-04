@@ -8,6 +8,7 @@ import tempfile
 import io
 import unittest
 from unittest import mock
+from types import SimpleNamespace
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import invoke
@@ -15,6 +16,15 @@ import runlog
 
 
 class ParsingTests(unittest.TestCase):
+    def test_recovery_timestamp_requires_canonical_clock_shape(self):
+        self.assertTrue(invoke.valid_utc_timestamp("2026-09-04T00:00:00Z"))
+        self.assertTrue(invoke.valid_utc_timestamp(
+            "2026-09-04T00:00:00.123456Z"))
+        for value in ("2026-09-04T00Z", "20260904T000000Z",
+                      "2026-W36-4T00:00:00Z"):
+            with self.subTest(value=value):
+                self.assertFalse(invoke.valid_utc_timestamp(value))
+
     def test_bounds_are_read_from_story(self):
         value = invoke.parse_bounds("### Spend cap\n\n$40 / 90 min\n")
         self.assertEqual((value.max_usd, value.timeout), (40.0, 5400))
@@ -205,7 +215,7 @@ class FakeClient:
 
     def create_pr(self, title, head, base, body):
         self.created = {"number": 9, "body": body,
-                        "head": {"ref": head, "sha": "deadbeef"}}
+                        "head": {"ref": head, "sha": "d" * 40}}
         return self.created
 
 
@@ -275,14 +285,24 @@ class RecordingRunner:
         self.calls.append((list(cmd), kwargs.get("env")))
         out = ""
         code = 0
-        if cmd[:3] == ["git", "diff", "--name-only"]:
-            out = "\n".join(self.changed)
+        if cmd[:3] == ["git", "diff", "--name-status"]:
+            out = "".join(f"M\0{path}\0" for path in self.changed)
         elif cmd[:3] == ["git", "status", "--porcelain"]:
-            out = "\n".join(f" M {path}" for path in self.changed)
+            out = "".join(f" M {path}\0" for path in self.changed)
         elif cmd[:4] == ["git", "diff", "--binary", "--cached"]:
             out = "diff --git a/src/app.py b/src/app.py\n"
+        elif cmd[:3] == ["git", "diff", "--binary"]:
+            out = "diff --git a/src/app.py b/src/app.py\n"
+        elif cmd[:4] == ["git", "apply", "--numstat", "-z"]:
+            out = "".join(f"1\t0\t{path}\0" for path in self.changed)
+        elif cmd[:2] == ["git", "write-tree"]:
+            out = "f" * 40 + "\n"
+        elif cmd[:3] == ["git", "rev-parse", "--is-shallow-repository"]:
+            out = "false\n"
+        elif cmd[:2] == ["git", "rev-parse"] and cmd[-1].endswith("^{tree}"):
+            out = "f" * 40 + "\n"
         elif cmd[:2] == ["git", "rev-parse"]:
-            out = "deadbeef\n"
+            out = "d" * 40 + "\n"
         elif cmd[0] in ("claude", "codex"):
             out = self.engine_output
         return subprocess.CompletedProcess(cmd, code, out, "")
@@ -333,6 +353,164 @@ class FactorySelfModificationTests(unittest.TestCase):
 
 
 class FailedWorkCheckpointTests(unittest.TestCase):
+    BASE = "a" * 40
+    WORKER = {"task": "delivery:owner/repo:214:5", "provider": "openai",
+              "model": "gpt-test", "invocation_id": "invoke-1"}
+
+    def test_recovery_worker_task_requires_canonical_integer_suffix(self):
+        self.assertTrue(invoke.valid_recovery_worker(
+            {"task": "delivery:owner/repo:214:0"},
+            repo="owner/repo", story_number=214))
+        self.assertTrue(invoke.valid_recovery_worker(
+            self.WORKER, repo="owner/repo", story_number=214))
+        for suffix in ("", "not-an-attempt", "-1", "+1", "01", "1.0", "²"):
+            with self.subTest(suffix=suffix):
+                self.assertFalse(invoke.valid_recovery_worker(
+                    {"task": f"delivery:owner/repo:214:{suffix}"},
+                    repo="owner/repo", story_number=214))
+
+    def test_patch_path_reader_includes_both_sides_of_a_rename(self):
+        with tempfile.TemporaryDirectory() as directory:
+            patch = pathlib.Path(directory, "rename.patch")
+            patch.write_text(
+                "diff --git a/old.txt b/new.txt\n"
+                "similarity index 100%\n"
+                "rename from old.txt\n"
+                "rename to new.txt\n")
+            self.assertEqual(
+                ["new.txt", "old.txt"], invoke.recovery_patch_paths(patch))
+
+    def test_patch_path_reader_decodes_utf8_octal_rename_headers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            patch = pathlib.Path(directory, "rename.patch")
+            patch.write_text(
+                'diff --git "a/\\303\\251.txt" "b/\\303\\251-new.txt"\n'
+                "similarity index 100%\n"
+                'rename from "\\303\\251.txt"\n'
+                'rename to "\\303\\251-new.txt"\n')
+            self.assertEqual(
+                ["é-new.txt", "é.txt"], invoke.recovery_patch_paths(patch))
+
+    def test_patch_path_inspection_wraps_runner_and_file_failures(self):
+        with tempfile.TemporaryDirectory() as directory:
+            patch = pathlib.Path(directory, "recovery.patch")
+            patch.write_text("diff --git a/a b/a\n")
+            for failure in ("runner", "read"):
+                with self.subTest(failure=failure):
+                    if failure == "runner":
+                        runner = mock.Mock(side_effect=OSError("spawn failed"))
+                        context = contextlib.nullcontext()
+                    else:
+                        runner = mock.Mock(return_value=subprocess.CompletedProcess(
+                            [], 0, "1\t0\ta\0", ""))
+                        context = mock.patch.object(
+                            pathlib.Path, "read_text",
+                            side_effect=OSError("read failed"))
+                    with context, self.assertRaisesRegex(
+                            invoke.RecoveryError, "unavailable"):
+                        invoke.recovery_patch_paths(patch, runner=runner)
+
+    def test_gitlink_parser_preserves_nul_terminated_unusual_paths(self):
+        output = ("160000 commit " + "c" * 40 + "\tvendor/é\tline\nname\0"
+                  "100644 blob " + "d" * 40 + "\tregular.txt\0")
+        self.assertEqual({"vendor/é\tline\nname"}, invoke._gitlinks(output))
+
+    def test_quoted_path_decoder_preserves_literal_utf8_with_escapes(self):
+        self.assertEqual(
+            "é\tnew.txt", invoke.decode_git_quoted_path('"é\\tnew.txt"'))
+
+    def test_recovery_file_is_fsynced_before_and_after_rename(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = pathlib.Path(directory, "checkpoint.json")
+            with mock.patch.object(invoke.os, "fsync",
+                                   wraps=invoke.os.fsync) as fsync:
+                invoke._write_recovery_file(target, "durable\n")
+            self.assertEqual("durable\n", target.read_text())
+            self.assertEqual(2, fsync.call_count)
+
+    def test_interrupted_pair_replacement_restores_prior_generation(self):
+        class PatchRunner(RecordingRunner):
+            patch_text = "diff --git a/src/app.py b/src/app.py\nold\n"
+
+            def __call__(self, cmd, **kwargs):
+                if cmd[:4] == ["git", "diff", "--binary", "--cached"]:
+                    self.calls.append((list(cmd), kwargs.get("env")))
+                    return subprocess.CompletedProcess(
+                        cmd, 0, self.patch_text, "")
+                return super().__call__(cmd, **kwargs)
+
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = PatchRunner(["src/app.py"])
+            arguments = dict(
+                repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit=self.BASE,
+                scope=["src/app.py"], mutation_state="post-mutation",
+                terminal_outcome="started-mid-work-failed",
+                originating_worker=self.WORKER, runner=runner)
+            patch = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"), **arguments))
+            old_patch = patch.read_text()
+            old_manifest = invoke.recovery_manifest(patch).read_text()
+            runner.patch_text = "diff --git a/src/app.py b/src/app.py\nnew\n"
+            original_write = invoke._write_recovery_file
+
+            def interrupted(target, value):
+                if target == invoke.recovery_manifest(patch) and \
+                        invoke.recovery_previous(patch)[1].is_file():
+                    raise OSError("host stopped between pair writes")
+                return original_write(target, value)
+
+            with mock.patch.object(invoke, "_write_recovery_file",
+                                   side_effect=interrupted):
+                with self.assertRaisesRegex(OSError, "between pair writes"):
+                    invoke.checkpoint_failed_work(
+                        pathlib.Path("/old"), pathlib.Path("/checkout"),
+                        **arguments)
+            self.assertTrue(all(path.is_file()
+                                for path in invoke.recovery_previous(patch)))
+            self.assertTrue(invoke.recovery_available(
+                patch, repo="owner/repo", story_number=214,
+                scope=["src/app.py"], runner=runner))
+            self.assertEqual(old_patch, patch.read_text())
+            self.assertEqual(old_manifest,
+                             invoke.recovery_manifest(patch).read_text())
+            self.assertFalse(any(path.exists()
+                                 for path in invoke.recovery_previous(patch)))
+
+    def test_prior_generation_restore_failure_is_recovery_aware(self):
+        with tempfile.TemporaryDirectory() as recovery:
+            patch = pathlib.Path(recovery, "story.patch")
+            manifest = invoke.recovery_manifest(patch)
+            previous_patch, previous_manifest = invoke.recovery_previous(patch)
+            for path, value in ((patch, "new"), (manifest, "{}"),
+                                (previous_patch, "old"),
+                                (previous_manifest, "{}")):
+                path.write_text(value)
+            with mock.patch.object(
+                    invoke, "_write_recovery_file",
+                    side_effect=OSError("restore fsync failed")):
+                with self.assertRaisesRegex(
+                        invoke.RecoveryError,
+                        "prior recovery generation") as caught:
+                    invoke.recovery_available(
+                        patch, repo="owner/repo", story_number=214)
+            self.assertEqual("post-mutation", caught.exception.mutation_state)
+            self.assertEqual("recovery-invalid",
+                             caught.exception.terminal_outcome)
+
+    def test_successful_recovery_removal_flushes_both_directory_states(self):
+        with tempfile.TemporaryDirectory() as recovery:
+            patch = pathlib.Path(recovery, "story.patch")
+            patch.write_text("patch")
+            invoke.recovery_manifest(patch).write_text("{}")
+            with mock.patch.object(invoke.os, "fsync",
+                                   wraps=invoke.os.fsync) as fsync:
+                invoke.remove_recovery(patch)
+            self.assertEqual(2, fsync.call_count)
+            self.assertFalse(patch.exists())
+            self.assertFalse(invoke.recovery_manifest(patch).exists())
+
     def test_in_scope_changes_are_committed_to_a_stable_local_recovery_ref(self):
         runner = RecordingRunner(["src/app.py"])
         with tempfile.TemporaryDirectory() as recovery:
@@ -341,25 +519,63 @@ class FailedWorkCheckpointTests(unittest.TestCase):
                 ref = invoke.checkpoint_failed_work(
                     pathlib.Path("/worktree"), pathlib.Path("/checkout"),
                     repo="owner/repo", story_number=214, default="main",
+                    base_ref="origin/main", base_commit=self.BASE,
                     scope=["src/app.py"], mutation_state="post-mutation",
-                    terminal_outcome="started-mid-work-failed", runner=runner)
+                    terminal_outcome="started-mid-work-failed",
+                    originating_worker=self.WORKER, runner=runner)
                 manifest = json.loads(
                     invoke.recovery_manifest(pathlib.Path(ref)).read_text())
                 self.assertEqual(["src/app.py"], manifest["recovered_paths"])
                 self.assertEqual("started-mid-work-failed",
                                  manifest["previous_terminal_outcome"])
                 self.assertEqual(invoke.RECOVERY_TRUST, manifest["trust"])
+                self.assertEqual(self.BASE, manifest["base_commit"])
+                self.assertEqual(self.WORKER, manifest["originating_worker"])
+                self.assertTrue(manifest["recovered_at"].endswith("Z"))
         self.assertTrue(ref.endswith("owner--repo/story-214.patch"))
         commands = [command for command, _ in runner.calls]
-        self.assertIn(["git", "add", "--", "src/app.py"], commands)
+        self.assertIn(["git", "add", "--all", "--", "."], commands)
+
+    def test_committed_deletion_is_recorded_without_restaging_missing_path(self):
+        with tempfile.TemporaryDirectory() as directory, \
+             tempfile.TemporaryDirectory() as recovery:
+            root = pathlib.Path(directory)
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            deleted = root / "deleted.txt"
+            deleted.write_text("tracked\n")
+            subprocess.run(["git", "add", "deleted.txt"], cwd=root, check=True)
+            commit = ["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                      "commit", "-qm"]
+            subprocess.run([*commit, "base"], cwd=root, check=True)
+            base = subprocess.run(
+                ["git", "rev-parse", "HEAD"], cwd=root, check=True,
+                capture_output=True, text=True).stdout.strip()
+            deleted.unlink()
+            subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+            subprocess.run([*commit, "delete"], cwd=root, check=True)
+
+            with mock.patch.dict(
+                    invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+                ref = pathlib.Path(invoke.checkpoint_failed_work(
+                    root, root, repo="owner/repo", story_number=214,
+                    default="main", base_ref=base, base_commit=base,
+                    scope=["deleted.txt"], mutation_state="post-mutation",
+                    terminal_outcome="post-commit-failed",
+                    originating_worker=self.WORKER))
+
+            manifest = json.loads(invoke.recovery_manifest(ref).read_text())
+            self.assertEqual(["deleted.txt"], manifest["recovered_paths"])
+            self.assertIn("deleted file mode", ref.read_text())
 
     def test_out_of_scope_changes_are_not_checkpointed(self):
         runner = RecordingRunner(["secrets.txt"])
         ref = invoke.checkpoint_failed_work(
             pathlib.Path("/worktree"), pathlib.Path("/checkout"), repo="owner/repo",
             story_number=214, default="main", scope=["src/app.py"],
+            base_ref="origin/main", base_commit=self.BASE,
             mutation_state="post-mutation",
-            terminal_outcome="started-mid-work-failed", runner=runner)
+            terminal_outcome="started-mid-work-failed",
+            originating_worker=self.WORKER, runner=runner)
         self.assertEqual("", ref)
         self.assertFalse(any(command[:2] == ["git", "add"]
                              for command, _ in runner.calls))
@@ -371,17 +587,23 @@ class FailedWorkCheckpointTests(unittest.TestCase):
             ref = invoke.checkpoint_failed_work(
                 pathlib.Path("/old"), pathlib.Path("/checkout"),
                 repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit=self.BASE,
                 scope=["src/app.py"], mutation_state="post-mutation",
-                terminal_outcome="started-mid-work-failed", runner=runner)
+                terminal_outcome="started-mid-work-failed",
+                originating_worker=self.WORKER, runner=runner)
             value = invoke.restore_failed_work(
                 pathlib.Path(ref), pathlib.Path("/new"), repo="owner/repo",
-                story_number=214, scope=["src/app.py"], runner=runner)
+                story_number=214, base_commit=self.BASE,
+                scope=["src/app.py"], runner=runner)
+        self.assertTrue(value.pop("recovered_at").endswith("Z"))
         self.assertEqual({
             "present": True,
             "trust": "untrusted-partial-work-from-failed-worker",
             "recovered_paths": ["src/app.py"],
             "previous_mutation_state": "post-mutation",
             "previous_terminal_outcome": "started-mid-work-failed",
+            "base_commit": self.BASE,
+            "originating_worker": self.WORKER,
         }, value)
 
     def test_restore_rejects_a_patch_that_does_not_match_its_manifest(self):
@@ -391,17 +613,2107 @@ class FailedWorkCheckpointTests(unittest.TestCase):
             ref = pathlib.Path(invoke.checkpoint_failed_work(
                 pathlib.Path("/old"), pathlib.Path("/checkout"),
                 repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit=self.BASE,
                 scope=["src/app.py"], mutation_state="post-mutation",
-                terminal_outcome="started-mid-work-failed", runner=runner))
+                terminal_outcome="started-mid-work-failed",
+                originating_worker=self.WORKER, runner=runner))
             ref.write_text("altered patch")
             with self.assertRaisesRegex(invoke.DeliveryError, "digest"):
                 invoke.restore_failed_work(
                     ref, pathlib.Path("/new"), repo="owner/repo",
-                    story_number=214, scope=["src/app.py"], runner=runner)
+                    story_number=214, base_commit=self.BASE,
+                    scope=["src/app.py"], runner=runner)
         self.assertFalse(any(command[:3] == ["git", "apply", "--index"]
                              for command, _ in runner.calls))
 
-    def test_orphaned_patch_or_manifest_is_discarded_for_bounded_progress(self):
+    def test_wrong_story_base_or_scope_blocks_patch_application(self):
+        for override, message in (
+            ({"story_number": 999}, "identity"),
+            ({"scope": ["tests/**"]}, "scope"),
+        ):
+            with self.subTest(override=override), tempfile.TemporaryDirectory() as recovery, \
+                    mock.patch.dict(invoke.os.environ,
+                                    {"FACTORY_RECOVERY_DIR": recovery}):
+                runner = RecordingRunner(["src/app.py"])
+                ref = pathlib.Path(invoke.checkpoint_failed_work(
+                    pathlib.Path("/old"), pathlib.Path("/checkout"),
+                    repo="owner/repo", story_number=214, default="main",
+                    base_ref="origin/main", base_commit=self.BASE,
+                    scope=["src/app.py"], mutation_state="post-mutation",
+                    terminal_outcome="started-mid-work-failed",
+                    originating_worker=self.WORKER, runner=runner))
+                arguments = {"repo": "owner/repo", "story_number": 214,
+                             "base_commit": self.BASE, "scope": ["src/app.py"]}
+                arguments.update(override)
+                runner.calls.clear()
+                with self.assertRaisesRegex(invoke.DeliveryError, message):
+                    invoke.restore_failed_work(
+                        ref, pathlib.Path("/new"), runner=runner, **arguments)
+                self.assertFalse(any(command[:3] == ["git", "apply", "--index"]
+                                     for command, _ in runner.calls))
+
+    def test_default_branch_advance_restores_with_three_way_application(self):
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = RecordingRunner(["src/app.py"])
+            ref = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"),
+                repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit=self.BASE,
+                scope=["src/app.py"], mutation_state="post-mutation",
+                terminal_outcome="started-mid-work-failed",
+                originating_worker=self.WORKER, runner=runner))
+            runner.calls.clear()
+            value = invoke.restore_failed_work(
+                ref, pathlib.Path("/new"), repo="owner/repo",
+                story_number=214, base_commit="b" * 40,
+                scope=["src/app.py"], runner=runner)
+            commands = [command for command, _ in runner.calls]
+            self.assertIn(
+                ["git", "merge-base", "--is-ancestor", self.BASE, "b" * 40],
+                commands)
+            self.assertIn(
+                ["git", "apply", "--3way", "--index", str(ref)], commands)
+            self.assertEqual(self.BASE, value["base_commit"])
+
+    def test_manifest_paths_must_match_the_applied_patch(self):
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = RecordingRunner(["src/app.py"])
+            ref = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"),
+                repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit=self.BASE,
+                scope=["src/app.py"], mutation_state="post-mutation",
+                terminal_outcome="started-mid-work-failed",
+                originating_worker=self.WORKER, runner=runner))
+            runner.changed = ["src/other.py"]
+            with self.assertRaisesRegex(invoke.DeliveryError, "do not match"):
+                invoke.restore_failed_work(
+                    ref, pathlib.Path("/new"), repo="owner/repo",
+                    story_number=214, base_commit=self.BASE,
+                    scope=["src/**"], runner=runner)
+
+    def test_rejected_restore_does_not_rewrite_invalid_checkpoint(self):
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = RecordingRunner(["src/app.py"])
+            base = "d" * 40
+            patch = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"),
+                repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit=base,
+                scope=["src/app.py"], mutation_state="post-mutation",
+                terminal_outcome="started-mid-work-failed",
+                originating_worker=self.WORKER, runner=runner))
+            manifest = invoke.recovery_manifest(patch)
+            original = manifest.read_bytes()
+            runner.changed = ["src/other.py"]
+            with self.assertRaisesRegex(invoke.RecoveryError, "do not match"):
+                invoke.execute(
+                    "owner/repo", 214, "token", pathlib.Path("/checkout"),
+                    runner=runner, client=FakeClient())
+            self.assertEqual(original, manifest.read_bytes())
+            self.assertFalse(any(command and command[0] in ("codex", "claude")
+                                 for command, _ in runner.calls))
+
+    def test_success_cleanup_removes_patch_and_manifest_together(self):
+        with tempfile.TemporaryDirectory() as directory:
+            patch = pathlib.Path(directory, "story-214.patch")
+            manifest = invoke.recovery_manifest(patch)
+            patch.write_text("patch")
+            manifest.write_text("{}")
+            invoke.remove_recovery(patch)
+            self.assertFalse(patch.exists())
+            self.assertFalse(manifest.exists())
+
+    def test_interrupted_cleanup_is_reconciled_without_an_orphan(self):
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": directory}):
+            runner = RecordingRunner(["src/app.py"])
+            patch = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"),
+                repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit=self.BASE,
+                scope=["src/app.py"], mutation_state="post-mutation",
+                terminal_outcome="started-mid-work-failed",
+                originating_worker=self.WORKER, runner=runner))
+            invoke.mark_recovery_pushed(patch, "b" * 40)
+            manifest = invoke.recovery_manifest(patch)
+            patch_tombstone = patch.with_name(patch.name + ".deleting")
+            patch.replace(patch_tombstone)
+            self.assertFalse(invoke.recovery_available(patch, runner=runner))
+            self.assertFalse(patch.exists())
+            self.assertFalse(manifest.exists())
+            self.assertFalse(patch_tombstone.exists())
+
+    def test_cleanup_resumes_after_patch_tombstone_was_deleted(self):
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": directory}):
+            runner = RecordingRunner(["src/app.py"])
+            patch = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"),
+                repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit=self.BASE,
+                scope=["src/app.py"], mutation_state="post-mutation",
+                terminal_outcome="started-mid-work-failed",
+                originating_worker=self.WORKER, runner=runner))
+            invoke.mark_recovery_pushed(patch, "b" * 40)
+            manifest = invoke.recovery_manifest(patch)
+            patch_tombstone = patch.with_name(patch.name + ".deleting")
+            manifest_tombstone = manifest.with_name(manifest.name + ".deleting")
+            patch.replace(patch_tombstone)
+            manifest.replace(manifest_tombstone)
+            patch_tombstone.unlink()
+            self.assertFalse(invoke.recovery_available(patch, runner=runner))
+            self.assertFalse(manifest_tombstone.exists())
+
+    def test_interrupted_cleanup_preserves_invalid_worker_provenance(self):
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": directory}):
+            runner = RecordingRunner(["src/app.py"])
+            patch = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"),
+                repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit=self.BASE,
+                scope=["src/app.py"], mutation_state="post-mutation",
+                terminal_outcome="started-mid-work-failed",
+                originating_worker=self.WORKER, runner=runner))
+            invoke.mark_recovery_pushed(patch, "b" * 40)
+            manifest = invoke.recovery_manifest(patch)
+            patch_tombstone = patch.with_name(patch.name + ".deleting")
+            patch.replace(patch_tombstone)
+            value = json.loads(manifest.read_text())
+            value["originating_worker"]["model"] = ["not", "a", "model"]
+            manifest.write_text(json.dumps(value))
+            with self.assertRaisesRegex(invoke.RecoveryError,
+                                        "worker identity"):
+                invoke.recovery_available(
+                    patch, repo="owner/repo", story_number=214,
+                    scope=["src/app.py"], runner=runner)
+            self.assertTrue(patch_tombstone.exists())
+            self.assertTrue(manifest.exists())
+
+    def test_recovered_gitlink_directory_uses_staged_state(self):
+        with tempfile.TemporaryDirectory() as directory:
+            worktree = pathlib.Path(directory)
+            (worktree / "vendor/lib").mkdir(parents=True)
+            runner = RecordingRunner(["vendor/lib"])
+            state = invoke.recovered_work_state(
+                worktree, ["vendor/lib"], base_commit=self.BASE, runner=runner)
+            self.assertEqual(64, len(state))
+            self.assertTrue(any(command[:4] ==
+                                ["git", "diff", "--binary", "--cached"]
+                                for command, _ in runner.calls))
+
+    def test_restore_checks_out_the_staged_gitlink_before_validation(self):
+        class GitlinkRunner(RecordingRunner):
+            def __call__(self, cmd, **kwargs):
+                result = super().__call__(cmd, **kwargs)
+                if cmd[:3] == ["git", "ls-files", "--stage"]:
+                    return subprocess.CompletedProcess(
+                        cmd, 0, "160000 " + "c" * 40 + " 0\tvendor/lib\n", "")
+                return result
+
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = GitlinkRunner(["vendor/lib"])
+            ref = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"),
+                repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit=self.BASE,
+                scope=["vendor/lib"], mutation_state="post-mutation",
+                terminal_outcome="started-mid-work-failed",
+                originating_worker=self.WORKER, runner=runner))
+            invoke.restore_failed_work(
+                ref, pathlib.Path("/new"), repo="owner/repo", story_number=214,
+                base_commit=self.BASE, scope=["vendor/lib"], runner=runner)
+        self.assertIn(
+            ["git", "submodule", "update", "--init", "--checkout", "--",
+             "vendor/lib"],
+            [command for command, _ in runner.calls])
+
+    def test_restore_removes_a_gitlink_deleted_from_the_index(self):
+        class DeletedGitlinkRunner(RecordingRunner):
+            def __call__(self, cmd, **kwargs):
+                result = super().__call__(cmd, **kwargs)
+                if cmd[:2] == ["git", "ls-tree"]:
+                    return subprocess.CompletedProcess(
+                        cmd, 0, "160000 commit " + "c" * 40 +
+                        "\tvendor/lib\n", "")
+                if cmd[:3] == ["git", "ls-files", "--stage"]:
+                    return subprocess.CompletedProcess(cmd, 0, "", "")
+                return result
+
+        with tempfile.TemporaryDirectory() as recovery, \
+             tempfile.TemporaryDirectory() as target, \
+             mock.patch.dict(invoke.os.environ,
+                             {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = DeletedGitlinkRunner(["vendor/lib"])
+            ref = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"),
+                repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit=self.BASE,
+                scope=["vendor/lib"], mutation_state="post-mutation",
+                terminal_outcome="started-mid-work-failed",
+                originating_worker=self.WORKER, runner=runner))
+            worktree = pathlib.Path(target)
+            (worktree / "vendor/lib").mkdir(parents=True)
+            (worktree / "vendor/lib/old").write_text("old checkout")
+            invoke.restore_failed_work(
+                ref, worktree, repo="owner/repo", story_number=214,
+                base_commit=self.BASE, scope=["vendor/lib"], runner=runner)
+            self.assertFalse((worktree / "vendor/lib").exists())
+
+    def test_gitlink_replacement_files_are_preserved_and_fail_closed(self):
+        class ReplacementRunner(RecordingRunner):
+            def __call__(self, cmd, **kwargs):
+                result = super().__call__(cmd, **kwargs)
+                if cmd[:2] == ["git", "ls-tree"]:
+                    return subprocess.CompletedProcess(
+                        cmd, 0, "160000 commit " + "c" * 40 +
+                        "\tvendor/lib\n", "")
+                if cmd[:3] == ["git", "ls-files", "--stage"]:
+                    return subprocess.CompletedProcess(
+                        cmd, 0, "100644 " + "e" * 40 +
+                        " 0\tvendor/lib/new.py\n", "")
+                return result
+
+        with tempfile.TemporaryDirectory() as target:
+            worktree = pathlib.Path(target)
+            replacement = worktree / "vendor/lib/new.py"
+            replacement.parent.mkdir(parents=True)
+            replacement.write_text("replacement")
+            with self.assertRaisesRegex(invoke.RecoveryError,
+                                        "explicit cleanup"):
+                invoke.checkout_recovered_gitlinks(
+                    worktree, ["vendor/lib"], base_commit=self.BASE,
+                    runner=ReplacementRunner(["vendor/lib"]))
+            self.assertEqual("replacement", replacement.read_text())
+
+    def test_post_apply_gitlink_failure_preserves_original_manifest(self):
+        class GitlinkFailureRunner(RecordingRunner):
+            def __call__(self, cmd, **kwargs):
+                result = super().__call__(cmd, **kwargs)
+                if cmd[:3] == ["git", "ls-files", "--stage"]:
+                    return subprocess.CompletedProcess(
+                        cmd, 0, "160000 " + "c" * 40 + " 0\tvendor/lib\n", "")
+                if cmd[:3] == ["git", "submodule", "update"]:
+                    return subprocess.CompletedProcess(
+                        cmd, 1, "", "submodule unavailable")
+                return result
+
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = GitlinkFailureRunner(["vendor/lib"])
+            patch = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"),
+                repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit="d" * 40,
+                scope=["vendor/lib"], mutation_state="post-mutation",
+                terminal_outcome="started-mid-work-failed",
+                originating_worker=self.WORKER, runner=runner))
+            manifest = invoke.recovery_manifest(patch)
+            original = manifest.read_bytes()
+            with self.assertRaisesRegex(invoke.RecoveryError,
+                                        "application failed") as caught:
+                invoke.execute(
+                    "owner/repo", 214, "token", pathlib.Path("/checkout"),
+                    runner=runner, client=FakeClient(
+                        story_body=STORY_BODY.replace("src/app.py", "vendor/lib")))
+            self.assertEqual(original, manifest.read_bytes())
+            self.assertEqual(str(patch), caught.exception.recovery_ref)
+            self.assertFalse(any(command and command[0] in ("codex", "claude")
+                                 for command, _ in runner.calls))
+
+    def test_dirty_recovered_submodule_blocks_tests_and_commit(self):
+        class DirtyGitlinkRunner(RecordingRunner):
+            def __call__(self, cmd, **kwargs):
+                result = super().__call__(cmd, **kwargs)
+                if cmd[:3] == ["git", "ls-files", "--stage"]:
+                    return subprocess.CompletedProcess(
+                        cmd, 0, "160000 " + "c" * 40 + " 0\tvendor/lib\n", "")
+                if cmd[:4] == ["git", "-C", "vendor/lib", "status"]:
+                    return subprocess.CompletedProcess(
+                        cmd, 0, " M local-only.py\n", "")
+                return result
+
+        class State:
+            health = None
+            @staticmethod
+            def models_for_task_prefix(*_args, **_kwargs): return ()
+
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = DirtyGitlinkRunner(["vendor/lib"])
+            patch = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"),
+                repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit="d" * 40,
+                scope=["vendor/lib"], mutation_state="post-mutation",
+                terminal_outcome="started-mid-work-failed",
+                originating_worker=self.WORKER, runner=runner))
+            result = SimpleNamespace(
+                outcome="success", output="done", terminal_outcome="completed",
+                attempts=({"model": "gpt-test", "provider": "openai",
+                           "invocation_id": "next", "reservation_id": None,
+                           "mutation_state": "post-mutation"},))
+            executor = mock.Mock()
+            executor.execute.return_value = result
+            with mock.patch.object(invoke, "CapacityExecutor",
+                                   return_value=executor), \
+                 mock.patch.object(invoke, "cli_adapter", return_value=mock.Mock()), \
+                 mock.patch.object(invoke, "repository_test_command") as tests:
+                with self.assertRaisesRegex(
+                        invoke.DeliveryError,
+                        "submodule has uncommitted changes") as caught:
+                    invoke.execute(
+                        "owner/repo", 214, "token", pathlib.Path("/checkout"),
+                        runner=runner, client=FakeClient(
+                            story_body=STORY_BODY.replace(
+                                "src/app.py", "vendor/lib")),
+                        state=State(), registry=[SimpleNamespace(provider="openai")])
+            tests.assert_not_called()
+            self.assertEqual("post-mutation", caught.exception.mutation_state)
+            self.assertEqual(str(patch), caught.exception.recovery_ref)
+
+    def test_invalid_recovery_blocks_execute_before_engine_launch(self):
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            patch = invoke.recovery_patch("owner/repo", 214)
+            patch.parent.mkdir(parents=True)
+            patch.write_text("orphan")
+            runner = RecordingRunner([])
+            with self.assertRaisesRegex(invoke.RecoveryError,
+                                        "incomplete") as caught:
+                invoke.execute(
+                    "owner/repo", 214, "token", pathlib.Path("/checkout"),
+                    runner=runner, client=FakeClient())
+            self.assertEqual("post-mutation", caught.exception.mutation_state)
+            self.assertEqual("recovery-invalid",
+                             caught.exception.terminal_outcome)
+            self.assertEqual(str(patch), caught.exception.recovery_ref)
+            self.assertFalse(any(command and command[0] in ("codex", "claude")
+                                 for command, _ in runner.calls))
+
+    def test_input_preflight_failure_preserves_recovery_accounting(self):
+        class InputFailureClient(FakeClient):
+            def pages(self, path):
+                if path.endswith("/timeline"):
+                    return super().pages(path)
+                if path == "/issues/214/comments":
+                    raise OSError("GitHub input read failed")
+                return super().pages(path)
+
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = RecordingRunner(["src/app.py"])
+            patch = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"),
+                repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit=self.BASE,
+                scope=["src/app.py"], mutation_state="post-mutation",
+                terminal_outcome="started-mid-work-failed",
+                originating_worker=self.WORKER, runner=runner))
+            with self.assertRaisesRegex(OSError, "input read failed") as caught:
+                invoke.execute(
+                    "owner/repo", 214, "token", pathlib.Path("/checkout"),
+                    runner=runner, client=InputFailureClient())
+            self.assertEqual("post-mutation", caught.exception.mutation_state)
+            self.assertEqual("recovery-input-preflight-failed",
+                             caught.exception.terminal_outcome)
+            self.assertEqual(str(patch), caught.exception.recovery_ref)
+            self.assertTrue(patch.exists())
+            self.assertFalse(any(command and command[0] in ("codex", "claude")
+                                 for command, _ in runner.calls))
+
+    def test_initial_remote_preflight_failure_preserves_recovery_accounting(self):
+        class InitialFailureClient(FakeClient):
+            def api(self, path, **kwargs):
+                if path == "":
+                    raise OSError("repository preflight failed")
+                return super().api(path, **kwargs)
+
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = RecordingRunner(["src/app.py"])
+            patch = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"),
+                repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit=self.BASE,
+                scope=["src/app.py"], mutation_state="post-mutation",
+                terminal_outcome="started-mid-work-failed",
+                originating_worker=self.WORKER, runner=runner))
+            with self.assertRaisesRegex(
+                    OSError, "repository preflight failed") as caught:
+                invoke.execute(
+                    "owner/repo", 214, "token", pathlib.Path("/checkout"),
+                    runner=runner, client=InitialFailureClient())
+            self.assertEqual("post-mutation", caught.exception.mutation_state)
+            self.assertEqual("recovery-initial-preflight-failed",
+                             caught.exception.terminal_outcome)
+            self.assertEqual(str(patch), caught.exception.recovery_ref)
+
+    def test_initial_discovery_rejects_wrong_identity_before_remote_reads(self):
+        class CountingClient(FakeClient):
+            def __init__(self):
+                super().__init__()
+                self.api_calls = 0
+
+            def api(self, path, **kwargs):
+                self.api_calls += 1
+                return super().api(path, **kwargs)
+
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = RecordingRunner(["src/app.py"])
+            patch = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"),
+                repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit=self.BASE,
+                scope=["src/app.py"], mutation_state="post-mutation",
+                terminal_outcome="started-mid-work-failed",
+                originating_worker=self.WORKER, runner=runner))
+            manifest = invoke.recovery_manifest(patch)
+            value = json.loads(manifest.read_text())
+            value["repository"] = "other/repo"
+            manifest.write_text(json.dumps(value))
+            client = CountingClient()
+            with self.assertRaisesRegex(
+                    invoke.RecoveryError, "identity") as caught:
+                invoke.execute(
+                    "owner/repo", 214, "token", pathlib.Path("/checkout"),
+                    runner=runner, client=client)
+            self.assertEqual(0, client.api_calls)
+            self.assertEqual(str(patch), caught.exception.recovery_ref)
+
+    def test_initial_discovery_does_not_delete_cleanup_tombstones(self):
+        with tempfile.TemporaryDirectory() as recovery:
+            patch = pathlib.Path(recovery, "story.patch")
+            patch_tombstone = patch.with_name("story.patch.deleting")
+            manifest_tombstone = patch.with_name("story.json.deleting")
+            patch_tombstone.write_text("diff --git a/outside.py b/outside.py\n")
+            record = {
+                "schema_version": invoke.RECOVERY_SCHEMA_VERSION,
+                "trust": invoke.RECOVERY_TRUST,
+                "repository": "owner/repo", "story": 214,
+                "base_commit": self.BASE, "delivered_head": "d" * 40,
+                "recovered_paths": ["outside.py"],
+                "previous_mutation_state": "post-mutation",
+                "previous_terminal_outcome": "completed",
+                "patch_sha256": __import__("hashlib").sha256(
+                    patch_tombstone.read_bytes()).hexdigest(),
+                "originating_worker": self.WORKER,
+                "recovered_at": "2026-09-04T00:00:00Z",
+                "delivery_verified_at": "2026-09-04T00:01:00Z",
+            }
+            manifest_tombstone.write_text(json.dumps(record))
+            with mock.patch.object(
+                    invoke, "recovery_patch_paths", return_value=["outside.py"]):
+                self.assertTrue(invoke.recovery_available(
+                    patch, repo="owner/repo", story_number=214,
+                    scope=None, reconcile_cleanup=False))
+                self.assertTrue(patch_tombstone.exists())
+                self.assertTrue(manifest_tombstone.exists())
+                with self.assertRaisesRegex(invoke.RecoveryError, "provenance"):
+                    invoke.recovery_available(
+                        patch, repo="owner/repo", story_number=214,
+                        scope=["inside.py"])
+            self.assertTrue(patch_tombstone.exists())
+            self.assertTrue(manifest_tombstone.exists())
+
+    def test_initial_discovery_preserves_lone_manifest_tombstone(self):
+        with tempfile.TemporaryDirectory() as recovery:
+            patch = pathlib.Path(recovery, "story.patch")
+            manifest_tombstone = patch.with_name("story.json.deleting")
+            record = {
+                "schema_version": invoke.RECOVERY_SCHEMA_VERSION,
+                "trust": invoke.RECOVERY_TRUST,
+                "repository": "owner/repo", "story": 214,
+                "base_commit": self.BASE, "delivered_head": "d" * 40,
+                "recovered_paths": ["outside.py"],
+                "previous_mutation_state": "post-mutation",
+                "previous_terminal_outcome": "completed",
+                "originating_worker": self.WORKER,
+                "recovered_at": "2026-09-04T00:00:00Z",
+                "delivery_verified_at": "2026-09-04T00:01:00Z",
+            }
+            manifest_tombstone.write_text(json.dumps(record))
+            self.assertTrue(invoke.recovery_available(
+                patch, repo="owner/repo", story_number=214,
+                scope=None, reconcile_cleanup=False))
+            self.assertTrue(manifest_tombstone.exists())
+            with self.assertRaisesRegex(invoke.RecoveryError, "provenance"):
+                invoke.recovery_available(
+                    patch, repo="owner/repo", story_number=214,
+                    scope=["inside.py"])
+            self.assertTrue(manifest_tombstone.exists())
+
+    def test_tombstone_patch_read_failure_is_recovery_aware(self):
+        with tempfile.TemporaryDirectory() as recovery:
+            patch = pathlib.Path(recovery, "story.patch")
+            patch_tombstone = patch.with_name("story.patch.deleting")
+            manifest_tombstone = patch.with_name("story.json.deleting")
+            patch_tombstone.write_text("patch")
+            record = {
+                "schema_version": invoke.RECOVERY_SCHEMA_VERSION,
+                "trust": invoke.RECOVERY_TRUST,
+                "repository": "owner/repo", "story": 214,
+            }
+            manifest_tombstone.write_text(json.dumps(record))
+            with mock.patch.object(
+                    pathlib.Path, "read_text",
+                    side_effect=[json.dumps(record), OSError("patch denied")]):
+                with self.assertRaisesRegex(
+                        invoke.RecoveryError, "cleanup patch") as caught:
+                    invoke.recovery_available(
+                        patch, repo="owner/repo", story_number=214)
+            self.assertEqual("post-mutation", caught.exception.mutation_state)
+
+    def test_orphan_backup_cleanup_failure_is_recovery_aware(self):
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = RecordingRunner(["src/app.py"])
+            patch = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"),
+                repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit=self.BASE,
+                scope=["src/app.py"], mutation_state="post-mutation",
+                terminal_outcome="started-mid-work-failed",
+                originating_worker=self.WORKER, runner=runner))
+            invoke.recovery_previous(patch)[0].write_text("orphan")
+            with mock.patch.object(
+                    invoke, "_unlink_recovery_files",
+                    side_effect=OSError("unlink denied")):
+                with self.assertRaisesRegex(
+                        invoke.RecoveryError, "generation cleanup") as caught:
+                    invoke.recovery_available(
+                        patch, repo="owner/repo", story_number=214,
+                        scope=["src/app.py"], runner=runner)
+            self.assertEqual("post-mutation", caught.exception.mutation_state)
+
+    def test_cleanup_reconciliation_flushes_tombstone_deletion(self):
+        with tempfile.TemporaryDirectory() as recovery:
+            patch = pathlib.Path(recovery, "story.patch")
+            manifest_tombstone = patch.with_name("story.json.deleting")
+            record = {
+                "schema_version": invoke.RECOVERY_SCHEMA_VERSION,
+                "trust": invoke.RECOVERY_TRUST,
+                "repository": "owner/repo", "story": 214,
+                "base_commit": self.BASE, "delivered_head": "d" * 40,
+                "recovered_paths": ["src/app.py"],
+                "previous_mutation_state": "post-mutation",
+                "previous_terminal_outcome": "completed",
+                "originating_worker": self.WORKER,
+                "recovered_at": "2026-09-04T00:00:00Z",
+                "delivery_verified_at": "2026-09-04T00:01:00Z",
+            }
+            manifest_tombstone.write_text(json.dumps(record))
+            with mock.patch.object(invoke.os, "fsync",
+                                   wraps=invoke.os.fsync) as fsync:
+                self.assertFalse(invoke.recovery_available(
+                    patch, repo="owner/repo", story_number=214,
+                    scope=["src/app.py"]))
+            self.assertEqual(1, fsync.call_count)
+            self.assertFalse(manifest_tombstone.exists())
+
+    def test_worktree_creation_failure_preserves_recovery_accounting(self):
+        class WorktreeFailureRunner(RecordingRunner):
+            def __call__(self, cmd, **kwargs):
+                if cmd[:3] == ["git", "worktree", "add"]:
+                    return subprocess.CompletedProcess(
+                        cmd, 1, "", "cannot create worktree")
+                return super().__call__(cmd, **kwargs)
+
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = WorktreeFailureRunner(["src/app.py"])
+            patch = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"),
+                repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit=self.BASE,
+                scope=["src/app.py"], mutation_state="post-mutation",
+                terminal_outcome="started-mid-work-failed",
+                originating_worker=self.WORKER, runner=runner))
+            with self.assertRaisesRegex(
+                    invoke.DeliveryError, "cannot create worktree") as caught:
+                invoke.execute(
+                    "owner/repo", 214, "token", pathlib.Path("/checkout"),
+                    runner=runner, client=FakeClient())
+            self.assertEqual("post-mutation", caught.exception.mutation_state)
+            self.assertEqual("recovery-worktree-creation-failed",
+                             caught.exception.terminal_outcome)
+            self.assertEqual(str(patch), caught.exception.recovery_ref)
+
+    def test_correction_event_failure_preserves_recovery_accounting(self):
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = RecordingRunner(["src/app.py"])
+            patch = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"),
+                repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit=self.BASE,
+                scope=["src/app.py"], mutation_state="post-mutation",
+                terminal_outcome="started-mid-work-failed",
+                originating_worker=self.WORKER, runner=runner))
+            with mock.patch.object(
+                    invoke.obs, "process_event",
+                    side_effect=OSError("event fsync failed")):
+                with self.assertRaisesRegex(OSError, "event fsync failed") as caught:
+                    invoke.execute(
+                        "owner/repo", 214, "token", pathlib.Path("/checkout"),
+                        runner=runner, client=FakeClient())
+            self.assertEqual("post-mutation", caught.exception.mutation_state)
+            self.assertEqual("recovery-correction-event-failed",
+                             caught.exception.terminal_outcome)
+            self.assertEqual(str(patch), caught.exception.recovery_ref)
+            self.assertTrue(patch.exists())
+            self.assertFalse(any(command and command[0] in ("codex", "claude")
+                                 for command, _ in runner.calls))
+
+    def test_non_object_manifest_reports_prior_mutation_and_reference(self):
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            patch = invoke.recovery_patch("owner/repo", 214)
+            patch.parent.mkdir(parents=True)
+            patch.write_text("patch")
+            invoke.recovery_manifest(patch).write_text("[]")
+            runner = RecordingRunner([])
+            with self.assertRaisesRegex(invoke.RecoveryError,
+                                        "not an object") as caught:
+                invoke.execute(
+                    "owner/repo", 214, "token", pathlib.Path("/checkout"),
+                    runner=runner, client=FakeClient())
+            self.assertEqual("post-mutation", caught.exception.mutation_state)
+            self.assertEqual(str(patch), caught.exception.recovery_ref)
+            self.assertFalse(any(command and command[0] in ("codex", "claude")
+                                 for command, _ in runner.calls))
+
+    def test_non_string_delivered_head_is_a_recovery_error(self):
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = RecordingRunner(["src/app.py"])
+            patch = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"),
+                repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit="d" * 40,
+                scope=["src/app.py"], mutation_state="post-mutation",
+                terminal_outcome="started-mid-work-failed",
+                originating_worker=self.WORKER, runner=runner))
+            manifest = invoke.recovery_manifest(patch)
+            value = json.loads(manifest.read_text())
+            value["delivered_head"] = ["not", "a", "commit"]
+            value["delivery_verified_at"] = "2026-09-04T00:00:00Z"
+            manifest.write_text(json.dumps(value))
+            with self.assertRaisesRegex(invoke.RecoveryError,
+                                        "provenance") as caught:
+                invoke.execute(
+                    "owner/repo", 214, "token", pathlib.Path("/checkout"),
+                    runner=runner, client=FakeClient())
+            self.assertEqual("post-mutation", caught.exception.mutation_state)
+            self.assertEqual(str(patch), caught.exception.recovery_ref)
+
+    def test_non_string_pending_head_fails_before_engine_relaunch(self):
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = RecordingRunner(["src/app.py"])
+            patch = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"),
+                repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit="d" * 40,
+                scope=["src/app.py"], mutation_state="post-mutation",
+                terminal_outcome="started-mid-work-failed",
+                originating_worker=self.WORKER, runner=runner))
+            manifest = invoke.recovery_manifest(patch)
+            value = json.loads(manifest.read_text())
+            value["pending_head"] = ["not", "a", "commit"]
+            value["push_prepared_at"] = "2026-09-04T00:00:00Z"
+            manifest.write_text(json.dumps(value))
+            with self.assertRaisesRegex(invoke.RecoveryError,
+                                        "pending") as caught:
+                invoke.execute(
+                    "owner/repo", 214, "token", pathlib.Path("/checkout"),
+                    runner=runner, client=FakeClient())
+            self.assertEqual(str(patch), caught.exception.recovery_ref)
+            self.assertFalse(any(command and command[0] in ("codex", "claude")
+                                 for command, _ in runner.calls))
+
+    def test_delivered_manifest_rejects_stale_pending_fields(self):
+        for field, value in (("pending_head", "e" * 40),
+                             ("push_prepared_at", "2026-09-04T00:00:00Z")):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as recovery, \
+                    mock.patch.dict(invoke.os.environ,
+                                    {"FACTORY_RECOVERY_DIR": recovery}):
+                runner = RecordingRunner(["src/app.py"])
+                patch = pathlib.Path(invoke.checkpoint_failed_work(
+                    pathlib.Path("/old"), pathlib.Path("/checkout"),
+                    repo="owner/repo", story_number=214, default="main",
+                    base_ref="origin/main", base_commit=self.BASE,
+                    scope=["src/app.py"], mutation_state="post-mutation",
+                    terminal_outcome="started-mid-work-failed",
+                    originating_worker=self.WORKER, runner=runner))
+                invoke.mark_recovery_pushed(patch, "d" * 40)
+                manifest = invoke.recovery_manifest(patch)
+                record = json.loads(manifest.read_text())
+                record[field] = value
+                manifest.write_text(json.dumps(record))
+                with self.assertRaisesRegex(invoke.RecoveryError,
+                                            "provenance"):
+                    invoke.pushed_recovery_head(
+                        patch, repo="owner/repo", story_number=214,
+                        checkout=pathlib.Path("/checkout"),
+                        scope=["src/app.py"], runner=runner)
+                self.assertTrue(patch.exists())
+
+    def test_recorded_head_must_contain_the_checkpoint_patch(self):
+        class UnrelatedHeadRunner(RecordingRunner):
+            def __call__(self, cmd, **kwargs):
+                if cmd[:2] == ["git", "rev-parse"] and \
+                        cmd[-1].endswith("^{tree}"):
+                    return subprocess.CompletedProcess(
+                        cmd, 0, "e" * 40 + "\n", "")
+                return super().__call__(cmd, **kwargs)
+
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = UnrelatedHeadRunner(["src/app.py"])
+            patch = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"),
+                repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit=self.BASE,
+                scope=["src/app.py"], mutation_state="post-mutation",
+                terminal_outcome="started-mid-work-failed",
+                originating_worker=self.WORKER, runner=runner))
+            invoke.mark_recovery_pushed(patch, "e" * 40)
+            with self.assertRaisesRegex(invoke.RecoveryError,
+                                        "does not match recorded head"):
+                invoke.pushed_recovery_head(
+                    patch, repo="owner/repo", story_number=214,
+                    checkout=pathlib.Path("/checkout"),
+                    scope=["src/app.py"], runner=runner)
+
+    def test_missing_local_recovery_head_is_fetched_before_tree_validation(self):
+        class MissingHeadRunner(RecordingRunner):
+            fetched = False
+
+            def __call__(self, cmd, **kwargs):
+                if cmd[:3] == ["git", "cat-file", "-e"] and not self.fetched:
+                    self.calls.append((list(cmd), kwargs.get("env")))
+                    return subprocess.CompletedProcess(cmd, 1, "", "missing")
+                if cmd[:4] == ["git", "fetch", "--no-tags", "origin"]:
+                    self.fetched = True
+                return super().__call__(cmd, **kwargs)
+
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = MissingHeadRunner(["src/app.py"])
+            patch = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"),
+                repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit=self.BASE,
+                scope=["src/app.py"], mutation_state="post-mutation",
+                terminal_outcome="completed-awaiting-push",
+                originating_worker=self.WORKER, runner=runner))
+            invoke.mark_recovery_pushed(patch, "e" * 40)
+            self.assertEqual("e" * 40, invoke.pushed_recovery_head(
+                patch, repo="owner/repo", story_number=214,
+                checkout=pathlib.Path("/checkout"), scope=["src/app.py"],
+                runner=runner))
+            self.assertTrue(runner.fetched)
+
+    def test_recovery_head_probe_launch_failure_is_recovery_aware(self):
+        class ProbeFailureRunner(RecordingRunner):
+            def __call__(self, cmd, **kwargs):
+                if cmd[:3] == ["git", "cat-file", "-e"]:
+                    raise OSError("probe launch failed")
+                return super().__call__(cmd, **kwargs)
+
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = ProbeFailureRunner(["src/app.py"])
+            patch = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"),
+                repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit=self.BASE,
+                scope=["src/app.py"], mutation_state="post-mutation",
+                terminal_outcome="completed-awaiting-push",
+                originating_worker=self.WORKER, runner=runner))
+            invoke.mark_recovery_pushed(patch, "e" * 40)
+            with self.assertRaisesRegex(
+                    invoke.RecoveryError, "could not be inspected") as caught:
+                invoke.pushed_recovery_head(
+                    patch, repo="owner/repo", story_number=214,
+                    checkout=pathlib.Path("/checkout"),
+                    scope=["src/app.py"], runner=runner)
+            self.assertEqual("post-mutation", caught.exception.mutation_state)
+
+    def test_recovery_head_workspace_failures_are_recovery_aware(self):
+        class CleanupFailure:
+            def __enter__(self):
+                return "/temporary-index"
+
+            def __exit__(self, *_args):
+                raise OSError("workspace cleanup failed")
+
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = RecordingRunner(["src/app.py"])
+            patch = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"),
+                repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit=self.BASE,
+                scope=["src/app.py"], mutation_state="post-mutation",
+                terminal_outcome="completed-awaiting-push",
+                originating_worker=self.WORKER, runner=runner))
+            invoke.mark_recovery_pushed(patch, "e" * 40)
+            failures = (
+                mock.Mock(side_effect=OSError("workspace creation failed")),
+                mock.Mock(return_value=CleanupFailure()),
+            )
+            for temporary_directory in failures:
+                with self.subTest(failure=temporary_directory), mock.patch.object(
+                        invoke.tempfile, "TemporaryDirectory",
+                        temporary_directory), self.assertRaisesRegex(
+                            invoke.RecoveryError,
+                            "content could not be validated") as caught:
+                    invoke.pushed_recovery_head(
+                        patch, repo="owner/repo", story_number=214,
+                        checkout=pathlib.Path("/checkout"),
+                        scope=["src/app.py"], runner=runner)
+                self.assertEqual(
+                    "post-mutation", caught.exception.mutation_state)
+
+    def test_head_validation_uses_tree_not_attribute_sensitive_diff(self):
+        with tempfile.TemporaryDirectory() as directory, \
+             tempfile.TemporaryDirectory() as recovery:
+            root = pathlib.Path(directory)
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            (root / "payload.dat").write_text("base\n")
+            subprocess.run(["git", "add", "payload.dat"], cwd=root, check=True)
+            commit = ["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                      "commit", "-qm"]
+            subprocess.run([*commit, "base"], cwd=root, check=True)
+            base = subprocess.run(
+                ["git", "rev-parse", "HEAD"], cwd=root, check=True,
+                capture_output=True, text=True).stdout.strip()
+            (root / ".gitattributes").write_text("payload.dat binary\n")
+            (root / "payload.dat").write_text("delivered\n")
+            subprocess.run(["git", "add", ".gitattributes", "payload.dat"],
+                           cwd=root, check=True)
+            subprocess.run([*commit, "delivery"], cwd=root, check=True)
+            head = subprocess.run(
+                ["git", "rev-parse", "HEAD"], cwd=root, check=True,
+                capture_output=True, text=True).stdout.strip()
+            with mock.patch.dict(
+                    invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+                ref = pathlib.Path(invoke.checkpoint_failed_work(
+                    root, root, repo="owner/repo", story_number=214,
+                    default="main", base_ref=base, base_commit=base,
+                    scope=[".gitattributes", "payload.dat"],
+                    mutation_state="post-mutation",
+                    terminal_outcome="completed-awaiting-push",
+                    originating_worker=self.WORKER))
+                invoke.validate_recovery_head_content(ref, head, root)
+
+    def test_interrupted_cleanup_unlink_failure_is_recovery_aware(self):
+        with tempfile.TemporaryDirectory() as recovery:
+            patch = pathlib.Path(recovery, "story.patch")
+            manifest_tombstone = invoke.recovery_manifest(patch).with_name(
+                "story.json.deleting")
+            record = {
+                "schema_version": invoke.RECOVERY_SCHEMA_VERSION,
+                "trust": invoke.RECOVERY_TRUST,
+                "repository": "owner/repo", "story": 214,
+                "base_commit": self.BASE, "delivered_head": "d" * 40,
+                "recovered_paths": ["src/app.py"],
+                "previous_mutation_state": "post-mutation",
+                "previous_terminal_outcome": "completed",
+                "originating_worker": self.WORKER,
+                "recovered_at": "2026-09-04T00:00:00Z",
+                "delivery_verified_at": "2026-09-04T00:01:00Z",
+            }
+            manifest_tombstone.write_text(json.dumps(record))
+            with mock.patch.object(pathlib.Path, "unlink",
+                                   side_effect=OSError("unlink failed")):
+                with self.assertRaisesRegex(
+                        invoke.RecoveryError,
+                        "cleanup transaction could not finish") as caught:
+                    invoke.recovery_available(
+                        patch, repo="owner/repo", story_number=214,
+                        scope=["src/app.py"])
+            self.assertEqual("post-mutation", caught.exception.mutation_state)
+
+    def test_base_resolution_failure_preserves_recovery_accounting(self):
+        class BaseFailureRunner(RecordingRunner):
+            def __call__(self, cmd, **kwargs):
+                if cmd[:2] == ["git", "rev-parse"]:
+                    return subprocess.CompletedProcess(
+                        cmd, 1, "", "base unavailable")
+                return super().__call__(cmd, **kwargs)
+
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = BaseFailureRunner(["src/app.py"])
+            patch = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"),
+                repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit=self.BASE,
+                scope=["src/app.py"], mutation_state="post-mutation",
+                terminal_outcome="started-mid-work-failed",
+                originating_worker=self.WORKER, runner=runner))
+            with self.assertRaisesRegex(invoke.DeliveryError,
+                                        "base unavailable") as caught:
+                invoke.execute(
+                    "owner/repo", 214, "token", pathlib.Path("/checkout"),
+                    runner=runner, client=FakeClient())
+            self.assertEqual("post-mutation", caught.exception.mutation_state)
+            self.assertEqual("recovery-base-resolution-failed",
+                             caught.exception.terminal_outcome)
+            self.assertEqual(str(patch), caught.exception.recovery_ref)
+            self.assertFalse(any(command and command[0] in ("codex", "claude")
+                                 for command, _ in runner.calls))
+
+    def test_date_only_pending_timestamp_fails_before_engine_relaunch(self):
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = RecordingRunner(["src/app.py"])
+            patch = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"),
+                repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit="d" * 40,
+                scope=["src/app.py"], mutation_state="post-mutation",
+                terminal_outcome="started-mid-work-failed",
+                originating_worker=self.WORKER, runner=runner))
+            manifest = invoke.recovery_manifest(patch)
+            value = json.loads(manifest.read_text())
+            value["pending_head"] = "e" * 40
+            value["push_prepared_at"] = "2026-09-04Z"
+            manifest.write_text(json.dumps(value))
+            with self.assertRaisesRegex(invoke.RecoveryError,
+                                        "pending") as caught:
+                invoke.execute(
+                    "owner/repo", 214, "token", pathlib.Path("/checkout"),
+                    runner=runner, client=FakeClient())
+            self.assertEqual(str(patch), caught.exception.recovery_ref)
+            self.assertFalse(any(command and command[0] in ("codex", "claude")
+                                 for command, _ in runner.calls))
+
+    def test_date_only_recovered_timestamp_fails_before_engine_relaunch(self):
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = RecordingRunner(["src/app.py"])
+            patch = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"),
+                repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit="d" * 40,
+                scope=["src/app.py"], mutation_state="post-mutation",
+                terminal_outcome="started-mid-work-failed",
+                originating_worker=self.WORKER, runner=runner))
+            manifest = invoke.recovery_manifest(patch)
+            value = json.loads(manifest.read_text())
+            value["recovered_at"] = "2026-09-04Z"
+            manifest.write_text(json.dumps(value))
+            with self.assertRaisesRegex(invoke.RecoveryError,
+                                        "timestamp") as caught:
+                invoke.execute(
+                    "owner/repo", 214, "token", pathlib.Path("/checkout"),
+                    runner=runner, client=FakeClient())
+            self.assertEqual(str(patch), caught.exception.recovery_ref)
+            self.assertFalse(any(command and command[0] in ("codex", "claude")
+                                 for command, _ in runner.calls))
+
+    def test_date_only_delivery_timestamp_cannot_finalize_recovery(self):
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = RecordingRunner(["src/app.py"])
+            patch = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"),
+                repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit="d" * 40,
+                scope=["src/app.py"], mutation_state="post-mutation",
+                terminal_outcome="started-mid-work-failed",
+                originating_worker=self.WORKER, runner=runner))
+            invoke.mark_recovery_pushed(patch, "e" * 40)
+            manifest = invoke.recovery_manifest(patch)
+            value = json.loads(manifest.read_text())
+            value["delivery_verified_at"] = "2026-09-04Z"
+            manifest.write_text(json.dumps(value))
+            with self.assertRaisesRegex(invoke.RecoveryError,
+                                        "delivery_verified_at") as caught:
+                invoke.execute(
+                    "owner/repo", 214, "token", pathlib.Path("/checkout"),
+                    runner=runner, client=FakeClient())
+            self.assertEqual(str(patch), caught.exception.recovery_ref)
+            self.assertTrue(patch.exists())
+
+    def test_pushed_head_drift_reports_recovery_reference(self):
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = RecordingRunner(["src/app.py"])
+            patch = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"),
+                repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit=self.BASE,
+                scope=["src/app.py"], mutation_state="post-mutation",
+                terminal_outcome="started-mid-work-failed",
+                originating_worker=self.WORKER, runner=runner))
+            invoke.mark_recovery_pushed(patch, "b" * 40)
+            with self.assertRaisesRegex(invoke.RecoveryError,
+                                        "does not match") as caught:
+                invoke.execute(
+                    "owner/repo", 214, "token", pathlib.Path("/checkout"),
+                    runner=runner, client=FakeClient())
+            self.assertEqual(str(patch), caught.exception.recovery_ref)
+
+    def test_durable_pr_replay_rejects_recovery_head_drift(self):
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = RecordingRunner(["src/app.py"])
+            patch = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"),
+                repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit=self.BASE,
+                scope=["src/app.py"], mutation_state="post-mutation",
+                terminal_outcome="started-mid-work-failed",
+                originating_worker=self.WORKER, runner=runner))
+            invoke.mark_recovery_pushed(patch, "b" * 40)
+            client = FakeClient()
+            client.created = {
+                "number": 9,
+                "body": "Story: #214\n\n" + invoke.marker(214, "5") + "\n",
+                "head": {"ref": "story/214-delivery", "sha": "c" * 40},
+            }
+            with self.assertRaisesRegex(invoke.RecoveryError,
+                                        "does not match") as caught:
+                invoke.execute(
+                    "owner/repo", 214, "token", pathlib.Path("/checkout"),
+                    runner=runner, client=client)
+            self.assertEqual("post-mutation", caught.exception.mutation_state)
+            self.assertEqual(str(patch), caught.exception.recovery_ref)
+
+    def test_durable_pr_replay_refreshes_head_before_cleanup(self):
+        class AdvancingClient(FakeClient):
+            def __init__(self):
+                super().__init__()
+                self.reads = 0
+
+            def pull_requests(self):
+                self.reads += 1
+                head = "c" * 40 if self.reads == 1 else "d" * 40
+                return [{
+                    "number": 9,
+                    "body": ("Story: #214\n\n" +
+                             invoke.marker(214, "5") + "\n"),
+                    "head": {"ref": "story/214-delivery", "sha": head},
+                }]
+
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = RecordingRunner(["src/app.py"])
+            patch = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"),
+                repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit=self.BASE,
+                scope=["src/app.py"], mutation_state="post-mutation",
+                terminal_outcome="started-mid-work-failed",
+                originating_worker=self.WORKER, runner=runner))
+            invoke.mark_recovery_pushed(patch, "c" * 40)
+            with self.assertRaisesRegex(
+                    invoke.RecoveryError, "refreshed pull request head") as caught:
+                invoke.execute(
+                    "owner/repo", 214, "token", pathlib.Path("/checkout"),
+                    runner=runner, client=AdvancingClient())
+            self.assertEqual("post-mutation", caught.exception.mutation_state)
+            self.assertEqual(str(patch), caught.exception.recovery_ref)
+            self.assertTrue(patch.exists())
+
+    def test_durable_pr_replay_revalidates_recovery_scope_before_cleanup(self):
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = RecordingRunner(["other.py"])
+            patch = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"),
+                repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit=self.BASE,
+                scope=["other.py"], mutation_state="post-mutation",
+                terminal_outcome="started-mid-work-failed",
+                originating_worker=self.WORKER, runner=runner))
+            invoke.mark_recovery_pushed(patch, "c" * 40)
+            client = FakeClient()
+            client.created = {
+                "number": 9,
+                "body": "Story: #214\n\n" + invoke.marker(214, "5") + "\n",
+                "head": {"ref": "story/214-delivery", "sha": "c" * 40},
+            }
+            with self.assertRaisesRegex(invoke.RecoveryError,
+                                        "provenance") as caught:
+                invoke.execute(
+                    "owner/repo", 214, "token", pathlib.Path("/checkout"),
+                    runner=runner, client=client)
+            self.assertEqual(str(patch), caught.exception.recovery_ref)
+            self.assertTrue(patch.exists())
+
+    def test_durable_pr_replay_preserves_invalid_worker_provenance(self):
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = RecordingRunner(["src/app.py"])
+            patch = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"),
+                repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit=self.BASE,
+                scope=["src/app.py"], mutation_state="post-mutation",
+                terminal_outcome="started-mid-work-failed",
+                originating_worker=self.WORKER, runner=runner))
+            invoke.mark_recovery_pushed(patch, "c" * 40)
+            manifest = invoke.recovery_manifest(patch)
+            value = json.loads(manifest.read_text())
+            value["originating_worker"]["model"] = ["not", "a", "model"]
+            manifest.write_text(json.dumps(value))
+            client = FakeClient()
+            client.created = {
+                "number": 9,
+                "body": "Story: #214\n\n" + invoke.marker(214, "5") + "\n",
+                "head": {"ref": "story/214-delivery", "sha": "c" * 40},
+            }
+            with self.assertRaisesRegex(invoke.RecoveryError,
+                                        "worker identity") as caught:
+                invoke.execute(
+                    "owner/repo", 214, "token", pathlib.Path("/checkout"),
+                    runner=runner, client=client)
+            self.assertEqual(str(patch), caught.exception.recovery_ref)
+            self.assertTrue(patch.exists())
+
+    def test_durable_pr_replay_binds_worker_task_to_current_story(self):
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = RecordingRunner(["src/app.py"])
+            patch = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"),
+                repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit=self.BASE,
+                scope=["src/app.py"], mutation_state="post-mutation",
+                terminal_outcome="started-mid-work-failed",
+                originating_worker=self.WORKER, runner=runner))
+            invoke.mark_recovery_pushed(patch, "c" * 40)
+            manifest = invoke.recovery_manifest(patch)
+            value = json.loads(manifest.read_text())
+            value["originating_worker"]["task"] = "delivery:owner/repo:999:1"
+            manifest.write_text(json.dumps(value))
+            client = FakeClient()
+            client.created = {
+                "number": 9,
+                "body": "Story: #214\n\n" + invoke.marker(214, "5") + "\n",
+                "head": {"ref": "story/214-delivery", "sha": "c" * 40},
+            }
+            with self.assertRaisesRegex(invoke.RecoveryError,
+                                        "worker identity"):
+                invoke.execute(
+                    "owner/repo", 214, "token", pathlib.Path("/checkout"),
+                    runner=runner, client=client)
+            self.assertTrue(patch.exists())
+
+    def test_durable_pr_replay_compares_manifest_paths_with_patch(self):
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = RecordingRunner(["src/app.py"])
+            patch = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"),
+                repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit=self.BASE,
+                scope=["src/**"], mutation_state="post-mutation",
+                terminal_outcome="started-mid-work-failed",
+                originating_worker=self.WORKER, runner=runner))
+            invoke.mark_recovery_pushed(patch, "c" * 40)
+            manifest = invoke.recovery_manifest(patch)
+            value = json.loads(manifest.read_text())
+            value["recovered_paths"] = ["src/other.py"]
+            manifest.write_text(json.dumps(value))
+            client = FakeClient(story_body=STORY_BODY.replace(
+                "src/app.py", "src/**"))
+            client.created = {
+                "number": 9,
+                "body": "Story: #214\n\n" + invoke.marker(214, "5") + "\n",
+                "head": {"ref": "story/214-delivery", "sha": "c" * 40},
+            }
+            with self.assertRaisesRegex(invoke.RecoveryError,
+                                        "provenance"):
+                invoke.execute(
+                    "owner/repo", 214, "token", pathlib.Path("/checkout"),
+                    runner=runner, client=client)
+            self.assertTrue(patch.exists())
+
+    def test_pending_push_is_reconciled_without_relaunch(self):
+        class RemoteRunner(RecordingRunner):
+            def __call__(self, cmd, **kwargs):
+                result = super().__call__(cmd, **kwargs)
+                if cmd[:3] == ["git", "ls-remote", "--heads"]:
+                    return subprocess.CompletedProcess(
+                        cmd, 0, "d" * 40 + "\trefs/heads/story/214-delivery\n", "")
+                return result
+
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = RemoteRunner(["src/app.py"])
+            patch = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"),
+                repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit=self.BASE,
+                scope=["src/app.py"], mutation_state="post-mutation",
+                terminal_outcome="started-mid-work-failed",
+                originating_worker=self.WORKER, runner=runner))
+            invoke.mark_recovery_push_pending(patch, "d" * 40)
+            result = invoke.execute(
+                "owner/repo", 214, "token", pathlib.Path("/checkout"),
+                runner=runner, client=FakeClient())
+            self.assertEqual("d" * 40, result.head)
+            self.assertFalse(patch.exists())
+            self.assertFalse(any(command and command[0] in ("codex", "claude")
+                                 for command, _ in runner.calls))
+
+    def test_advanced_branch_promotes_ancestor_pending_before_replay(self):
+        class AdvancedRemoteRunner(RecordingRunner):
+            def __call__(self, cmd, **kwargs):
+                result = super().__call__(cmd, **kwargs)
+                if cmd[:3] == ["git", "ls-remote", "--heads"]:
+                    return subprocess.CompletedProcess(
+                        cmd, 0,
+                        "e" * 40 + "\trefs/heads/story/214-delivery\n", "")
+                if (cmd[:2] == ["git", "rev-parse"] and
+                        cmd[-1] == "origin/story/214-delivery"):
+                    return subprocess.CompletedProcess(cmd, 0, "e" * 40 + "\n", "")
+                return result
+
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = AdvancedRemoteRunner(["src/app.py"])
+            patch = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"),
+                repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit=self.BASE,
+                scope=["src/app.py"], mutation_state="post-mutation",
+                terminal_outcome="started-mid-work-failed",
+                originating_worker=self.WORKER, runner=runner))
+            invoke.mark_recovery_push_pending(patch, "d" * 40)
+            with self.assertRaisesRegex(
+                    invoke.RecoveryError, "does not match branch head") as caught:
+                invoke.execute(
+                    "owner/repo", 214, "token", pathlib.Path("/checkout"),
+                    runner=runner, client=FakeClient())
+            manifest = json.loads(invoke.recovery_manifest(patch).read_text())
+            self.assertEqual("d" * 40, manifest["delivered_head"])
+            self.assertNotIn("pending_head", manifest)
+            self.assertEqual(str(patch), caught.exception.recovery_ref)
+            self.assertFalse(any(command and command[0] in ("codex", "claude")
+                                 for command, _ in runner.calls))
+
+    def test_absent_pending_object_remains_replayable_after_observed_fetch(self):
+        class FreshCheckoutRunner(RecordingRunner):
+            observed_fetched = False
+
+            def __call__(self, cmd, **kwargs):
+                if cmd[:3] == ["git", "cat-file", "-e"]:
+                    self.calls.append((list(cmd), kwargs.get("env")))
+                    commit = cmd[-1].removesuffix("^{commit}")
+                    present = commit == "e" * 40 and self.observed_fetched
+                    return subprocess.CompletedProcess(
+                        cmd, 0 if present else 1, "", "missing")
+                if cmd[:4] == ["git", "fetch", "--no-tags", "origin"]:
+                    self.observed_fetched = True
+                return super().__call__(cmd, **kwargs)
+
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = FreshCheckoutRunner(["src/app.py"])
+            patch = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"),
+                repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit=self.BASE,
+                scope=["src/app.py"], mutation_state="post-mutation",
+                terminal_outcome="started-mid-work-failed",
+                originating_worker=self.WORKER, runner=runner))
+            invoke.mark_recovery_push_pending(patch, "d" * 40)
+            invoke.reconcile_recovery_push(
+                patch, "e" * 40, repo="owner/repo", story_number=214,
+                checkout=pathlib.Path("/checkout"), runner=runner)
+            manifest = json.loads(invoke.recovery_manifest(patch).read_text())
+            self.assertEqual("d" * 40, manifest["pending_head"])
+            self.assertNotIn("delivered_head", manifest)
+            commands = [command for command, _ in runner.calls]
+            observed_fetch = commands.index(
+                ["git", "fetch", "--no-tags", "origin", "e" * 40])
+            pending_probe = commands.index(
+                ["git", "cat-file", "-e", "d" * 40 + "^{commit}"])
+            self.assertLess(observed_fetch, pending_probe)
+
+    def test_shallow_observed_history_is_completed_before_pending_probe(self):
+        class ShallowCheckoutRunner(RecordingRunner):
+            history_complete = False
+
+            def __call__(self, cmd, **kwargs):
+                if cmd[:3] == ["git", "rev-parse", "--is-shallow-repository"]:
+                    self.calls.append((list(cmd), kwargs.get("env")))
+                    return subprocess.CompletedProcess(cmd, 0, "true\n", "")
+                if cmd[:4] == ["git", "fetch", "--no-tags", "--unshallow"]:
+                    self.history_complete = True
+                if cmd[:3] == ["git", "cat-file", "-e"]:
+                    self.calls.append((list(cmd), kwargs.get("env")))
+                    commit = cmd[-1].removesuffix("^{commit}")
+                    present = commit == "e" * 40 or self.history_complete
+                    return subprocess.CompletedProcess(
+                        cmd, 0 if present else 1, "", "missing")
+                return super().__call__(cmd, **kwargs)
+
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = ShallowCheckoutRunner(["src/app.py"])
+            patch = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"),
+                repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit=self.BASE,
+                scope=["src/app.py"], mutation_state="post-mutation",
+                terminal_outcome="started-mid-work-failed",
+                originating_worker=self.WORKER, runner=runner))
+            invoke.mark_recovery_push_pending(patch, "d" * 40)
+            invoke.reconcile_recovery_push(
+                patch, "e" * 40, repo="owner/repo", story_number=214,
+                checkout=pathlib.Path("/checkout"), runner=runner)
+            manifest = json.loads(invoke.recovery_manifest(patch).read_text())
+            self.assertEqual("d" * 40, manifest["delivered_head"])
+            self.assertTrue(runner.history_complete)
+
+    def test_shallow_matching_head_fetches_base_before_tree_reconstruction(self):
+        class ShallowBaseRunner(RecordingRunner):
+            history_complete = False
+
+            def __call__(self, cmd, **kwargs):
+                if cmd[:3] == ["git", "cat-file", "-e"]:
+                    self.calls.append((list(cmd), kwargs.get("env")))
+                    commit = cmd[-1].removesuffix("^{commit}")
+                    present = commit == "d" * 40 or self.history_complete
+                    return subprocess.CompletedProcess(
+                        cmd, 0 if present else 1, "", "missing")
+                if cmd[:3] == ["git", "rev-parse", "--is-shallow-repository"]:
+                    self.calls.append((list(cmd), kwargs.get("env")))
+                    return subprocess.CompletedProcess(cmd, 0, "true\n", "")
+                if cmd[:4] == ["git", "fetch", "--no-tags", "--unshallow"]:
+                    self.history_complete = True
+                return super().__call__(cmd, **kwargs)
+
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = ShallowBaseRunner(["src/app.py"])
+            patch = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"),
+                repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit=self.BASE,
+                scope=["src/app.py"], mutation_state="post-mutation",
+                terminal_outcome="completed-awaiting-push",
+                originating_worker=self.WORKER, runner=runner))
+            invoke.mark_recovery_pushed(patch, "d" * 40)
+            invoke.pushed_recovery_head(
+                patch, repo="owner/repo", story_number=214,
+                checkout=pathlib.Path("/checkout"), scope=["src/app.py"],
+                runner=runner)
+            self.assertTrue(runner.history_complete)
+            commands = [command for command, _ in runner.calls]
+            self.assertLess(
+                commands.index(["git", "fetch", "--no-tags", "--unshallow",
+                                "origin"]),
+                commands.index(["git", "read-tree", self.BASE]))
+
+    def test_shallow_restore_fetches_recorded_base_before_ancestry_probe(self):
+        class ShallowRestoreRunner(RecordingRunner):
+            history_complete = False
+
+            def __call__(self, cmd, **kwargs):
+                if cmd[:3] == ["git", "cat-file", "-e"]:
+                    self.calls.append((list(cmd), kwargs.get("env")))
+                    commit = cmd[-1].removesuffix("^{commit}")
+                    present = commit != self.BASE or self.history_complete
+                    return subprocess.CompletedProcess(
+                        cmd, 0 if present else 1, "", "missing")
+                if cmd[:3] == ["git", "rev-parse", "--is-shallow-repository"]:
+                    self.calls.append((list(cmd), kwargs.get("env")))
+                    return subprocess.CompletedProcess(cmd, 0, "true\n", "")
+                if cmd[:4] == ["git", "fetch", "--no-tags", "--unshallow"]:
+                    self.history_complete = True
+                return super().__call__(cmd, **kwargs)
+
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = ShallowRestoreRunner(["src/app.py"])
+            runner.BASE = self.BASE
+            patch = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"),
+                repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit=self.BASE,
+                scope=["src/app.py"], mutation_state="post-mutation",
+                terminal_outcome="started-mid-work-failed",
+                originating_worker=self.WORKER, runner=runner))
+            invoke.restore_failed_work(
+                patch, pathlib.Path("/checkout"), repo="owner/repo",
+                story_number=214, base_commit="d" * 40,
+                scope=["src/app.py"], runner=runner)
+            commands = [command for command, _ in runner.calls]
+            self.assertLess(
+                commands.index(["git", "fetch", "--no-tags", "--unshallow",
+                                "origin"]),
+                commands.index(["git", "merge-base", "--is-ancestor",
+                                self.BASE, "d" * 40]))
+
+    def test_fallback_checkpoint_records_the_lease_that_actually_started(self):
+        class State:
+            health = None
+            @staticmethod
+            def models_for_task_prefix(*_args, **_kwargs): return ()
+
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = RecordingRunner(["src/app.py"])
+            result = SimpleNamespace(
+                outcome="failed", output="fallback worker failed",
+                terminal_outcome="worker-crashed",
+                attempts=({"model": "fallback-model", "provider": "openai",
+                           "invocation_id": "fallback-invocation",
+                           "reservation_id": "a" * 32,
+                           "mutation_state": "post-mutation"},))
+            executor = mock.Mock()
+
+            def execute(**kwargs):
+                kwargs["on_started"](SimpleNamespace(lease_id="a" * 32))
+                kwargs["on_started"](SimpleNamespace(lease_id="b" * 32))
+                return result
+
+            executor.execute.side_effect = execute
+            with mock.patch.object(invoke, "CapacityExecutor",
+                                   return_value=executor), \
+                 mock.patch.object(invoke, "cli_adapter", return_value=mock.Mock()), \
+                 mock.patch.object(invoke, "publish_worker_start"), \
+                 self.assertRaisesRegex(
+                     invoke.DeliveryError, "fallback worker failed"):
+                invoke.execute(
+                    "owner/repo", 214, "token", pathlib.Path("/checkout"),
+                    runner=runner, client=FakeClient(), state=State(),
+                    registry=[SimpleNamespace(provider="openai")])
+            patch = invoke.recovery_patch("owner/repo", 214)
+            manifest = json.loads(invoke.recovery_manifest(patch).read_text())
+            worker = manifest["originating_worker"]
+            self.assertEqual("b" * 32, worker["reservation_id"])
+            self.assertEqual("fallback-model", worker["model"])
+            self.assertEqual("fallback-invocation", worker["invocation_id"])
+
+    def test_story_tempdir_creation_failure_keeps_saved_recovery_accounting(self):
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = RecordingRunner(["src/app.py"])
+            patch = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"),
+                repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit=self.BASE,
+                scope=["src/app.py"], mutation_state="post-mutation",
+                terminal_outcome="started-mid-work-failed",
+                originating_worker=self.WORKER, runner=runner))
+            with mock.patch.object(
+                    invoke.tempfile, "TemporaryDirectory",
+                    side_effect=OSError("temporary storage unavailable")), \
+                 self.assertRaisesRegex(
+                     OSError, "temporary storage unavailable") as caught:
+                invoke.execute(
+                    "owner/repo", 214, "token", pathlib.Path("/checkout"),
+                    runner=runner, client=FakeClient())
+            self.assertEqual("post-mutation", caught.exception.mutation_state)
+            self.assertEqual(
+                "recovery-delivery-worktree-lifecycle-failed",
+                caught.exception.terminal_outcome)
+            self.assertEqual(str(patch), caught.exception.recovery_ref)
+
+    def test_invalid_utf8_recovery_files_fail_through_recovery_error(self):
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = RecordingRunner(["src/app.py"])
+            patch = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"),
+                repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit=self.BASE,
+                scope=["src/app.py"], mutation_state="post-mutation",
+                terminal_outcome="started-mid-work-failed",
+                originating_worker=self.WORKER, runner=runner))
+            for target in (invoke.recovery_manifest(patch), patch):
+                original = target.read_bytes()
+                target.write_bytes(b"\xff")
+                with self.subTest(target=target), self.assertRaises(
+                        invoke.RecoveryError):
+                    invoke.recovery_available(
+                        patch, repo="owner/repo", story_number=214,
+                        scope=["src/app.py"], runner=runner)
+                target.write_bytes(original)
+
+    def test_pending_promotion_write_failure_keeps_recovery_accounting(self):
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = RecordingRunner(["src/app.py"])
+            patch = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"),
+                repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit=self.BASE,
+                scope=["src/app.py"], mutation_state="post-mutation",
+                terminal_outcome="started-mid-work-failed",
+                originating_worker=self.WORKER, runner=runner))
+            invoke.mark_recovery_push_pending(patch, "d" * 40)
+            with mock.patch.object(
+                    invoke, "mark_recovery_pushed",
+                    side_effect=OSError("manifest replace failed")):
+                with self.assertRaisesRegex(
+                        invoke.RecoveryError,
+                        "promotion could not be recorded") as caught:
+                    invoke.execute(
+                        "owner/repo", 214, "token", pathlib.Path("/checkout"),
+                        runner=runner, client=FakeClient())
+            self.assertEqual("post-mutation", caught.exception.mutation_state)
+            self.assertEqual(str(patch), caught.exception.recovery_ref)
+            self.assertTrue(patch.exists())
+            self.assertFalse(any(command and command[0] in ("codex", "claude")
+                                 for command, _ in runner.calls))
+
+    def test_discarded_recovery_still_reports_original_reference(self):
+        class CommitFailureRunner(RecordingRunner):
+            def __call__(self, cmd, **kwargs):
+                result = super().__call__(cmd, **kwargs)
+                if cmd[:2] == ["git", "commit"]:
+                    return subprocess.CompletedProcess(cmd, 1, "", "nothing to commit")
+                return result
+
+        class State:
+            health = None
+            @staticmethod
+            def models_for_task_prefix(*_args, **_kwargs): return ()
+
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = CommitFailureRunner(["src/app.py"])
+            patch = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"),
+                repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit="d" * 40,
+                scope=["src/app.py"], mutation_state="post-mutation",
+                terminal_outcome="started-mid-work-failed",
+                originating_worker=self.WORKER, runner=runner))
+            result = SimpleNamespace(
+                outcome="success", output="done", terminal_outcome="completed",
+                attempts=({"model": "gpt-test", "provider": "openai",
+                           "invocation_id": "next", "reservation_id": None,
+                           "mutation_state": "post-mutation"},))
+            executor = mock.Mock()
+            executor.execute.return_value = result
+            with mock.patch.object(invoke, "CapacityExecutor",
+                                   return_value=executor), \
+                 mock.patch.object(invoke, "cli_adapter", return_value=mock.Mock()), \
+                 mock.patch.object(invoke, "repository_test_command",
+                                   return_value=["python3", "-m", "unittest"]), \
+                 mock.patch.object(invoke, "recovered_work_state",
+                                   side_effect=["restored", "discarded"]), \
+                 mock.patch.object(invoke, "checkpoint_failed_work",
+                                   return_value=""):
+                with self.assertRaisesRegex(invoke.DeliveryError,
+                                            "nothing to commit") as caught:
+                    invoke.execute(
+                        "owner/repo", 214, "token", pathlib.Path("/checkout"),
+                        runner=runner, client=FakeClient(), state=State(),
+                        registry=[SimpleNamespace(provider="openai")])
+            self.assertEqual("post-mutation", caught.exception.mutation_state)
+            self.assertEqual(str(patch), caught.exception.recovery_ref)
+
+    def test_rejected_retry_push_preserves_revised_checkpoint(self):
+        class PushFailureRunner(RecordingRunner):
+            def __init__(self, changed):
+                super().__init__(changed)
+                self.patch_writes = 0
+
+            def __call__(self, cmd, **kwargs):
+                result = super().__call__(cmd, **kwargs)
+                if cmd[:4] == ["git", "diff", "--binary", "--cached"]:
+                    self.patch_writes += 1
+                    return subprocess.CompletedProcess(
+                        cmd, 0,
+                        result.stdout + f"# checkpoint {self.patch_writes}\n", "")
+                if cmd[:2] == ["git", "push"]:
+                    return subprocess.CompletedProcess(
+                        cmd, 1, "", "remote rejected push")
+                return result
+
+        class State:
+            health = None
+            @staticmethod
+            def models_for_task_prefix(*_args, **_kwargs): return ()
+
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = PushFailureRunner(["src/app.py"])
+            patch = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"),
+                repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit="d" * 40,
+                scope=["src/app.py"], mutation_state="post-mutation",
+                terminal_outcome="started-mid-work-failed",
+                originating_worker=self.WORKER, runner=runner))
+            original_patch = patch.read_text()
+            result = SimpleNamespace(
+                outcome="success", output="done", terminal_outcome="completed",
+                attempts=({"model": "gpt-test", "provider": "openai",
+                           "invocation_id": "next", "reservation_id": None,
+                           "mutation_state": "post-mutation"},))
+            executor = mock.Mock()
+            executor.execute.return_value = result
+            with mock.patch.object(invoke, "CapacityExecutor",
+                                   return_value=executor), \
+                 mock.patch.object(invoke, "cli_adapter", return_value=mock.Mock()), \
+                 mock.patch.object(invoke, "repository_test_command",
+                                   return_value=["python3", "-m", "unittest"]):
+                with self.assertRaisesRegex(invoke.DeliveryError,
+                                            "remote rejected") as caught:
+                    invoke.execute(
+                        "owner/repo", 214, "token", pathlib.Path("/checkout"),
+                        runner=runner, client=FakeClient(), state=State(),
+                        registry=[SimpleNamespace(provider="openai")])
+            manifest = json.loads(invoke.recovery_manifest(patch).read_text())
+            self.assertEqual("d" * 40, manifest["pending_head"])
+            self.assertNotIn("delivered_head", manifest)
+            self.assertNotEqual(original_patch, patch.read_text())
+            self.assertIn("# checkpoint 3", patch.read_text())
+            self.assertEqual(str(patch), caught.exception.recovery_ref)
+
+    def test_worktree_cleanup_failure_preserves_push_accounting(self):
+        class CleanupFailureRunner(RecordingRunner):
+            def __call__(self, cmd, **kwargs):
+                result = super().__call__(cmd, **kwargs)
+                if cmd[:4] == ["git", "worktree", "remove", "--force"]:
+                    return subprocess.CompletedProcess(
+                        cmd, 1, "", "worktree remove failed")
+                return result
+
+        class State:
+            health = None
+            @staticmethod
+            def models_for_task_prefix(*_args, **_kwargs): return ()
+
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = CleanupFailureRunner(["src/app.py"])
+            result = SimpleNamespace(
+                outcome="success", output="done", terminal_outcome="completed",
+                attempts=({"model": "gpt-test", "provider": "openai",
+                           "invocation_id": "first", "reservation_id": None,
+                           "mutation_state": "post-mutation"},))
+            executor = mock.Mock()
+            executor.execute.return_value = result
+            with mock.patch.object(invoke, "CapacityExecutor",
+                                   return_value=executor), \
+                 mock.patch.object(invoke, "cli_adapter", return_value=mock.Mock()), \
+                 mock.patch.object(invoke, "repository_test_command",
+                                   return_value=["python3", "-m", "unittest"]):
+                with self.assertRaisesRegex(
+                        invoke.DeliveryError,
+                        "worktree remove failed") as caught:
+                    invoke.execute(
+                        "owner/repo", 214, "token", pathlib.Path("/checkout"),
+                        runner=runner, client=FakeClient(), state=State(),
+                        registry=[SimpleNamespace(provider="openai")])
+            patch = invoke.recovery_patch("owner/repo", 214)
+            self.assertEqual("post-mutation", caught.exception.mutation_state)
+            self.assertEqual("worktree-cleanup-failed",
+                             caught.exception.terminal_outcome)
+            self.assertEqual(str(patch), caught.exception.recovery_ref)
+            self.assertTrue(patch.exists())
+
+    def test_new_failure_checkpoint_is_visible_to_cleanup_failure(self):
+        class CleanupFailureRunner(RecordingRunner):
+            def __call__(self, cmd, **kwargs):
+                result = super().__call__(cmd, **kwargs)
+                if cmd[:4] == ["git", "worktree", "remove", "--force"]:
+                    return subprocess.CompletedProcess(
+                        cmd, 1, "", "worktree remove failed")
+                return result
+
+        class State:
+            health = None
+            @staticmethod
+            def models_for_task_prefix(*_args, **_kwargs): return ()
+
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = CleanupFailureRunner(["src/app.py"])
+            result = SimpleNamespace(
+                outcome="failed", output="worker failed",
+                terminal_outcome="worker-crashed",
+                attempts=({"model": "gpt-test", "provider": "openai",
+                           "invocation_id": "first", "reservation_id": None,
+                           "mutation_state": "post-mutation"},))
+            executor = mock.Mock()
+            executor.execute.return_value = result
+            with mock.patch.object(invoke, "CapacityExecutor",
+                                   return_value=executor), \
+                 mock.patch.object(invoke, "cli_adapter", return_value=mock.Mock()), \
+                 self.assertRaisesRegex(
+                     invoke.DeliveryError, "worktree remove failed") as caught:
+                invoke.execute(
+                    "owner/repo", 214, "token", pathlib.Path("/checkout"),
+                    runner=runner, client=FakeClient(), state=State(),
+                    registry=[SimpleNamespace(provider="openai")])
+            patch = invoke.recovery_patch("owner/repo", 214)
+            self.assertEqual("post-mutation", caught.exception.mutation_state)
+            self.assertEqual("worktree-cleanup-failed",
+                             caught.exception.terminal_outcome)
+            self.assertEqual(str(patch), caught.exception.recovery_ref)
+            self.assertTrue(patch.exists())
+
+    def test_cleanup_cannot_mask_ambiguous_checkpoint_failure(self):
+        class CleanupFailureRunner(RecordingRunner):
+            def __call__(self, cmd, **kwargs):
+                result = super().__call__(cmd, **kwargs)
+                if cmd[:4] == ["git", "worktree", "remove", "--force"]:
+                    return subprocess.CompletedProcess(
+                        cmd, 1, "", "worktree remove failed")
+                return result
+
+        class State:
+            health = None
+            @staticmethod
+            def models_for_task_prefix(*_args, **_kwargs): return ()
+
+        runner = CleanupFailureRunner(["src/app.py"])
+        result = SimpleNamespace(
+            outcome="failed", output="worker failed",
+            terminal_outcome="worker-crashed",
+            attempts=({"model": "gpt-test", "provider": "openai",
+                       "invocation_id": "first", "reservation_id": None,
+                       "mutation_state": "post-mutation"},))
+        executor = mock.Mock()
+        executor.execute.return_value = result
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}), \
+             mock.patch.object(invoke, "CapacityExecutor", return_value=executor), \
+             mock.patch.object(invoke, "cli_adapter", return_value=mock.Mock()), \
+             mock.patch.object(invoke, "checkpoint_failed_work",
+                               side_effect=OSError("checkpoint unavailable")):
+            with self.assertRaisesRegex(
+                    invoke.DeliveryError, "worker failed") as caught:
+                invoke.execute(
+                    "owner/repo", 214, "token", pathlib.Path("/checkout"),
+                    runner=runner, client=FakeClient(), state=State(),
+                    registry=[SimpleNamespace(provider="openai")])
+        self.assertEqual("ambiguous", caught.exception.mutation_state)
+        self.assertIn("checkpoint failed: checkpoint unavailable",
+                      caught.exception.output)
+        self.assertIn("worktree cleanup failed", caught.exception.output)
+        self.assertFalse(caught.exception.recovery_ref)
+
+    def test_first_pass_ambiguous_push_has_a_pending_recovery_marker(self):
+        class PushFailureRunner(RecordingRunner):
+            def __call__(self, cmd, **kwargs):
+                result = super().__call__(cmd, **kwargs)
+                if cmd[:2] == ["git", "push"]:
+                    return subprocess.CompletedProcess(
+                        cmd, 1, "", "remote accepted; response lost")
+                return result
+
+        class State:
+            health = None
+            @staticmethod
+            def models_for_task_prefix(*_args, **_kwargs): return ()
+
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = PushFailureRunner(["src/app.py"])
+            result = SimpleNamespace(
+                outcome="success", output="done", terminal_outcome="completed",
+                attempts=({"model": "gpt-test", "provider": "openai",
+                           "invocation_id": "first", "reservation_id": None,
+                           "mutation_state": "post-mutation"},))
+            executor = mock.Mock()
+            executor.execute.return_value = result
+            with mock.patch.object(invoke, "CapacityExecutor",
+                                   return_value=executor), \
+                 mock.patch.object(invoke, "cli_adapter", return_value=mock.Mock()), \
+                 mock.patch.object(invoke, "repository_test_command",
+                                   return_value=["python3", "-m", "unittest"]):
+                with self.assertRaisesRegex(invoke.DeliveryError,
+                                            "response lost") as caught:
+                    invoke.execute(
+                        "owner/repo", 214, "token", pathlib.Path("/checkout"),
+                        runner=runner, client=FakeClient(), state=State(),
+                        registry=[SimpleNamespace(provider="openai")])
+            patch = invoke.recovery_patch("owner/repo", 214)
+            manifest = json.loads(invoke.recovery_manifest(patch).read_text())
+            self.assertEqual("d" * 40, manifest["pending_head"])
+            self.assertEqual("ambiguous", caught.exception.mutation_state)
+            self.assertEqual(str(patch), caught.exception.recovery_ref)
+
+    def test_failed_push_marker_promotion_preserves_pending_recovery(self):
+        class State:
+            health = None
+            @staticmethod
+            def models_for_task_prefix(*_args, **_kwargs): return ()
+
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = RecordingRunner(["src/app.py"])
+            patch = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"),
+                repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit="d" * 40,
+                scope=["src/app.py"], mutation_state="post-mutation",
+                terminal_outcome="started-mid-work-failed",
+                originating_worker=self.WORKER, runner=runner))
+            result = SimpleNamespace(
+                outcome="success", output="done", terminal_outcome="completed",
+                attempts=({"model": "gpt-test", "provider": "openai",
+                           "invocation_id": "next", "reservation_id": None,
+                           "mutation_state": "post-mutation"},))
+            executor = mock.Mock()
+            executor.execute.return_value = result
+            with mock.patch.object(invoke, "CapacityExecutor",
+                                   return_value=executor), \
+                 mock.patch.object(invoke, "cli_adapter", return_value=mock.Mock()), \
+                 mock.patch.object(invoke, "repository_test_command",
+                                   return_value=["python3", "-m", "unittest"]), \
+                 mock.patch.object(invoke, "mark_recovery_pushed",
+                                   side_effect=OSError("manifest replace failed")):
+                with self.assertRaisesRegex(OSError,
+                                            "manifest replace failed") as caught:
+                    invoke.execute(
+                        "owner/repo", 214, "token", pathlib.Path("/checkout"),
+                        runner=runner, client=FakeClient(), state=State(),
+                        registry=[SimpleNamespace(provider="openai")])
+            manifest = json.loads(invoke.recovery_manifest(patch).read_text())
+            self.assertEqual("d" * 40, manifest["pending_head"])
+            self.assertNotIn("delivered_head", manifest)
+            self.assertEqual("ambiguous", caught.exception.mutation_state)
+            self.assertEqual("push-outcome-ambiguous",
+                             caught.exception.terminal_outcome)
+            self.assertEqual(str(patch), caught.exception.recovery_ref)
+
+    def test_successful_delivery_removes_recovery_pair_after_durable_pr(self):
+        self._assert_execute_recovery_cleanup(create_pr_fails=False)
+
+    def test_durable_delivery_cleanup_failure_preserves_accounting(self):
+        class State:
+            health = None
+            @staticmethod
+            def models_for_task_prefix(*_args, **_kwargs): return ()
+
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = RecordingRunner(["src/app.py"])
+            patch = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"),
+                repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit="d" * 40,
+                scope=["src/app.py"], mutation_state="post-mutation",
+                terminal_outcome="started-mid-work-failed",
+                originating_worker=self.WORKER, runner=runner))
+            result = SimpleNamespace(
+                outcome="success", output="done", terminal_outcome="completed",
+                attempts=({"model": "gpt-test", "provider": "openai",
+                           "invocation_id": "next", "reservation_id": None,
+                           "mutation_state": "post-mutation"},))
+            executor = mock.Mock()
+            executor.execute.return_value = result
+            with mock.patch.object(invoke, "CapacityExecutor",
+                                   return_value=executor), \
+                 mock.patch.object(invoke, "cli_adapter", return_value=mock.Mock()), \
+                 mock.patch.object(invoke, "repository_test_command",
+                                   return_value=["python3", "-m", "unittest"]), \
+                 mock.patch.object(invoke, "remove_recovery",
+                                   side_effect=OSError("cleanup unavailable")):
+                with self.assertRaisesRegex(OSError,
+                                            "cleanup unavailable") as caught:
+                    invoke.execute(
+                        "owner/repo", 214, "token", pathlib.Path("/checkout"),
+                        runner=runner, client=FakeClient(), state=State(),
+                        registry=[SimpleNamespace(provider="openai")])
+            self.assertEqual("post-mutation", caught.exception.mutation_state)
+            self.assertEqual("recovery-cleanup-failed",
+                             caught.exception.terminal_outcome)
+            self.assertEqual(str(patch), caught.exception.recovery_ref)
+            self.assertTrue(patch.exists())
+
+    def test_durable_delivery_event_failure_preserves_accounting(self):
+        def fail_pull_event(name, **_fields):
+            if name == "delivery.pull-request.written":
+                raise OSError("event fsync failed")
+
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = RecordingRunner(["src/app.py"])
+            patch = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"),
+                repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit="d" * 40,
+                scope=["src/app.py"], mutation_state="post-mutation",
+                terminal_outcome="started-mid-work-failed",
+                originating_worker=self.WORKER, runner=runner))
+            invoke.mark_recovery_pushed(patch, "d" * 40)
+            with mock.patch.object(invoke.obs, "process_event",
+                                   side_effect=fail_pull_event):
+                with self.assertRaisesRegex(OSError,
+                                            "event fsync failed") as caught:
+                    invoke.execute(
+                        "owner/repo", 214, "token", pathlib.Path("/checkout"),
+                        runner=runner, client=FakeClient())
+            self.assertEqual("post-mutation", caught.exception.mutation_state)
+            self.assertEqual("delivery-finalization-failed",
+                             caught.exception.terminal_outcome)
+            self.assertEqual(str(patch), caught.exception.recovery_ref)
+            self.assertTrue(patch.exists())
+
+    def test_read_back_head_drift_preserves_recovery_checkpoint(self):
+        class DriftClient(FakeClient):
+            def create_pr(self, title, head, base, body):
+                created = super().create_pr(title, head, base, body)
+                created["head"]["sha"] = "e" * 40
+                return created
+
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = RecordingRunner(["src/app.py"])
+            patch = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"),
+                repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit="d" * 40,
+                scope=["src/app.py"], mutation_state="post-mutation",
+                terminal_outcome="started-mid-work-failed",
+                originating_worker=self.WORKER, runner=runner))
+            invoke.mark_recovery_pushed(patch, "d" * 40)
+            with self.assertRaisesRegex(
+                    invoke.RecoveryError,
+                    "read-back pull request head") as caught:
+                invoke.execute(
+                    "owner/repo", 214, "token", pathlib.Path("/checkout"),
+                    runner=runner, client=DriftClient())
+            self.assertEqual(str(patch), caught.exception.recovery_ref)
+            self.assertTrue(patch.exists())
+
+    def test_failed_durable_pr_write_preserves_recovery_pair(self):
+        self._assert_execute_recovery_cleanup(create_pr_fails=True)
+
+    def test_no_attempt_retry_preserves_original_worker_provenance(self):
+        class State:
+            health = None
+            @staticmethod
+            def models_for_task_prefix(*_args, **_kwargs): return ()
+
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = RecordingRunner(["src/app.py"])
+            base = "d" * 40
+            patch = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"),
+                repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit=base,
+                scope=["src/app.py"], mutation_state="post-mutation",
+                terminal_outcome="started-mid-work-failed",
+                originating_worker=self.WORKER, runner=runner))
+            manifest = invoke.recovery_manifest(patch)
+            original = manifest.read_bytes()
+            result = SimpleNamespace(
+                outcome="no-eligible-capacity", output="", attempts=(),
+                terminal_outcome="not-admitted")
+            executor = mock.Mock()
+            executor.execute.return_value = result
+            with mock.patch.object(invoke, "CapacityExecutor",
+                                   return_value=executor), \
+                 mock.patch.object(invoke, "cli_adapter", return_value=mock.Mock()):
+                with self.assertRaisesRegex(invoke.DeliveryError,
+                                            "no-eligible-capacity"):
+                    invoke.execute(
+                        "owner/repo", 214, "token", pathlib.Path("/checkout"),
+                        runner=runner, client=FakeClient(), state=State(),
+                        registry=[SimpleNamespace(provider="openai")])
+            self.assertEqual(original, manifest.read_bytes())
+            self.assertEqual(self.WORKER,
+                             json.loads(original)["originating_worker"])
+
+    def _assert_execute_recovery_cleanup(self, *, create_pr_fails):
+        class State:
+            health = None
+            @staticmethod
+            def models_for_task_prefix(*_args, **_kwargs): return ()
+
+        class Client(FakeClient):
+            def create_pr(client_self, title, head, base, body):
+                if create_pr_fails:
+                    raise invoke.DeliveryError("durable PR write failed")
+                return super().create_pr(title, head, base, body)
+
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = RecordingRunner(["src/app.py"])
+            base = "d" * 40
+            patch = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"),
+                repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit=base,
+                scope=["src/app.py"], mutation_state="post-mutation",
+                terminal_outcome="started-mid-work-failed",
+                originating_worker=self.WORKER, runner=runner))
+            result = SimpleNamespace(
+                outcome="success", output="done", terminal_outcome="completed",
+                attempts=({"model": "gpt-test", "provider": "openai",
+                           "invocation_id": "next", "reservation_id": None,
+                           "mutation_state": "post-mutation"},))
+            executor = mock.Mock()
+            executor.execute.return_value = result
+            patches = (
+                mock.patch.object(invoke, "CapacityExecutor", return_value=executor),
+                mock.patch.object(invoke, "cli_adapter", return_value=mock.Mock()),
+                mock.patch.object(invoke, "repository_test_command",
+                                  return_value=["python3", "-m", "unittest"]),
+            )
+            with patches[0], patches[1], patches[2]:
+                if create_pr_fails:
+                    with self.assertRaisesRegex(
+                            invoke.DeliveryError,
+                            "durable PR write failed") as caught:
+                        invoke.execute(
+                            "owner/repo", 214, "token", pathlib.Path("/checkout"),
+                            runner=runner, client=Client(), state=State(),
+                            registry=[SimpleNamespace(provider="openai")])
+                    self.assertEqual("post-mutation",
+                                     caught.exception.mutation_state)
+                    self.assertEqual("delivery-finalization-failed",
+                                     caught.exception.terminal_outcome)
+                    self.assertEqual(str(patch), caught.exception.recovery_ref)
+                    self.assertTrue(patch.exists())
+                    self.assertTrue(invoke.recovery_manifest(patch).exists())
+                    self.assertEqual(
+                        base, json.loads(invoke.recovery_manifest(
+                            patch).read_text())["delivered_head"])
+                    with self.assertRaisesRegex(
+                            invoke.DeliveryError,
+                            "durable PR write failed") as resumed:
+                        invoke.execute(
+                            "owner/repo", 214, "token", pathlib.Path("/checkout"),
+                            runner=runner, client=Client(), state=State(),
+                            registry=[SimpleNamespace(provider="openai")])
+                    self.assertEqual("post-mutation",
+                                     resumed.exception.mutation_state)
+                    self.assertEqual(str(patch), resumed.exception.recovery_ref)
+                    self.assertEqual(1, executor.execute.call_count)
+                    invoke.execute(
+                        "owner/repo", 214, "token", pathlib.Path("/checkout"),
+                        runner=runner, client=FakeClient(), state=State(),
+                        registry=[SimpleNamespace(provider="openai")])
+                    self.assertFalse(patch.exists())
+                    self.assertFalse(invoke.recovery_manifest(patch).exists())
+                else:
+                    invoke.execute(
+                        "owner/repo", 214, "token", pathlib.Path("/checkout"),
+                        runner=runner, client=Client(), state=State(),
+                        registry=[SimpleNamespace(provider="openai")])
+                    self.assertFalse(patch.exists())
+                    self.assertFalse(invoke.recovery_manifest(patch).exists())
+
+    def test_orphaned_patch_or_manifest_fails_closed_and_is_preserved(self):
         with tempfile.TemporaryDirectory() as directory:
             patch = pathlib.Path(directory, "story-214.patch")
             for orphan in (patch, invoke.recovery_manifest(patch)):
@@ -409,9 +2721,9 @@ class FailedWorkCheckpointTests(unittest.TestCase):
                     patch.unlink(missing_ok=True)
                     invoke.recovery_manifest(patch).unlink(missing_ok=True)
                     orphan.write_text("orphan")
-                    self.assertFalse(invoke.recovery_available(patch))
-                    self.assertFalse(patch.exists())
-                    self.assertFalse(invoke.recovery_manifest(patch).exists())
+                    with self.assertRaisesRegex(invoke.DeliveryError, "incomplete"):
+                        invoke.recovery_available(patch)
+                    self.assertTrue(orphan.exists())
 
     def test_half_written_checkpoint_pair_is_discarded(self):
         runner = RecordingRunner(["src/app.py"])
@@ -420,12 +2732,15 @@ class FailedWorkCheckpointTests(unittest.TestCase):
             patch = pathlib.Path(invoke.checkpoint_failed_work(
                 pathlib.Path("/old"), pathlib.Path("/checkout"),
                 repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit=self.BASE,
                 scope=["src/app.py"], mutation_state="post-mutation",
-                terminal_outcome="started-mid-work-failed", runner=runner))
+                terminal_outcome="started-mid-work-failed",
+                originating_worker=self.WORKER, runner=runner))
             patch.write_text("replacement interrupted before manifest update")
-            self.assertFalse(invoke.recovery_available(patch))
-            self.assertFalse(patch.exists())
-            self.assertFalse(invoke.recovery_manifest(patch).exists())
+            with self.assertRaisesRegex(invoke.DeliveryError, "digest"):
+                invoke.recovery_available(patch)
+            self.assertTrue(patch.exists())
+            self.assertTrue(invoke.recovery_manifest(patch).exists())
 
     def test_worker_prompt_discloses_recovered_paths_and_outcome(self):
         value = {"recovery_context": {
@@ -477,6 +2792,26 @@ class ProductCheckoutTests(unittest.TestCase):
             with invoke.checkout_for_repo(
                     "o/product", pathlib.Path("/factory"), runner=runner):
                 pass
+
+    def test_main_reports_saved_recovery_when_checkout_selection_fails(self):
+        error = invoke.DeliveryError("clone denied")
+        buffer = io.StringIO()
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ,
+                {"GH_TOKEN": "token", "FACTORY_RECOVERY_DIR": recovery}), \
+             mock.patch.object(invoke, "recovery_available", return_value=True), \
+             mock.patch.object(invoke, "checkout_for_repo", side_effect=error), \
+             mock.patch.object(invoke.sys, "stderr", buffer):
+            code = invoke.main([
+                "--repo", "owner/product", "--story", "214",
+                "--checkout", "/factory", "--reservation", "a" * 32,
+            ])
+        self.assertEqual(1, code)
+        report = buffer.getvalue()
+        self.assertIn('"mutation_state": "post-mutation"', report)
+        self.assertIn(
+            '"terminal_outcome": "recovery-checkout-selection-failed"', report)
+        self.assertIn('"recovery_ref":', report)
 
 
 class RepositoryTestCommandTests(unittest.TestCase):
@@ -648,3 +2983,100 @@ class ScopeSeesFilesTests(unittest.TestCase):
         (root / "forbidden" / "escape.py").write_text("x")
         paths = invoke.changed_paths(root, "HEAD")
         self.assertIn("forbidden/escape.py", paths)
+
+    def test_pending_rename_lists_source_and_destination_paths(self):
+        root = self.repo()
+        source = root / "old.txt"
+        source.write_text("tracked\n")
+        subprocess.run(["git", "add", "old.txt"], cwd=root, check=True)
+        subprocess.run(
+            ["git", "-c", "user.email=t@t", "-c", "user.name=t",
+             "commit", "-qm", "tracked"], cwd=root, check=True)
+        source.rename(root / "new.txt")
+        subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+        self.assertEqual(
+            ["new.txt", "old.txt"], invoke.changed_paths(root, "HEAD"))
+
+    def test_pending_rename_stages_without_naming_vanished_source(self):
+        root = self.repo()
+        source = root / "old.txt"
+        source.write_text("tracked\n")
+        subprocess.run(["git", "add", "old.txt"], cwd=root, check=True)
+        subprocess.run(
+            ["git", "-c", "user.email=t@t", "-c", "user.name=t",
+             "commit", "-qm", "tracked"], cwd=root, check=True)
+        subprocess.run(["git", "mv", "old.txt", "new.txt"], cwd=root,
+                       check=True)
+        invoke.stage_pending_work(root)
+        staged = subprocess.run(
+            ["git", "diff", "--cached", "--name-status"], cwd=root,
+            check=True, capture_output=True, text=True).stdout
+        self.assertIn("old.txt", staged)
+        self.assertIn("new.txt", staged)
+
+    def test_pending_rename_can_be_written_to_recovery_checkpoint(self):
+        root = self.repo()
+        source = root / "old.txt"
+        source.write_text("tracked\n")
+        subprocess.run(["git", "add", "old.txt"], cwd=root, check=True)
+        subprocess.run(
+            ["git", "-c", "user.email=t@t", "-c", "user.name=t",
+             "commit", "-qm", "tracked"], cwd=root, check=True)
+        base = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=root, check=True,
+            capture_output=True, text=True).stdout.strip()
+        subprocess.run(["git", "mv", "old.txt", "new.txt"], cwd=root,
+                       check=True)
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            ref = invoke.checkpoint_failed_work(
+                root, root, repo="owner/repo", story_number=214,
+                default="main", base_ref=base, base_commit=base,
+                scope=["old.txt", "new.txt"],
+                mutation_state="post-mutation",
+                terminal_outcome="worker-crashed",
+                originating_worker={"task": "delivery:owner/repo:214:1"})
+            patch = pathlib.Path(ref).read_text()
+        self.assertIn("rename from old.txt", patch)
+        self.assertIn("rename to new.txt", patch)
+
+    def test_committed_rename_lists_source_and_destination_paths(self):
+        root = self.repo()
+        source = root / "old.txt"
+        source.write_text("tracked\n" * 20)
+        subprocess.run(["git", "add", "old.txt"], cwd=root, check=True)
+        subprocess.run(
+            ["git", "-c", "user.email=t@t", "-c", "user.name=t",
+             "commit", "-qm", "tracked"], cwd=root, check=True)
+        base = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=root, check=True,
+            capture_output=True, text=True).stdout.strip()
+        source.rename(root / "new.txt")
+        subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+        subprocess.run(
+            ["git", "-c", "user.email=t@t", "-c", "user.name=t",
+             "commit", "-qm", "rename"], cwd=root, check=True)
+        self.assertEqual(
+            ["new.txt", "old.txt"], invoke.changed_paths(root, base))
+
+    def test_temporary_cleanup_reads_live_recovery_state(self):
+        state = {"present": False, "patch": pathlib.Path("initial.patch")}
+
+        class CleanupFailureDirectory:
+            def __init__(self, **_): pass
+            def __enter__(self): return "/temporary-worktree"
+            def __exit__(self, *_): raise OSError("temporary cleanup failed")
+
+        with mock.patch.object(invoke.tempfile, "TemporaryDirectory",
+                               CleanupFailureDirectory):
+            with self.assertRaisesRegex(
+                    OSError, "temporary cleanup failed") as caught:
+                with invoke.recovery_aware_temporary_directory(
+                        prefix="story-", recovery_state=lambda: (
+                            state["present"], state["patch"])):
+                    state["present"] = True
+                    state["patch"] = pathlib.Path("created.patch")
+        self.assertEqual("post-mutation", caught.exception.mutation_state)
+        self.assertEqual("recovery-delivery-worktree-lifecycle-failed",
+                         caught.exception.terminal_outcome)
+        self.assertEqual("created.patch", caught.exception.recovery_ref)

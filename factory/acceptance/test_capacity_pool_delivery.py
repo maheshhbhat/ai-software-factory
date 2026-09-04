@@ -76,6 +76,33 @@ class DeliveryCapacityPoolAcceptance(unittest.TestCase):
         self.assertEqual("ambiguous-mutation", result.outcome)
         self.assertEqual(["spark-real"], calls)
 
+    def test_every_started_fallback_reports_its_actual_lease(self):
+        started = []
+        task = "delivery-fallback-lease"
+        registry = self.registry()
+        primary = self.state.reserve(
+            task, "openai", "spark-real", 1, ttl_seconds=300)
+        executor = CapacityExecutor({
+            "openai": ProviderAdapter(
+                "openai", lambda **_: AttemptResult(
+                    "quota", consumed_budget_units=0)),
+            "anthropic": ProviderAdapter(
+                "anthropic", lambda **_: AttemptResult(
+                    "success", "done", consumed_budget_units=1)),
+        }, self.state)
+        result = executor.execute(
+            task_key=task,
+            request=POLICIES["delivery"].request(),
+            registry=registry, payload={},
+            reservation_id=primary.lease_id,
+            on_started=lambda lease: started.append(lease.lease_id))
+        self.assertEqual("success", result.outcome)
+        self.assertEqual(2, len(started))
+        self.assertEqual(2, len(set(started)))
+        self.assertEqual(started,
+                         [attempt["reservation_id"]
+                          for attempt in result.attempts])
+
     def test_dispatcher_and_worker_contain_no_provider_selection(self):
         worker = (ROOT / "factory/agents/worker/invoke.py").read_text()
         dispatcher = (ROOT / "factory/dispatcher/dispatcher.py").read_text()
@@ -107,8 +134,10 @@ class DeliveryCapacityPoolAcceptance(unittest.TestCase):
 
         class Client:
             created = None
-            def api(self, path, **_):
+            def api(self, path, *, method="GET", value=None):
                 self.assert_path = path
+                if method == "POST" and path.endswith("/comments"):
+                    return value
                 return {"default_branch": "main"}
             def issue(self, number):
                 return ({"number": 21, "body": story_body,
@@ -123,7 +152,7 @@ class DeliveryCapacityPoolAcceptance(unittest.TestCase):
                 return [] if self.created is None else [self.created]
             def create_pr(self, title, head, base, body):
                 self.created = {"number": 9, "body": body,
-                                "head": {"ref": head, "sha": "abc123"}}
+                                "head": {"ref": head, "sha": "a" * 40}}
                 return self.created
 
         mutated, calls = False, []
@@ -135,9 +164,11 @@ class DeliveryCapacityPoolAcceptance(unittest.TestCase):
                 mutated = True
                 stdout = "delivery complete"
             elif command[:3] == ["git", "status", "--porcelain"]:
-                stdout = "?? src/app.py\n" if mutated else ""
+                stdout = "?? src/app.py\0" if mutated else ""
+            elif command[:4] == ["git", "diff", "--binary", "--cached"]:
+                stdout = "diff --git a/src/app.py b/src/app.py\n"
             elif command[:2] == ["git", "rev-parse"]:
-                stdout = "abc123\n"
+                stdout = "a" * 40 + "\n"
             return subprocess.CompletedProcess(command, 0, stdout, "")
 
         model = ModelCapacity("terra", "openai", Tier.BALANCED, CAPS)
