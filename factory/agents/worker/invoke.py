@@ -958,9 +958,10 @@ def reconcile_recovery_push(patch: pathlib.Path, observed_head: str, *,
             raise ValueError("invalid pending recovery provenance")
     except (AttributeError, TypeError, ValueError) as exc:
         raise RecoveryError("pending recovery checkpoint is invalid") from exc
-    validate_recovery_head_content(
-        patch, pending, checkout, runner=runner)
-    if pending != observed_head:
+    if pending == observed_head:
+        validate_recovery_head_content(
+            patch, pending, checkout, runner=runner)
+    else:
         if not valid_commit(observed_head):
             raise RecoveryError("observed recovery branch head is invalid")
         try:
@@ -976,6 +977,19 @@ def reconcile_recovery_push(patch: pathlib.Path, observed_head: str, *,
         except Exception as exc:
             raise RecoveryError(
                 "observed recovery branch head could not be inspected") from exc
+        try:
+            git(["cat-file", "-e", f"{pending}^{{commit}}"], checkout,
+                runner=runner)
+        except DeliveryError:
+            # Fetching the observed history would have brought in `pending`
+            # if it were an ancestor. Its continued absence proves the push did
+            # not land on this branch, so the authenticated patch may replay.
+            return
+        except Exception as exc:
+            raise RecoveryError(
+                "pending recovery head could not be inspected") from exc
+        validate_recovery_head_content(
+            patch, pending, checkout, runner=runner)
         try:
             ancestry = runner(
                 ["git", "merge-base", "--is-ancestor", pending,

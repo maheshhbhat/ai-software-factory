@@ -1904,6 +1904,45 @@ class FailedWorkCheckpointTests(unittest.TestCase):
             self.assertFalse(any(command and command[0] in ("codex", "claude")
                                  for command, _ in runner.calls))
 
+    def test_absent_pending_object_remains_replayable_after_observed_fetch(self):
+        class FreshCheckoutRunner(RecordingRunner):
+            observed_fetched = False
+
+            def __call__(self, cmd, **kwargs):
+                if cmd[:3] == ["git", "cat-file", "-e"]:
+                    self.calls.append((list(cmd), kwargs.get("env")))
+                    commit = cmd[-1].removesuffix("^{commit}")
+                    present = commit == "e" * 40 and self.observed_fetched
+                    return subprocess.CompletedProcess(
+                        cmd, 0 if present else 1, "", "missing")
+                if cmd[:4] == ["git", "fetch", "--no-tags", "origin"]:
+                    self.observed_fetched = True
+                return super().__call__(cmd, **kwargs)
+
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = FreshCheckoutRunner(["src/app.py"])
+            patch = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"),
+                repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit=self.BASE,
+                scope=["src/app.py"], mutation_state="post-mutation",
+                terminal_outcome="started-mid-work-failed",
+                originating_worker=self.WORKER, runner=runner))
+            invoke.mark_recovery_push_pending(patch, "d" * 40)
+            invoke.reconcile_recovery_push(
+                patch, "e" * 40, repo="owner/repo", story_number=214,
+                checkout=pathlib.Path("/checkout"), runner=runner)
+            manifest = json.loads(invoke.recovery_manifest(patch).read_text())
+            self.assertEqual("d" * 40, manifest["pending_head"])
+            self.assertNotIn("delivered_head", manifest)
+            commands = [command for command, _ in runner.calls]
+            observed_fetch = commands.index(
+                ["git", "fetch", "--no-tags", "origin", "e" * 40])
+            pending_probe = commands.index(
+                ["git", "cat-file", "-e", "d" * 40 + "^{commit}"])
+            self.assertLess(observed_fetch, pending_probe)
+
     def test_pending_promotion_write_failure_keeps_recovery_accounting(self):
         with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
                 invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
