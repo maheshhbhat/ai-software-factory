@@ -16,6 +16,15 @@ import runlog
 
 
 class ParsingTests(unittest.TestCase):
+    def test_recovery_timestamp_requires_canonical_clock_shape(self):
+        self.assertTrue(invoke.valid_utc_timestamp("2026-09-04T00:00:00Z"))
+        self.assertTrue(invoke.valid_utc_timestamp(
+            "2026-09-04T00:00:00.123456Z"))
+        for value in ("2026-09-04T00Z", "20260904T000000Z",
+                      "2026-W36-4T00:00:00Z"):
+            with self.subTest(value=value):
+                self.assertFalse(invoke.valid_utc_timestamp(value))
+
     def test_bounds_are_read_from_story(self):
         value = invoke.parse_bounds("### Spend cap\n\n$40 / 90 min\n")
         self.assertEqual((value.max_usd, value.timeout), (40.0, 5400))
@@ -876,6 +885,32 @@ class FailedWorkCheckpointTests(unittest.TestCase):
                     runner=runner, client=client)
             self.assertEqual("post-mutation", caught.exception.mutation_state)
             self.assertEqual(str(patch), caught.exception.recovery_ref)
+
+    def test_durable_pr_replay_revalidates_recovery_scope_before_cleanup(self):
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = RecordingRunner(["other.py"])
+            patch = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"),
+                repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit=self.BASE,
+                scope=["other.py"], mutation_state="post-mutation",
+                terminal_outcome="started-mid-work-failed",
+                originating_worker=self.WORKER, runner=runner))
+            invoke.mark_recovery_pushed(patch, "c" * 40)
+            client = FakeClient()
+            client.created = {
+                "number": 9,
+                "body": "Story: #214\n\n" + invoke.marker(214, "5") + "\n",
+                "head": {"ref": "story/214-delivery", "sha": "c" * 40},
+            }
+            with self.assertRaisesRegex(invoke.RecoveryError,
+                                        "provenance") as caught:
+                invoke.execute(
+                    "owner/repo", 214, "token", pathlib.Path("/checkout"),
+                    runner=runner, client=client)
+            self.assertEqual(str(patch), caught.exception.recovery_ref)
+            self.assertTrue(patch.exists())
 
     def test_pending_push_is_reconciled_without_relaunch(self):
         class RemoteRunner(RecordingRunner):

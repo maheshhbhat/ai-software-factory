@@ -58,6 +58,8 @@ FAILURE_MARKER = "FACTORY_WORKER_FAILURE_V1="
 RECOVERY_SCHEMA_VERSION = 2
 RECOVERY_TRUST = "untrusted-partial-work-from-failed-worker"
 FULL_COMMIT = re.compile(r"^[0-9a-f]{40}$")
+UTC_TIMESTAMP = re.compile(
+    r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z$")
 
 
 def valid_commit(value) -> bool:
@@ -66,7 +68,7 @@ def valid_commit(value) -> bool:
 
 def valid_utc_timestamp(value) -> bool:
     """Return whether value is a full ISO datetime with canonical UTC suffix."""
-    if not isinstance(value, str) or "T" not in value or not value.endswith("Z"):
+    if not isinstance(value, str) or UTC_TIMESTAMP.fullmatch(value) is None:
         return False
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
@@ -915,6 +917,9 @@ def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
                 if reservation else f"delivery:{repo}:{story_number}:{version}")
     delivery_trace = obs.story_trace_id(repo, story_number, events)
     durable = marker(story_number, version)
+    scope, error = merge_gate.parse_scope(story.get("body") or "")
+    if error:
+        raise DeliveryError(f"invalid Story scope: {error}")
     pulls = linked_prs(story_number, client.pull_requests())
     saved_recovery = recovery_patch(repo, story_number)
     try:
@@ -930,7 +935,8 @@ def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
                     saved_recovery, pull["head"]["sha"], repo=repo,
                     story_number=story_number)
                 delivered_head = pushed_recovery_head(
-                    saved_recovery, repo=repo, story_number=story_number)
+                    saved_recovery, repo=repo, story_number=story_number,
+                    scope=scope)
             except RecoveryError as exc:
                 exc.recovery_ref = str(saved_recovery)
                 raise
@@ -944,9 +950,6 @@ def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
         return Delivery(story_number, project_number, pull["head"]["ref"],
                         pull["number"], pull["head"]["sha"], True)
 
-    scope, error = merge_gate.parse_scope(story.get("body") or "")
-    if error:
-        raise DeliveryError(f"invalid Story scope: {error}")
     protected = protected_control_scope(repo, scope)
     if protected:
         raise DeliveryError(
