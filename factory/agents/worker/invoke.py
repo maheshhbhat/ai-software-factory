@@ -604,6 +604,8 @@ def validate_pushed_recovery(value: dict, patch_text: str | None, *,
     paths = value.get("recovered_paths")
     if (not valid_commit(value.get("base_commit")) or
             not valid_commit(head) or
+            "pending_head" in value or
+            "push_prepared_at" in value or
             not isinstance(paths, list) or not paths or
             any(not isinstance(path, str) or not path for path in paths) or
             (patch_paths is not None and sorted(set(paths)) != patch_paths) or
@@ -1113,13 +1115,22 @@ def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
             "FACTORY_SELF_MODIFICATION_FORBIDDEN: protected Story scope: "
             + ", ".join(protected))
     branch = pulls[0]["head"]["ref"] if pulls else f"story/{story_number}-delivery"
-    remote = git(["ls-remote", "--heads", "origin", branch], checkout,
-                 runner=runner).stdout.strip()
-    if remote:
-        git(["fetch", "origin", f"refs/heads/{branch}:refs/remotes/origin/{branch}"],
-            checkout, runner=runner)
-    base_ref = f"origin/{branch}" if remote else f"origin/{default}"
-    base_commit = git(["rev-parse", base_ref], checkout, runner=runner).stdout.strip()
+    try:
+        remote = git(["ls-remote", "--heads", "origin", branch], checkout,
+                     runner=runner).stdout.strip()
+        if remote:
+            git(["fetch", "origin",
+                 f"refs/heads/{branch}:refs/remotes/origin/{branch}"],
+                checkout, runner=runner)
+        base_ref = f"origin/{branch}" if remote else f"origin/{default}"
+        base_commit = git(["rev-parse", base_ref], checkout,
+                          runner=runner).stdout.strip()
+    except Exception as exc:
+        if has_recovery:
+            setattr(exc, "mutation_state", "post-mutation")
+            setattr(exc, "terminal_outcome", "recovery-base-resolution-failed")
+            setattr(exc, "recovery_ref", str(saved_recovery))
+        raise
     try:
         value = build_input(client, story, project, repo=repo,
                             pull_request=pulls[0] if pulls else None)

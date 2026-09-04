@@ -932,6 +932,62 @@ class FailedWorkCheckpointTests(unittest.TestCase):
             self.assertFalse(any(command and command[0] in ("codex", "claude")
                                  for command, _ in runner.calls))
 
+    def test_delivered_manifest_rejects_stale_pending_fields(self):
+        for field, value in (("pending_head", "e" * 40),
+                             ("push_prepared_at", "2026-09-04T00:00:00Z")):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as recovery, \
+                    mock.patch.dict(invoke.os.environ,
+                                    {"FACTORY_RECOVERY_DIR": recovery}):
+                runner = RecordingRunner(["src/app.py"])
+                patch = pathlib.Path(invoke.checkpoint_failed_work(
+                    pathlib.Path("/old"), pathlib.Path("/checkout"),
+                    repo="owner/repo", story_number=214, default="main",
+                    base_ref="origin/main", base_commit=self.BASE,
+                    scope=["src/app.py"], mutation_state="post-mutation",
+                    terminal_outcome="started-mid-work-failed",
+                    originating_worker=self.WORKER, runner=runner))
+                invoke.mark_recovery_pushed(patch, "d" * 40)
+                manifest = invoke.recovery_manifest(patch)
+                record = json.loads(manifest.read_text())
+                record[field] = value
+                manifest.write_text(json.dumps(record))
+                with self.assertRaisesRegex(invoke.RecoveryError,
+                                            "provenance"):
+                    invoke.pushed_recovery_head(
+                        patch, repo="owner/repo", story_number=214,
+                        scope=["src/app.py"], runner=runner)
+                self.assertTrue(patch.exists())
+
+    def test_base_resolution_failure_preserves_recovery_accounting(self):
+        class BaseFailureRunner(RecordingRunner):
+            def __call__(self, cmd, **kwargs):
+                if cmd[:2] == ["git", "rev-parse"]:
+                    return subprocess.CompletedProcess(
+                        cmd, 1, "", "base unavailable")
+                return super().__call__(cmd, **kwargs)
+
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = BaseFailureRunner(["src/app.py"])
+            patch = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"),
+                repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit=self.BASE,
+                scope=["src/app.py"], mutation_state="post-mutation",
+                terminal_outcome="started-mid-work-failed",
+                originating_worker=self.WORKER, runner=runner))
+            with self.assertRaisesRegex(invoke.DeliveryError,
+                                        "base unavailable") as caught:
+                invoke.execute(
+                    "owner/repo", 214, "token", pathlib.Path("/checkout"),
+                    runner=runner, client=FakeClient())
+            self.assertEqual("post-mutation", caught.exception.mutation_state)
+            self.assertEqual("recovery-base-resolution-failed",
+                             caught.exception.terminal_outcome)
+            self.assertEqual(str(patch), caught.exception.recovery_ref)
+            self.assertFalse(any(command and command[0] in ("codex", "claude")
+                                 for command, _ in runner.calls))
+
     def test_date_only_pending_timestamp_fails_before_engine_relaunch(self):
         with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
                 invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
