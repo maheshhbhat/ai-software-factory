@@ -1137,33 +1137,49 @@ def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
             runner=subprocess.run, client: GitHub | None = None,
             state: CapacityState | None = None, registry=None,
             reservation: str | None = None) -> Delivery:
-    client = client or GitHub(repo, token)
-    metadata = client.api("")  # read preflight before any write
-    default = metadata.get("default_branch")
-    if not default:
-        raise DeliveryError("repository access constraint failed: default branch unavailable")
-    story = client.issue(story_number)
-    project_number = int(section(story.get("body") or "", "Project").removeprefix("#"))
-    project = client.issue(project_number)
-    bounds = parse_bounds(story.get("body") or "")
-    if timeout is not None:
-        bounds = Bounds(bounds.max_usd, min(bounds.timeout, timeout))
-    if max_usd is not None:
-        bounds = Bounds(min(bounds.max_usd, max_usd), bounds.timeout)
-    if bounds.timeout <= 0 or bounds.max_usd <= 0:
-        raise DeliveryError("effective timeout and spend bounds must be positive")
-    events = client.pages(f"/issues/{story_number}/timeline")
-    version = state_version(events)
-    task_key = (capacity_admission.delivery_task_key(
-                    repo, story, next_attempt=False)
-                if reservation else f"delivery:{repo}:{story_number}:{version}")
-    delivery_trace = obs.story_trace_id(repo, story_number, events)
-    durable = marker(story_number, version)
-    scope, error = merge_gate.parse_scope(story.get("body") or "")
-    if error:
-        raise DeliveryError(f"invalid Story scope: {error}")
-    pulls = linked_prs(story_number, client.pull_requests())
     saved_recovery = recovery_patch(repo, story_number)
+    try:
+        discovered_recovery = recovery_available(
+            saved_recovery, repo=repo, story_number=story_number, scope=None,
+            runner=runner)
+    except RecoveryError as exc:
+        exc.recovery_ref = str(saved_recovery)
+        raise
+    client = client or GitHub(repo, token)
+    try:
+        metadata = client.api("")  # read preflight before any write
+        default = metadata.get("default_branch")
+        if not default:
+            raise DeliveryError(
+                "repository access constraint failed: default branch unavailable")
+        story = client.issue(story_number)
+        project_number = int(
+            section(story.get("body") or "", "Project").removeprefix("#"))
+        project = client.issue(project_number)
+        bounds = parse_bounds(story.get("body") or "")
+        if timeout is not None:
+            bounds = Bounds(bounds.max_usd, min(bounds.timeout, timeout))
+        if max_usd is not None:
+            bounds = Bounds(min(bounds.max_usd, max_usd), bounds.timeout)
+        if bounds.timeout <= 0 or bounds.max_usd <= 0:
+            raise DeliveryError("effective timeout and spend bounds must be positive")
+        events = client.pages(f"/issues/{story_number}/timeline")
+        version = state_version(events)
+        task_key = (capacity_admission.delivery_task_key(
+                        repo, story, next_attempt=False)
+                    if reservation else f"delivery:{repo}:{story_number}:{version}")
+        delivery_trace = obs.story_trace_id(repo, story_number, events)
+        durable = marker(story_number, version)
+        scope, error = merge_gate.parse_scope(story.get("body") or "")
+        if error:
+            raise DeliveryError(f"invalid Story scope: {error}")
+        pulls = linked_prs(story_number, client.pull_requests())
+    except Exception as exc:
+        if discovered_recovery:
+            setattr(exc, "mutation_state", "post-mutation")
+            setattr(exc, "terminal_outcome", "recovery-initial-preflight-failed")
+            setattr(exc, "recovery_ref", str(saved_recovery))
+        raise
     try:
         has_recovery = recovery_available(
             saved_recovery, repo=repo, story_number=story_number, scope=scope,
@@ -1285,8 +1301,15 @@ def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
         worktree = pathlib.Path(temp)
         recovery_context = {"present": False}
         restored_state = None
-        git(["worktree", "add", "--detach", str(worktree), base_ref], checkout,
-            runner=runner)
+        try:
+            git(["worktree", "add", "--detach", str(worktree), base_ref],
+                checkout, runner=runner)
+        except Exception as exc:
+            if has_recovery:
+                setattr(exc, "mutation_state", "post-mutation")
+                setattr(exc, "terminal_outcome", "recovery-worktree-creation-failed")
+                setattr(exc, "recovery_ref", str(saved_recovery))
+            raise
         try:
             if has_recovery:
                 recovery_context = restore_failed_work(

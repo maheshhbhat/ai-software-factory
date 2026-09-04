@@ -918,6 +918,61 @@ class FailedWorkCheckpointTests(unittest.TestCase):
             self.assertFalse(any(command and command[0] in ("codex", "claude")
                                  for command, _ in runner.calls))
 
+    def test_initial_remote_preflight_failure_preserves_recovery_accounting(self):
+        class InitialFailureClient(FakeClient):
+            def api(self, path, **kwargs):
+                if path == "":
+                    raise OSError("repository preflight failed")
+                return super().api(path, **kwargs)
+
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = RecordingRunner(["src/app.py"])
+            patch = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"),
+                repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit=self.BASE,
+                scope=["src/app.py"], mutation_state="post-mutation",
+                terminal_outcome="started-mid-work-failed",
+                originating_worker=self.WORKER, runner=runner))
+            with self.assertRaisesRegex(
+                    OSError, "repository preflight failed") as caught:
+                invoke.execute(
+                    "owner/repo", 214, "token", pathlib.Path("/checkout"),
+                    runner=runner, client=InitialFailureClient())
+            self.assertEqual("post-mutation", caught.exception.mutation_state)
+            self.assertEqual("recovery-initial-preflight-failed",
+                             caught.exception.terminal_outcome)
+            self.assertEqual(str(patch), caught.exception.recovery_ref)
+
+    def test_worktree_creation_failure_preserves_recovery_accounting(self):
+        class WorktreeFailureRunner(RecordingRunner):
+            def __call__(self, cmd, **kwargs):
+                if cmd[:3] == ["git", "worktree", "add"]:
+                    return subprocess.CompletedProcess(
+                        cmd, 1, "", "cannot create worktree")
+                return super().__call__(cmd, **kwargs)
+
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = WorktreeFailureRunner(["src/app.py"])
+            patch = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"),
+                repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit=self.BASE,
+                scope=["src/app.py"], mutation_state="post-mutation",
+                terminal_outcome="started-mid-work-failed",
+                originating_worker=self.WORKER, runner=runner))
+            with self.assertRaisesRegex(
+                    invoke.DeliveryError, "cannot create worktree") as caught:
+                invoke.execute(
+                    "owner/repo", 214, "token", pathlib.Path("/checkout"),
+                    runner=runner, client=FakeClient())
+            self.assertEqual("post-mutation", caught.exception.mutation_state)
+            self.assertEqual("recovery-worktree-creation-failed",
+                             caught.exception.terminal_outcome)
+            self.assertEqual(str(patch), caught.exception.recovery_ref)
+
     def test_correction_event_failure_preserves_recovery_accounting(self):
         with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
                 invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
