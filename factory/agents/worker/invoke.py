@@ -1136,11 +1136,19 @@ def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
             except Exception as exc:
                 mark_finalization_failure(exc, saved_recovery)
                 raise
-            obs.process_event(
-                "delivery.pull-request.written", trace_id=delivery_trace,
-                repo=repo, story=story_number, project=project_number,
-                pull_request=fresh["number"], head=delivered_head)
-            remove_delivered_recovery(saved_recovery)
+            try:
+                if fresh.get("head", {}).get("sha") != delivered_head:
+                    raise RecoveryError(
+                        "read-back pull request head does not match recovery head")
+                obs.process_event(
+                    "delivery.pull-request.written", trace_id=delivery_trace,
+                    repo=repo, story=story_number, project=project_number,
+                    pull_request=fresh["number"], head=delivered_head)
+                remove_delivered_recovery(saved_recovery)
+            except Exception as exc:
+                if not getattr(exc, "recovery_ref", ""):
+                    mark_finalization_failure(exc, saved_recovery)
+                raise
             return Delivery(story_number, project_number, branch, fresh["number"],
                             delivered_head, False)
     originating_worker = {"task": task_key}
@@ -1362,11 +1370,19 @@ def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
         if has_recovery:
             mark_finalization_failure(exc, saved_recovery)
         raise
-    obs.process_event("delivery.pull-request.written", trace_id=delivery_trace,
-                      repo=repo, story=story_number, project=project_number,
-                      pull_request=fresh["number"], head=head)
-    if has_recovery:
-        remove_delivered_recovery(saved_recovery)
+    try:
+        if fresh.get("head", {}).get("sha") != head:
+            raise DeliveryError(
+                "read-back pull request head does not match delivered head")
+        obs.process_event("delivery.pull-request.written", trace_id=delivery_trace,
+                          repo=repo, story=story_number, project=project_number,
+                          pull_request=fresh["number"], head=head)
+        if has_recovery:
+            remove_delivered_recovery(saved_recovery)
+    except Exception as exc:
+        if has_recovery and not getattr(exc, "recovery_ref", ""):
+            mark_finalization_failure(exc, saved_recovery)
+        raise
     return Delivery(story_number, project_number, branch, fresh["number"], head, False)
 
 

@@ -215,7 +215,7 @@ class FakeClient:
 
     def create_pr(self, title, head, base, body):
         self.created = {"number": 9, "body": body,
-                        "head": {"ref": head, "sha": "deadbeef"}}
+                        "head": {"ref": head, "sha": "d" * 40}}
         return self.created
 
 
@@ -1394,6 +1394,62 @@ class FailedWorkCheckpointTests(unittest.TestCase):
             self.assertEqual("post-mutation", caught.exception.mutation_state)
             self.assertEqual("recovery-cleanup-failed",
                              caught.exception.terminal_outcome)
+            self.assertEqual(str(patch), caught.exception.recovery_ref)
+            self.assertTrue(patch.exists())
+
+    def test_durable_delivery_event_failure_preserves_accounting(self):
+        def fail_pull_event(name, **_fields):
+            if name == "delivery.pull-request.written":
+                raise OSError("event fsync failed")
+
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = RecordingRunner(["src/app.py"])
+            patch = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"),
+                repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit="d" * 40,
+                scope=["src/app.py"], mutation_state="post-mutation",
+                terminal_outcome="started-mid-work-failed",
+                originating_worker=self.WORKER, runner=runner))
+            invoke.mark_recovery_pushed(patch, "d" * 40)
+            with mock.patch.object(invoke.obs, "process_event",
+                                   side_effect=fail_pull_event):
+                with self.assertRaisesRegex(OSError,
+                                            "event fsync failed") as caught:
+                    invoke.execute(
+                        "owner/repo", 214, "token", pathlib.Path("/checkout"),
+                        runner=runner, client=FakeClient())
+            self.assertEqual("post-mutation", caught.exception.mutation_state)
+            self.assertEqual("delivery-finalization-failed",
+                             caught.exception.terminal_outcome)
+            self.assertEqual(str(patch), caught.exception.recovery_ref)
+            self.assertTrue(patch.exists())
+
+    def test_read_back_head_drift_preserves_recovery_checkpoint(self):
+        class DriftClient(FakeClient):
+            def create_pr(self, title, head, base, body):
+                created = super().create_pr(title, head, base, body)
+                created["head"]["sha"] = "e" * 40
+                return created
+
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = RecordingRunner(["src/app.py"])
+            patch = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"),
+                repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit="d" * 40,
+                scope=["src/app.py"], mutation_state="post-mutation",
+                terminal_outcome="started-mid-work-failed",
+                originating_worker=self.WORKER, runner=runner))
+            invoke.mark_recovery_pushed(patch, "d" * 40)
+            with self.assertRaisesRegex(
+                    invoke.RecoveryError,
+                    "read-back pull request head") as caught:
+                invoke.execute(
+                    "owner/repo", 214, "token", pathlib.Path("/checkout"),
+                    runner=runner, client=DriftClient())
             self.assertEqual(str(patch), caught.exception.recovery_ref)
             self.assertTrue(patch.exists())
 
