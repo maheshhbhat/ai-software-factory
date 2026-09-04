@@ -1868,6 +1868,42 @@ class FailedWorkCheckpointTests(unittest.TestCase):
             self.assertFalse(any(command and command[0] in ("codex", "claude")
                                  for command, _ in runner.calls))
 
+    def test_advanced_branch_promotes_ancestor_pending_before_replay(self):
+        class AdvancedRemoteRunner(RecordingRunner):
+            def __call__(self, cmd, **kwargs):
+                result = super().__call__(cmd, **kwargs)
+                if cmd[:3] == ["git", "ls-remote", "--heads"]:
+                    return subprocess.CompletedProcess(
+                        cmd, 0,
+                        "e" * 40 + "\trefs/heads/story/214-delivery\n", "")
+                if (cmd[:2] == ["git", "rev-parse"] and
+                        cmd[-1] == "origin/story/214-delivery"):
+                    return subprocess.CompletedProcess(cmd, 0, "e" * 40 + "\n", "")
+                return result
+
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = AdvancedRemoteRunner(["src/app.py"])
+            patch = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"),
+                repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit=self.BASE,
+                scope=["src/app.py"], mutation_state="post-mutation",
+                terminal_outcome="started-mid-work-failed",
+                originating_worker=self.WORKER, runner=runner))
+            invoke.mark_recovery_push_pending(patch, "d" * 40)
+            with self.assertRaisesRegex(
+                    invoke.RecoveryError, "does not match branch head") as caught:
+                invoke.execute(
+                    "owner/repo", 214, "token", pathlib.Path("/checkout"),
+                    runner=runner, client=FakeClient())
+            manifest = json.loads(invoke.recovery_manifest(patch).read_text())
+            self.assertEqual("d" * 40, manifest["delivered_head"])
+            self.assertNotIn("pending_head", manifest)
+            self.assertEqual(str(patch), caught.exception.recovery_ref)
+            self.assertFalse(any(command and command[0] in ("codex", "claude")
+                                 for command, _ in runner.calls))
+
     def test_pending_promotion_write_failure_keeps_recovery_accounting(self):
         with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
                 invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
