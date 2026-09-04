@@ -438,9 +438,19 @@ def checkout_for_repo(repo: str, configured: pathlib.Path,
 
 def changed_paths(worktree: pathlib.Path, base: str,
                   runner=subprocess.run) -> list[str]:
-    tracked = [path for path in git(
-        ["diff", "--name-only", "-z", f"{base}...HEAD"], worktree,
-        runner=runner).stdout.split("\0") if path]
+    tracked_items = [item for item in git(
+        ["diff", "--name-status", "-z", f"{base}...HEAD"], worktree,
+        runner=runner).stdout.split("\0") if item]
+    tracked = []
+    index = 0
+    while index < len(tracked_items):
+        status = tracked_items[index]
+        index += 1
+        path_count = 2 if status.startswith(("R", "C")) else 1
+        if index + path_count > len(tracked_items):
+            raise DeliveryError("Git returned incomplete committed path status")
+        tracked.extend(tracked_items[index:index + path_count])
+        index += path_count
     # --untracked-files=all: plain --porcelain collapses a brand-new directory
     # to one `dir/` line, which no `dir/sub/**` scope can match — the worker
     # then refuses its own in-scope work (#358, found live by fixture #357).

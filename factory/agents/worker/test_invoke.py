@@ -285,8 +285,8 @@ class RecordingRunner:
         self.calls.append((list(cmd), kwargs.get("env")))
         out = ""
         code = 0
-        if cmd[:3] == ["git", "diff", "--name-only"]:
-            out = "\0".join(self.changed) + ("\0" if self.changed else "")
+        if cmd[:3] == ["git", "diff", "--name-status"]:
+            out = "".join(f"M\0{path}\0" for path in self.changed)
         elif cmd[:3] == ["git", "status", "--porcelain"]:
             out = "".join(f" M {path}\0" for path in self.changed)
         elif cmd[:4] == ["git", "diff", "--binary", "--cached"]:
@@ -1661,3 +1661,22 @@ class ScopeSeesFilesTests(unittest.TestCase):
         subprocess.run(["git", "add", "-A"], cwd=root, check=True)
         self.assertEqual(
             ["new.txt", "old.txt"], invoke.changed_paths(root, "HEAD"))
+
+    def test_committed_rename_lists_source_and_destination_paths(self):
+        root = self.repo()
+        source = root / "old.txt"
+        source.write_text("tracked\n" * 20)
+        subprocess.run(["git", "add", "old.txt"], cwd=root, check=True)
+        subprocess.run(
+            ["git", "-c", "user.email=t@t", "-c", "user.name=t",
+             "commit", "-qm", "tracked"], cwd=root, check=True)
+        base = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=root, check=True,
+            capture_output=True, text=True).stdout.strip()
+        source.rename(root / "new.txt")
+        subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+        subprocess.run(
+            ["git", "-c", "user.email=t@t", "-c", "user.name=t",
+             "commit", "-qm", "rename"], cwd=root, check=True)
+        self.assertEqual(
+            ["new.txt", "old.txt"], invoke.changed_paths(root, base))
