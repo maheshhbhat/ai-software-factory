@@ -873,6 +873,17 @@ def mark_finalization_failure(exc: Exception, patch: pathlib.Path) -> None:
     setattr(exc, "recovery_ref", str(patch))
 
 
+def remove_delivered_recovery(patch: pathlib.Path) -> None:
+    """Clean up durable recovery without losing post-mutation accounting."""
+    try:
+        remove_recovery(patch)
+    except Exception as exc:
+        setattr(exc, "mutation_state", "post-mutation")
+        setattr(exc, "terminal_outcome", "recovery-cleanup-failed")
+        setattr(exc, "recovery_ref", str(patch))
+        raise
+
+
 def checkpoint_failed_work(worktree: pathlib.Path, checkout: pathlib.Path, *,
                            repo: str, story_number: int, default: str,
                            base_ref: str, base_commit: str,
@@ -1066,7 +1077,7 @@ def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
                 exc.recovery_ref = str(saved_recovery)
                 raise exc
             if delivered_head == pull["head"]["sha"]:
-                remove_recovery(saved_recovery)
+                remove_delivered_recovery(saved_recovery)
         return Delivery(story_number, project_number, pull["head"]["ref"],
                         pull["number"], pull["head"]["sha"], True)
 
@@ -1129,7 +1140,7 @@ def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
                 "delivery.pull-request.written", trace_id=delivery_trace,
                 repo=repo, story=story_number, project=project_number,
                 pull_request=fresh["number"], head=delivered_head)
-            remove_recovery(saved_recovery)
+            remove_delivered_recovery(saved_recovery)
             return Delivery(story_number, project_number, branch, fresh["number"],
                             delivered_head, False)
     originating_worker = {"task": task_key}
@@ -1355,7 +1366,7 @@ def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
                       repo=repo, story=story_number, project=project_number,
                       pull_request=fresh["number"], head=head)
     if has_recovery:
-        remove_recovery(saved_recovery)
+        remove_delivered_recovery(saved_recovery)
     return Delivery(story_number, project_number, branch, fresh["number"], head, False)
 
 
