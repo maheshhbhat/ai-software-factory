@@ -457,6 +457,39 @@ class FailedWorkCheckpointTests(unittest.TestCase):
             self.assertFalse(any(path.exists()
                                  for path in invoke.recovery_previous(patch)))
 
+    def test_prior_generation_restore_failure_is_recovery_aware(self):
+        with tempfile.TemporaryDirectory() as recovery:
+            patch = pathlib.Path(recovery, "story.patch")
+            manifest = invoke.recovery_manifest(patch)
+            previous_patch, previous_manifest = invoke.recovery_previous(patch)
+            for path, value in ((patch, "new"), (manifest, "{}"),
+                                (previous_patch, "old"),
+                                (previous_manifest, "{}")):
+                path.write_text(value)
+            with mock.patch.object(
+                    invoke, "_write_recovery_file",
+                    side_effect=OSError("restore fsync failed")):
+                with self.assertRaisesRegex(
+                        invoke.RecoveryError,
+                        "prior recovery generation") as caught:
+                    invoke.recovery_available(
+                        patch, repo="owner/repo", story_number=214)
+            self.assertEqual("post-mutation", caught.exception.mutation_state)
+            self.assertEqual("recovery-invalid",
+                             caught.exception.terminal_outcome)
+
+    def test_successful_recovery_removal_flushes_both_directory_states(self):
+        with tempfile.TemporaryDirectory() as recovery:
+            patch = pathlib.Path(recovery, "story.patch")
+            patch.write_text("patch")
+            invoke.recovery_manifest(patch).write_text("{}")
+            with mock.patch.object(invoke.os, "fsync",
+                                   wraps=invoke.os.fsync) as fsync:
+                invoke.remove_recovery(patch)
+            self.assertEqual(2, fsync.call_count)
+            self.assertFalse(patch.exists())
+            self.assertFalse(invoke.recovery_manifest(patch).exists())
+
     def test_in_scope_changes_are_committed_to_a_stable_local_recovery_ref(self):
         runner = RecordingRunner(["src/app.py"])
         with tempfile.TemporaryDirectory() as recovery:

@@ -559,11 +559,15 @@ def _unlink_recovery_files(*paths: pathlib.Path) -> None:
     for path in paths:
         path.unlink(missing_ok=True)
     if paths:
-        directory = os.open(paths[0].parent, os.O_RDONLY)
-        try:
-            os.fsync(directory)
-        finally:
-            os.close(directory)
+        _fsync_recovery_directory(paths[0].parent)
+
+
+def _fsync_recovery_directory(directory_path: pathlib.Path) -> None:
+    directory = os.open(directory_path, os.O_RDONLY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
 
 
 def recovery_patch_paths(patch: pathlib.Path, *, runner=subprocess.run) -> list[str]:
@@ -688,10 +692,15 @@ def recovery_available(patch: pathlib.Path, *, repo: str | None = None,
         # A replacement is not committed until both old-generation backups
         # are removed. If the host stopped anywhere before then, restore the
         # complete prior generation and retry from known resumable evidence.
-        _write_recovery_file(patch, previous_patch.read_text(encoding="utf-8"))
-        _write_recovery_file(
-            manifest, previous_manifest.read_text(encoding="utf-8"))
-        _unlink_recovery_files(previous_patch, previous_manifest)
+        try:
+            _write_recovery_file(
+                patch, previous_patch.read_text(encoding="utf-8"))
+            _write_recovery_file(
+                manifest, previous_manifest.read_text(encoding="utf-8"))
+            _unlink_recovery_files(previous_patch, previous_manifest)
+        except Exception as exc:
+            raise RecoveryError(
+                "prior recovery generation could not be restored") from exc
     patch_tombstone = patch.with_name(patch.name + ".deleting")
     manifest_tombstone = manifest.with_name(manifest.name + ".deleting")
     if patch_tombstone.exists() or manifest_tombstone.exists():
@@ -781,11 +790,7 @@ def _write_recovery_file(target: pathlib.Path, value: str) -> None:
         handle.flush()
         os.fsync(handle.fileno())
     temporary.replace(target)
-    directory = os.open(target.parent, os.O_RDONLY)
-    try:
-        os.fsync(directory)
-    finally:
-        os.close(directory)
+    _fsync_recovery_directory(target.parent)
 
 
 def _write_recovery_pair(target: pathlib.Path, patch_text: str,
@@ -815,9 +820,12 @@ def remove_recovery(patch: pathlib.Path) -> None:
         manifest.replace(manifest_tombstone)
     except Exception:
         patch_tombstone.replace(patch)
+        _fsync_recovery_directory(patch.parent)
         raise
+    _fsync_recovery_directory(patch.parent)
     patch_tombstone.unlink(missing_ok=True)
     manifest_tombstone.unlink(missing_ok=True)
+    _fsync_recovery_directory(patch.parent)
 
 
 def mark_recovery_pushed(patch: pathlib.Path, head: str) -> None:
