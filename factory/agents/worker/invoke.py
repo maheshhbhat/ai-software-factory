@@ -10,7 +10,6 @@ writes the linked pull request only after those checks pass.
 from __future__ import annotations
 
 import argparse
-import ast
 import contextlib
 import hashlib
 import json
@@ -564,13 +563,7 @@ def recovery_patch_paths(patch: pathlib.Path, *, runner=subprocess.run) -> list[
             encoded = line.split(" ", 2)[2]
             try:
                 if encoded.startswith('"'):
-                    # Git's quoted paths are byte strings: octal escapes such
-                    # as \303\251 are the UTF-8 bytes for "é", not Latin-1
-                    # characters. Parse the C-style quoting into bytes first.
-                    quoted = ast.literal_eval(encoded)
-                    if not isinstance(quoted, str):
-                        raise ValueError("quoted Git path is not text")
-                    decoded = quoted.encode("latin-1").decode("utf-8")
+                    decoded = decode_git_quoted_path(encoded)
                 else:
                     decoded = encoded
             except (SyntaxError, ValueError, UnicodeDecodeError,
@@ -583,6 +576,38 @@ def recovery_patch_paths(patch: pathlib.Path, *, runner=subprocess.run) -> list[
     if not paths:
         raise RecoveryError("recovery checkpoint patch paths are invalid")
     return sorted(set(paths))
+
+
+def decode_git_quoted_path(value: str) -> str:
+    """Decode Git C quoting while preserving literal UTF-8 characters."""
+    if len(value) < 2 or value[0] != '"' or value[-1] != '"':
+        raise ValueError("invalid quoted Git path")
+    escaped = {"a": 7, "b": 8, "t": 9, "n": 10, "v": 11,
+               "f": 12, "r": 13, '"': 34, "\\": 92}
+    result = bytearray()
+    index = 1
+    while index < len(value) - 1:
+        character = value[index]
+        if character != "\\":
+            result.extend(character.encode("utf-8"))
+            index += 1
+            continue
+        index += 1
+        if index >= len(value) - 1:
+            raise ValueError("invalid quoted Git path escape")
+        character = value[index]
+        if character in "01234567":
+            end = index
+            while end < min(index + 3, len(value) - 1) and value[end] in "01234567":
+                end += 1
+            result.append(int(value[index:end], 8))
+            index = end
+        elif character in escaped:
+            result.append(escaped[character])
+            index += 1
+        else:
+            raise ValueError("invalid quoted Git path escape")
+    return result.decode("utf-8")
 
 
 def validate_pushed_recovery(value: dict, patch_text: str | None, *,
@@ -1430,8 +1455,15 @@ def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
                 setattr(exc, "recovery_ref", ref)
             raise
         finally:
-            git(["worktree", "remove", "--force", str(worktree)], checkout,
-                runner=runner)
+            try:
+                git(["worktree", "remove", "--force", str(worktree)], checkout,
+                    runner=runner)
+            except Exception as exc:
+                if has_recovery:
+                    setattr(exc, "mutation_state", "post-mutation")
+                    setattr(exc, "terminal_outcome", "worktree-cleanup-failed")
+                    setattr(exc, "recovery_ref", str(saved_recovery))
+                raise
 
     try:
         body = f"Story: #{story_number}\n\n{durable}\n"

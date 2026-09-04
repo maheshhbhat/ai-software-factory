@@ -373,6 +373,10 @@ class FailedWorkCheckpointTests(unittest.TestCase):
             self.assertEqual(
                 ["é-new.txt", "é.txt"], invoke.recovery_patch_paths(patch))
 
+    def test_quoted_path_decoder_preserves_literal_utf8_with_escapes(self):
+        self.assertEqual(
+            "é\tnew.txt", invoke.decode_git_quoted_path('"é\\tnew.txt"'))
+
     def test_recovery_file_is_fsynced_before_and_after_rename(self):
         with tempfile.TemporaryDirectory() as directory:
             target = pathlib.Path(directory, "checkpoint.json")
@@ -1440,6 +1444,49 @@ class FailedWorkCheckpointTests(unittest.TestCase):
             self.assertNotEqual(original_patch, patch.read_text())
             self.assertIn("# checkpoint 3", patch.read_text())
             self.assertEqual(str(patch), caught.exception.recovery_ref)
+
+    def test_worktree_cleanup_failure_preserves_push_accounting(self):
+        class CleanupFailureRunner(RecordingRunner):
+            def __call__(self, cmd, **kwargs):
+                result = super().__call__(cmd, **kwargs)
+                if cmd[:4] == ["git", "worktree", "remove", "--force"]:
+                    return subprocess.CompletedProcess(
+                        cmd, 1, "", "worktree remove failed")
+                return result
+
+        class State:
+            health = None
+            @staticmethod
+            def models_for_task_prefix(*_args, **_kwargs): return ()
+
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = CleanupFailureRunner(["src/app.py"])
+            result = SimpleNamespace(
+                outcome="success", output="done", terminal_outcome="completed",
+                attempts=({"model": "gpt-test", "provider": "openai",
+                           "invocation_id": "first", "reservation_id": None,
+                           "mutation_state": "post-mutation"},))
+            executor = mock.Mock()
+            executor.execute.return_value = result
+            with mock.patch.object(invoke, "CapacityExecutor",
+                                   return_value=executor), \
+                 mock.patch.object(invoke, "cli_adapter", return_value=mock.Mock()), \
+                 mock.patch.object(invoke, "repository_test_command",
+                                   return_value=["python3", "-m", "unittest"]):
+                with self.assertRaisesRegex(
+                        invoke.DeliveryError,
+                        "worktree remove failed") as caught:
+                    invoke.execute(
+                        "owner/repo", 214, "token", pathlib.Path("/checkout"),
+                        runner=runner, client=FakeClient(), state=State(),
+                        registry=[SimpleNamespace(provider="openai")])
+            patch = invoke.recovery_patch("owner/repo", 214)
+            self.assertEqual("post-mutation", caught.exception.mutation_state)
+            self.assertEqual("worktree-cleanup-failed",
+                             caught.exception.terminal_outcome)
+            self.assertEqual(str(patch), caught.exception.recovery_ref)
+            self.assertTrue(patch.exists())
 
     def test_first_pass_ambiguous_push_has_a_pending_recovery_marker(self):
         class PushFailureRunner(RecordingRunner):
