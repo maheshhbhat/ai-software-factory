@@ -86,14 +86,30 @@ def attempt_ledger(evidence, process, numbers):
         story, claim_id = claim.get("story"), claim.get("event_id")
         trace = claim.get("trace_id")
         identity = trace or claim_id
-        outcomes = unique(
-            [row for row in process
-             if row.get("event") == TERMINAL_WORKER_EVENT
-             and row.get("repo") == repository
-             and row.get("story") == story
-             and ((trace and row.get("trace_id") == trace) or
-                  (not trace and row.get("claim_event_id") == claim_id))],
-            lambda row: (row.get("trace_id"), row.get("event_id")))
+        outcome_groups = {}
+        for row in process:
+            if (row.get("event") == TERMINAL_WORKER_EVENT and
+                    row.get("repo") == repository and
+                    row.get("story") == story and
+                    ((trace and row.get("trace_id") == trace) or
+                     (not trace and row.get("claim_event_id") == claim_id))):
+                outcome_groups.setdefault(
+                    (row.get("trace_id"), row.get("event_id")), []).append(row)
+        outcomes = []
+        for key in sorted(
+                outcome_groups,
+                key=lambda value: tuple(str(v) for v in value)):
+            candidates = outcome_groups[key]
+            encodings = {
+                json.dumps(row, sort_keys=True, default=str)
+                for row in candidates}
+            if len(encodings) > 1:
+                findings.append(
+                    f"terminal outcome {key[1]!r} for claim {claim_id!r} "
+                    "has conflicting durable copies")
+            outcomes.append(sorted(
+                candidates,
+                key=lambda row: json.dumps(row, sort_keys=True, default=str))[0])
         unavailable = evidence_unavailable(
             evidence, kind="attempt-terminal-outcome", story=story,
             identity=identity)
@@ -190,6 +206,11 @@ def attempt_ledger(evidence, process, numbers):
                     f"successful claim {claim_id!r} for Story {story} needs "
                     "exactly one successful worker-specific launch or "
                     "evidence-unavailable record")
+        elif (outcome and outcome.get("worker") and not launch_starts and
+              not launch_evidence_unavailable):
+            findings.append(
+                f"worker outcome for claim {claim_id!r} in Story {story} needs "
+                "durable launch evidence or an evidence-unavailable record")
         if failed:
             diagnostic_events = [
                 row for row in reconciled_ends

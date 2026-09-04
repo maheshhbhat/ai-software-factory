@@ -175,6 +175,23 @@ class Rung2ReportTests(unittest.TestCase):
         self.assertNotEqual("INCONCLUSIVE", result["rung_verdict"])
         self.assertEqual(11, len(result["attempt_ledger"]))
 
+    def test_conflicting_terminal_copies_fail_deterministically(self):
+        values = list(fixture())
+        outcome = next(row for row in values[1]
+                       if row.get("event") == "worker.outcome")
+        conflict = dict(outcome)
+        conflict.update({"result": "FAILED", "exit": 1,
+                         "recovery_ref": "durable-recovery"})
+        forward = list(values[1]) + [conflict]
+        reverse = list(reversed(forward))
+        first = report.build(values[0], forward, values[2], values[3])
+        second = report.build(values[0], reverse, values[2], values[3])
+        self.assertEqual(first, second)
+        self.assertEqual("INCONCLUSIVE", first["rung_verdict"])
+        self.assertTrue(any("conflicting durable copies" in finding
+                            for finding in
+                            first["measurement_integrity"]["findings"]))
+
     def test_attempt_ledger_is_independent_of_fragment_order(self):
         values = list(fixture())
         first = report.build(*values)
@@ -378,6 +395,28 @@ class Rung2ReportTests(unittest.TestCase):
                       if row["trace_id"] == outcome["trace_id"])
         self.assertEqual("legacy log missing",
                          ledger["diagnostic_evidence_unavailable"]["reason"])
+
+    def test_failed_worker_outcome_requires_launch_evidence(self):
+        values = list(fixture())
+        outcome = next(row for row in values[1]
+                       if row.get("event") == "worker.outcome")
+        outcome.update({"result": "FAILED", "exit": 1,
+                        "recovery_ref": "durable-recovery"})
+        trace = outcome["trace_id"]
+        values[1] = [
+            row for row in values[1]
+            if not (row.get("trace_id") == trace and row.get("event") in
+                    ("worker.launch.start", "worker.launch.end"))]
+        result = report.build(*values)
+        self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+        self.assertTrue(any("durable launch evidence" in finding
+                            for finding in
+                            result["measurement_integrity"]["findings"]))
+        values[0]["evidence_unavailable"] = [{
+            "kind": "attempt-launches", "story": outcome["story"],
+            "identity": trace, "reason": "legacy launch evidence unavailable"}]
+        result = report.build(*values)
+        self.assertNotEqual("INCONCLUSIVE", result["rung_verdict"])
 
     def test_failed_attempt_accepts_matching_durable_launch_diagnostic(self):
         values = list(fixture())
