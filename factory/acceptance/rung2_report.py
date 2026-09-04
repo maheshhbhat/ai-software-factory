@@ -37,6 +37,10 @@ def valid_repository(value):
     return isinstance(value, str) and bool(REPOSITORY_SLUG.fullmatch(value))
 
 
+def valid_event_id(value):
+    return isinstance(value, str) and bool(value.strip())
+
+
 def unique(rows, key):
     seen = set()
     result = []
@@ -46,6 +50,25 @@ def unique(rows, key):
             continue
         seen.add(marker)
         result.append(row)
+    return result
+
+
+def deterministic_copies(rows, key, findings, description):
+    groups = {}
+    for row in rows:
+        groups.setdefault(key(row), []).append(row)
+    result = []
+    for marker in sorted(groups, key=lambda value: tuple(str(v) for v in value)):
+        candidates = groups[marker]
+        encodings = {
+            json.dumps(row, sort_keys=True, default=str)
+            for row in candidates}
+        if len(encodings) > 1:
+            findings.append(
+                f"{description} {marker!r} has conflicting durable copies")
+        result.append(sorted(
+            candidates,
+            key=lambda row: json.dumps(row, sort_keys=True, default=str))[0])
     return result
 
 
@@ -67,18 +90,47 @@ def attempt_ledger(evidence, process, numbers):
                 row.get("repo") == repository):
             claim_groups.setdefault(
                 (row.get("story"), row.get("event_id")), []).append(row)
-    claims = []
+    selected_claims = []
     for key in sorted(claim_groups, key=lambda value: tuple(str(v) for v in value)):
         candidates = claim_groups[key]
         if len({row.get("trace_id") for row in candidates}) > 1:
             findings.append(
                 f"claim {key[1]!r} for Story {key[0]} has conflicting trace identities")
+        selected_claims.append(sorted(
+            candidates,
+            key=lambda row: json.dumps(row, sort_keys=True, default=str))[0])
+    trace_groups = {}
+    for row in selected_claims:
+        trace_key = ((row.get("story"), "trace", row.get("trace_id"))
+                     if row.get("trace_id") else
+                     (row.get("story"), "event", row.get("event_id")))
+        trace_groups.setdefault(trace_key, []).append(row)
+    claims = []
+    for key in sorted(trace_groups, key=lambda value: tuple(str(v) for v in value)):
+        candidates = trace_groups[key]
+        if key[1] == "trace" and len(candidates) > 1:
+            findings.append(
+                f"attempt trace {key[2]!r} for Story {key[0]} has multiple claim IDs")
         claims.append(sorted(
             candidates,
             key=lambda row: json.dumps(row, sort_keys=True, default=str))[0])
     claims.sort(key=lambda row: (
         row.get("story"), str(row.get("trace_id") or ""),
         str(row.get("event_id") or "")))
+    claimed_traces = {
+        (row.get("story"), row.get("trace_id"))
+        for row in claims if row.get("trace_id")}
+    worker_traces = {
+        (row.get("story"), row.get("trace_id"))
+        for row in process
+        if row.get("event") in
+        (TERMINAL_WORKER_EVENT, "worker.launch.start", "worker.launch.end")
+        and row.get("repo") == repository and row.get("story") in numbers
+        and row.get("trace_id")}
+    for story, trace in sorted(worker_traces - claimed_traces):
+        findings.append(
+            f"worker attempt trace {trace!r} for Story {story} has no matching "
+            "durable claim")
     claimed_stories = {row.get("story") for row in claims}
     for story in sorted(numbers - claimed_stories):
         findings.append(f"Story {story} has no durable attempt claim evidence")
@@ -125,25 +177,27 @@ def attempt_ledger(evidence, process, numbers):
                                   outcome.get("result") != "LAUNCHED"))
         diagnostic = None
         diagnostic_unavailable = None
-        launch_starts = unique(
+        launch_starts = deterministic_copies(
             [row for row in process
              if row.get("event") == "worker.launch.start"
              and row.get("repo") == repository
              and row.get("story") == story and trace
              and row.get("trace_id") == trace],
-            lambda row: (row.get("trace_id"), row.get("event_id")))
+            lambda row: (row.get("trace_id"), row.get("event_id")),
+            findings, "worker launch start")
         launch_starts.sort(key=lambda row: (
             str(row.get("trace_id") or ""), str(row.get("span_id") or ""),
             str(row.get("worker") or ""), str(row.get("event_id") or "")))
-        launch_ends = unique(
+        launch_ends = deterministic_copies(
             [row for row in process
              if row.get("event") == "worker.launch.end"
              and row.get("repo") == repository
              and row.get("story") == story
              and trace and row.get("trace_id") == trace
-             and row.get("event_id")
+             and valid_event_id(row.get("event_id"))
              and (row.get("exit") is not None or row.get("result"))],
-            lambda row: (row.get("trace_id"), row.get("event_id")))
+            lambda row: (row.get("trace_id"), row.get("event_id")),
+            findings, "worker launch end")
         launch_ends.sort(key=lambda row: (
             str(row.get("trace_id") or ""), str(row.get("span_id") or ""),
             str(row.get("worker") or ""), str(row.get("event_id") or "")))
@@ -151,7 +205,7 @@ def attempt_ledger(evidence, process, numbers):
         for end in launch_ends:
             matching_starts = [
                 row for row in launch_starts
-                if row.get("event_id") and end.get("span_id")
+                if valid_event_id(row.get("event_id")) and end.get("span_id")
                 and row.get("span_id") == end.get("span_id")
                 and end.get("worker")
                 and row.get("worker") == end.get("worker")]
@@ -167,9 +221,10 @@ def attempt_ledger(evidence, process, numbers):
         for start in launch_starts:
             start_id, span = start.get("event_id"), start.get("span_id")
             worker = start.get("worker")
-            if not start_id:
+            if not valid_event_id(start_id):
                 findings.append(
-                    f"worker launch start for claim {claim_id!r} needs a durable event ID")
+                    f"worker launch start for claim {claim_id!r} needs a durable "
+                    "string event ID")
             if not worker:
                 findings.append(
                     f"worker launch {start_id!r} for claim {claim_id!r} needs "
@@ -235,8 +290,8 @@ def attempt_ledger(evidence, process, numbers):
                      "launches": launch_starts,
                      "launch_evidence_unavailable": launch_evidence_unavailable,
                      "launch_ledger": launch_ledger})
-    if any(row.get("event_id") is None for row in claims):
-        findings.append("every claim needs a durable event ID")
+    if any(not valid_event_id(row.get("event_id")) for row in claims):
+        findings.append("every claim needs a durable nonempty string event ID")
     return rows, findings
 
 
