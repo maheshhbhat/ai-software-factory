@@ -291,6 +291,8 @@ class RecordingRunner:
             out = "".join(f" M {path}\0" for path in self.changed)
         elif cmd[:4] == ["git", "diff", "--binary", "--cached"]:
             out = "diff --git a/src/app.py b/src/app.py\n"
+        elif cmd[:3] == ["git", "diff", "--binary"]:
+            out = "diff --git a/src/app.py b/src/app.py\n"
         elif cmd[:4] == ["git", "apply", "--numstat", "-z"]:
             out = "".join(f"1\t0\t{path}\0" for path in self.changed)
         elif cmd[:2] == ["git", "rev-parse"]:
@@ -955,8 +957,64 @@ class FailedWorkCheckpointTests(unittest.TestCase):
                                             "provenance"):
                     invoke.pushed_recovery_head(
                         patch, repo="owner/repo", story_number=214,
+                        checkout=pathlib.Path("/checkout"),
                         scope=["src/app.py"], runner=runner)
                 self.assertTrue(patch.exists())
+
+    def test_recorded_head_must_contain_the_checkpoint_patch(self):
+        class UnrelatedHeadRunner(RecordingRunner):
+            def __call__(self, cmd, **kwargs):
+                if cmd[:3] == ["git", "diff", "--binary"] and \
+                        "--cached" not in cmd:
+                    return subprocess.CompletedProcess(
+                        cmd, 0, "diff --git a/other.py b/other.py\n", "")
+                return super().__call__(cmd, **kwargs)
+
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = UnrelatedHeadRunner(["src/app.py"])
+            patch = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"),
+                repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit=self.BASE,
+                scope=["src/app.py"], mutation_state="post-mutation",
+                terminal_outcome="started-mid-work-failed",
+                originating_worker=self.WORKER, runner=runner))
+            invoke.mark_recovery_pushed(patch, "e" * 40)
+            with self.assertRaisesRegex(invoke.RecoveryError,
+                                        "does not match recorded head"):
+                invoke.pushed_recovery_head(
+                    patch, repo="owner/repo", story_number=214,
+                    checkout=pathlib.Path("/checkout"),
+                    scope=["src/app.py"], runner=runner)
+
+    def test_interrupted_cleanup_unlink_failure_is_recovery_aware(self):
+        with tempfile.TemporaryDirectory() as recovery:
+            patch = pathlib.Path(recovery, "story.patch")
+            manifest_tombstone = invoke.recovery_manifest(patch).with_name(
+                "story.json.deleting")
+            record = {
+                "schema_version": invoke.RECOVERY_SCHEMA_VERSION,
+                "trust": invoke.RECOVERY_TRUST,
+                "repository": "owner/repo", "story": 214,
+                "base_commit": self.BASE, "delivered_head": "d" * 40,
+                "recovered_paths": ["src/app.py"],
+                "previous_mutation_state": "post-mutation",
+                "previous_terminal_outcome": "completed",
+                "originating_worker": self.WORKER,
+                "recovered_at": "2026-09-04T00:00:00Z",
+                "delivery_verified_at": "2026-09-04T00:01:00Z",
+            }
+            manifest_tombstone.write_text(json.dumps(record))
+            with mock.patch.object(pathlib.Path, "unlink",
+                                   side_effect=OSError("unlink failed")):
+                with self.assertRaisesRegex(
+                        invoke.RecoveryError,
+                        "cleanup transaction could not finish") as caught:
+                    invoke.recovery_available(
+                        patch, repo="owner/repo", story_number=214,
+                        scope=["src/app.py"])
+            self.assertEqual("post-mutation", caught.exception.mutation_state)
 
     def test_base_resolution_failure_preserves_recovery_accounting(self):
         class BaseFailureRunner(RecordingRunner):

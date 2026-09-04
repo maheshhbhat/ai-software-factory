@@ -651,15 +651,23 @@ def recovery_available(patch: pathlib.Path, *, repo: str | None = None,
                 validate_pushed_recovery(
                     value, None, repo=repo, story_number=story_number,
                     scope=scope)
-                manifest_tombstone.unlink(missing_ok=True)
+                try:
+                    manifest_tombstone.unlink(missing_ok=True)
+                except OSError as exc:
+                    raise RecoveryError(
+                        "recovery cleanup transaction could not finish") from exc
                 return False
             raise RecoveryError("recovery cleanup transaction is invalid")
         patch_text = patch_source.read_text(encoding="utf-8")
         validate_pushed_recovery(
             value, patch_text, repo=repo, story_number=story_number, scope=scope,
             patch_paths=recovery_patch_paths(patch_source, runner=runner))
-        for item in (patch, manifest, patch_tombstone, manifest_tombstone):
-            item.unlink(missing_ok=True)
+        try:
+            for item in (patch, manifest, patch_tombstone, manifest_tombstone):
+                item.unlink(missing_ok=True)
+        except OSError as exc:
+            raise RecoveryError(
+                "recovery cleanup transaction could not finish") from exc
         return False
     if patch.is_file() != manifest.is_file():
         raise RecoveryError("recovery checkpoint patch/manifest pair is incomplete")
@@ -745,8 +753,30 @@ def mark_recovery_push_pending(patch: pathlib.Path, head: str) -> None:
         manifest, json.dumps(value, indent=2, sort_keys=True) + "\n")
 
 
+def validate_recovery_head_content(patch: pathlib.Path, head: str,
+                                   checkout: pathlib.Path, *,
+                                   runner=subprocess.run) -> None:
+    """Prove the recorded commit contains the checkpoint's exact patch."""
+    try:
+        value = json.loads(
+            recovery_manifest(patch).read_text(encoding="utf-8"))
+        patch_text = patch.read_text(encoding="utf-8")
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RecoveryError("recovery checkpoint metadata is unavailable") from exc
+    base = value.get("base_commit") if isinstance(value, dict) else None
+    if not valid_commit(base) or not valid_commit(head):
+        raise RecoveryError("pushed recovery checkpoint provenance is invalid")
+    committed = git(["diff", "--binary", base, head], checkout,
+                    runner=runner).stdout
+    if hashlib.sha256(committed.encode("utf-8")).hexdigest() != hashlib.sha256(
+            patch_text.encode("utf-8")).hexdigest():
+        raise RecoveryError("recovery checkpoint does not match recorded head")
+
+
 def reconcile_recovery_push(patch: pathlib.Path, observed_head: str, *,
-                            repo: str, story_number: int) -> None:
+                            repo: str, story_number: int,
+                            checkout: pathlib.Path,
+                            runner=subprocess.run) -> None:
     """Promote a pre-push marker when the remote proves the push landed."""
     try:
         value = json.loads(
@@ -771,6 +801,8 @@ def reconcile_recovery_push(patch: pathlib.Path, observed_head: str, *,
         raise RecoveryError("pending recovery checkpoint is invalid") from exc
     if pending != observed_head:
         return
+    validate_recovery_head_content(
+        patch, pending, checkout, runner=runner)
     try:
         mark_recovery_pushed(patch, pending)
     except RecoveryError:
@@ -781,6 +813,7 @@ def reconcile_recovery_push(patch: pathlib.Path, observed_head: str, *,
 
 
 def pushed_recovery_head(patch: pathlib.Path, *, repo: str, story_number: int,
+                         checkout: pathlib.Path,
                          scope: list[str] | None = None,
                          runner=subprocess.run) -> str | None:
     """Return a validated durable head, if this checkpoint was already pushed."""
@@ -794,6 +827,8 @@ def pushed_recovery_head(patch: pathlib.Path, *, repo: str, story_number: int,
     head = value.get("delivered_head")
     if head is None:
         return None
+    validate_recovery_head_content(
+        patch, head, checkout, runner=runner)
     return validate_pushed_recovery(
         value, patch_text, repo=repo, story_number=story_number, scope=scope,
         patch_paths=recovery_patch_paths(patch, runner=runner))
@@ -1092,10 +1127,10 @@ def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
             try:
                 reconcile_recovery_push(
                     saved_recovery, pull["head"]["sha"], repo=repo,
-                    story_number=story_number)
+                    story_number=story_number, checkout=checkout, runner=runner)
                 delivered_head = pushed_recovery_head(
                     saved_recovery, repo=repo, story_number=story_number,
-                    scope=scope, runner=runner)
+                    checkout=checkout, scope=scope, runner=runner)
             except RecoveryError as exc:
                 exc.recovery_ref = str(saved_recovery)
                 raise
@@ -1151,10 +1186,10 @@ def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
         try:
             reconcile_recovery_push(
                 saved_recovery, base_commit, repo=repo,
-                story_number=story_number)
+                story_number=story_number, checkout=checkout, runner=runner)
             delivered_head = pushed_recovery_head(
                 saved_recovery, repo=repo, story_number=story_number, scope=scope,
-                runner=runner)
+                checkout=checkout, runner=runner)
         except RecoveryError as exc:
             exc.recovery_ref = str(saved_recovery)
             raise
