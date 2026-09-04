@@ -504,6 +504,12 @@ def changed_paths(worktree: pathlib.Path, base: str,
     return sorted(set(tracked + pending_paths(worktree, runner=runner)))
 
 
+def stage_pending_work(worktree: pathlib.Path,
+                       runner=subprocess.run) -> None:
+    """Stage the complete checked worktree state, including rename deletion."""
+    git(["add", "--all", "--", "."], worktree, runner=runner)
+
+
 def repository_test_command(worktree: pathlib.Path) -> list[str]:
     """Resolve validation from the product checkout, never from the factory."""
     override = os.environ.get("FACTORY_DELIVERY_TEST_CMD", "").strip()
@@ -1661,7 +1667,10 @@ def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
                 story.get("body") or "", cwd=worktree, timeout=bounds.timeout,
                 trace_id=delivery_trace, repo=repo, story=story_number,
                 project=project_number, runner=runner)
-            git(["add", "--", *paths], worktree, runner=runner)
+            # All pending paths were just enumerated and scope-checked. Stage
+            # their complete repository state so a vanished rename source is
+            # recorded as a deletion instead of rejected as a pathspec.
+            stage_pending_work(worktree, runner=runner)
             git(["commit", "-m", f"Deliver Story #{story_number}"], worktree,
                 runner=runner)
             head = git(["rev-parse", "HEAD"], worktree,
@@ -1743,6 +1752,11 @@ def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
                                          str(checkpoint_error)).strip())
                 ref = ""
             if ref:
+                # Cleanup is still ahead. Make a checkpoint created while
+                # handling this failure visible to that cleanup guard before
+                # it can replace the original exception.
+                saved_recovery = pathlib.Path(ref)
+                has_recovery = True
                 if getattr(exc, "mutation_state", "") != "ambiguous":
                     setattr(exc, "mutation_state", "post-mutation")
                 setattr(exc, "recovery_ref", ref)

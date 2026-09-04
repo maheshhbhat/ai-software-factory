@@ -2244,6 +2244,47 @@ class FailedWorkCheckpointTests(unittest.TestCase):
             self.assertEqual(str(patch), caught.exception.recovery_ref)
             self.assertTrue(patch.exists())
 
+    def test_new_failure_checkpoint_is_visible_to_cleanup_failure(self):
+        class CleanupFailureRunner(RecordingRunner):
+            def __call__(self, cmd, **kwargs):
+                result = super().__call__(cmd, **kwargs)
+                if cmd[:4] == ["git", "worktree", "remove", "--force"]:
+                    return subprocess.CompletedProcess(
+                        cmd, 1, "", "worktree remove failed")
+                return result
+
+        class State:
+            health = None
+            @staticmethod
+            def models_for_task_prefix(*_args, **_kwargs): return ()
+
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = CleanupFailureRunner(["src/app.py"])
+            result = SimpleNamespace(
+                outcome="failed", output="worker failed",
+                terminal_outcome="worker-crashed",
+                attempts=({"model": "gpt-test", "provider": "openai",
+                           "invocation_id": "first", "reservation_id": None,
+                           "mutation_state": "post-mutation"},))
+            executor = mock.Mock()
+            executor.execute.return_value = result
+            with mock.patch.object(invoke, "CapacityExecutor",
+                                   return_value=executor), \
+                 mock.patch.object(invoke, "cli_adapter", return_value=mock.Mock()), \
+                 self.assertRaisesRegex(
+                     invoke.DeliveryError, "worktree remove failed") as caught:
+                invoke.execute(
+                    "owner/repo", 214, "token", pathlib.Path("/checkout"),
+                    runner=runner, client=FakeClient(), state=State(),
+                    registry=[SimpleNamespace(provider="openai")])
+            patch = invoke.recovery_patch("owner/repo", 214)
+            self.assertEqual("post-mutation", caught.exception.mutation_state)
+            self.assertEqual("worktree-cleanup-failed",
+                             caught.exception.terminal_outcome)
+            self.assertEqual(str(patch), caught.exception.recovery_ref)
+            self.assertTrue(patch.exists())
+
     def test_first_pass_ambiguous_push_has_a_pending_recovery_marker(self):
         class PushFailureRunner(RecordingRunner):
             def __call__(self, cmd, **kwargs):
@@ -2833,6 +2874,23 @@ class ScopeSeesFilesTests(unittest.TestCase):
         subprocess.run(["git", "add", "-A"], cwd=root, check=True)
         self.assertEqual(
             ["new.txt", "old.txt"], invoke.changed_paths(root, "HEAD"))
+
+    def test_pending_rename_stages_without_naming_vanished_source(self):
+        root = self.repo()
+        source = root / "old.txt"
+        source.write_text("tracked\n")
+        subprocess.run(["git", "add", "old.txt"], cwd=root, check=True)
+        subprocess.run(
+            ["git", "-c", "user.email=t@t", "-c", "user.name=t",
+             "commit", "-qm", "tracked"], cwd=root, check=True)
+        subprocess.run(["git", "mv", "old.txt", "new.txt"], cwd=root,
+                       check=True)
+        invoke.stage_pending_work(root)
+        staged = subprocess.run(
+            ["git", "diff", "--cached", "--name-status"], cwd=root,
+            check=True, capture_output=True, text=True).stdout
+        self.assertIn("old.txt", staged)
+        self.assertIn("new.txt", staged)
 
     def test_committed_rename_lists_source_and_destination_paths(self):
         root = self.repo()
