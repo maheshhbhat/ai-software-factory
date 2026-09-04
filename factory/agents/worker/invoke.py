@@ -608,7 +608,7 @@ def reconcile_recovery_push(patch: pathlib.Path, observed_head: str, *,
     if not isinstance(value, dict):
         raise RecoveryError("recovery checkpoint metadata is not an object")
     pending = value.get("pending_head")
-    if pending is None or pending != observed_head:
+    if pending is None:
         return
     expected = {"schema_version": RECOVERY_SCHEMA_VERSION,
                 "trust": RECOVERY_TRUST, "repository": repo,
@@ -622,6 +622,8 @@ def reconcile_recovery_push(patch: pathlib.Path, observed_head: str, *,
         datetime.fromisoformat(prepared.replace("Z", "+00:00"))
     except (AttributeError, TypeError, ValueError) as exc:
         raise RecoveryError("pending recovery checkpoint is invalid") from exc
+    if pending != observed_head:
+        return
     mark_recovery_pushed(patch, pending)
 
 
