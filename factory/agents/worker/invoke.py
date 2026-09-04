@@ -882,11 +882,11 @@ def restore_failed_work(patch: pathlib.Path, worktree: pathlib.Path, *,
         "trust": RECOVERY_TRUST,
         "repository": repo,
         "story": story_number,
-        "base_commit": base_commit,
     }
     if any(value.get(key) != item for key, item in expected.items()):
         raise RecoveryError("recovery checkpoint identity is invalid")
-    if not valid_commit(value["base_commit"]):
+    recorded_base = value.get("base_commit")
+    if not valid_commit(recorded_base):
         raise RecoveryError("recovery checkpoint base commit is invalid")
     if (not isinstance(paths, list) or not paths or
             any(not isinstance(path, str) or not path for path in paths)):
@@ -907,7 +907,12 @@ def restore_failed_work(patch: pathlib.Path, worktree: pathlib.Path, *,
     if not valid_utc_timestamp(recovered_at):
         raise RecoveryError("recovery checkpoint timestamp is invalid")
     try:
-        git(["apply", "--index", str(patch)], worktree, runner=runner)
+        apply_args = ["apply", "--index", str(patch)]
+        if recorded_base != base_commit:
+            git(["merge-base", "--is-ancestor", recorded_base, base_commit],
+                worktree, runner=runner)
+            apply_args = ["apply", "--3way", "--index", str(patch)]
+        git(apply_args, worktree, runner=runner)
         checkout_recovered_gitlinks(
             worktree, paths, base_commit=base_commit, runner=runner)
         applied_paths = changed_paths(worktree, base_commit, runner=runner)
@@ -1187,8 +1192,20 @@ def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
                 runner=runner)
             head = git(["rev-parse", "HEAD"], worktree,
                        runner=runner).stdout.strip()
-            if has_recovery:
-                mark_recovery_push_pending(saved_recovery, head)
+            if not has_recovery:
+                ref = checkpoint_failed_work(
+                    worktree, checkout, repo=repo, story_number=story_number,
+                    default=default, base_ref=base_ref,
+                    base_commit=base_commit, scope=scope,
+                    mutation_state="post-mutation",
+                    terminal_outcome="completed-awaiting-push",
+                    originating_worker=originating_worker, runner=runner)
+                if not ref:
+                    raise RecoveryError(
+                        "pre-push recovery checkpoint could not be created")
+                saved_recovery = pathlib.Path(ref)
+                has_recovery = True
+            mark_recovery_push_pending(saved_recovery, head)
             try:
                 git(["push", "origin", f"HEAD:refs/heads/{branch}"], worktree,
                     runner=runner)

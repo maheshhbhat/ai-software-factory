@@ -436,7 +436,6 @@ class FailedWorkCheckpointTests(unittest.TestCase):
     def test_wrong_story_base_or_scope_blocks_patch_application(self):
         for override, message in (
             ({"story_number": 999}, "identity"),
-            ({"base_commit": "b" * 40}, "identity"),
             ({"scope": ["tests/**"]}, "scope"),
         ):
             with self.subTest(override=override), tempfile.TemporaryDirectory() as recovery, \
@@ -459,6 +458,30 @@ class FailedWorkCheckpointTests(unittest.TestCase):
                         ref, pathlib.Path("/new"), runner=runner, **arguments)
                 self.assertFalse(any(command[:3] == ["git", "apply", "--index"]
                                      for command, _ in runner.calls))
+
+    def test_default_branch_advance_restores_with_three_way_application(self):
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = RecordingRunner(["src/app.py"])
+            ref = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"),
+                repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit=self.BASE,
+                scope=["src/app.py"], mutation_state="post-mutation",
+                terminal_outcome="started-mid-work-failed",
+                originating_worker=self.WORKER, runner=runner))
+            runner.calls.clear()
+            value = invoke.restore_failed_work(
+                ref, pathlib.Path("/new"), repo="owner/repo",
+                story_number=214, base_commit="b" * 40,
+                scope=["src/app.py"], runner=runner)
+            commands = [command for command, _ in runner.calls]
+            self.assertIn(
+                ["git", "merge-base", "--is-ancestor", self.BASE, "b" * 40],
+                commands)
+            self.assertIn(
+                ["git", "apply", "--3way", "--index", str(ref)], commands)
+            self.assertEqual(self.BASE, value["base_commit"])
 
     def test_manifest_paths_must_match_the_applied_patch(self):
         with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
@@ -1152,6 +1175,47 @@ class FailedWorkCheckpointTests(unittest.TestCase):
             manifest = json.loads(invoke.recovery_manifest(patch).read_text())
             self.assertEqual("d" * 40, manifest["pending_head"])
             self.assertNotIn("delivered_head", manifest)
+            self.assertEqual(str(patch), caught.exception.recovery_ref)
+
+    def test_first_pass_ambiguous_push_has_a_pending_recovery_marker(self):
+        class PushFailureRunner(RecordingRunner):
+            def __call__(self, cmd, **kwargs):
+                result = super().__call__(cmd, **kwargs)
+                if cmd[:2] == ["git", "push"]:
+                    return subprocess.CompletedProcess(
+                        cmd, 1, "", "remote accepted; response lost")
+                return result
+
+        class State:
+            health = None
+            @staticmethod
+            def models_for_task_prefix(*_args, **_kwargs): return ()
+
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = PushFailureRunner(["src/app.py"])
+            result = SimpleNamespace(
+                outcome="success", output="done", terminal_outcome="completed",
+                attempts=({"model": "gpt-test", "provider": "openai",
+                           "invocation_id": "first", "reservation_id": None,
+                           "mutation_state": "post-mutation"},))
+            executor = mock.Mock()
+            executor.execute.return_value = result
+            with mock.patch.object(invoke, "CapacityExecutor",
+                                   return_value=executor), \
+                 mock.patch.object(invoke, "cli_adapter", return_value=mock.Mock()), \
+                 mock.patch.object(invoke, "repository_test_command",
+                                   return_value=["python3", "-m", "unittest"]):
+                with self.assertRaisesRegex(invoke.DeliveryError,
+                                            "response lost") as caught:
+                    invoke.execute(
+                        "owner/repo", 214, "token", pathlib.Path("/checkout"),
+                        runner=runner, client=FakeClient(), state=State(),
+                        registry=[SimpleNamespace(provider="openai")])
+            patch = invoke.recovery_patch("owner/repo", 214)
+            manifest = json.loads(invoke.recovery_manifest(patch).read_text())
+            self.assertEqual("d" * 40, manifest["pending_head"])
+            self.assertEqual("ambiguous", caught.exception.mutation_state)
             self.assertEqual(str(patch), caught.exception.recovery_ref)
 
     def test_failed_push_marker_promotion_preserves_pending_recovery(self):

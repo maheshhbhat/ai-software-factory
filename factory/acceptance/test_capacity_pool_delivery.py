@@ -123,7 +123,7 @@ class DeliveryCapacityPoolAcceptance(unittest.TestCase):
                 return [] if self.created is None else [self.created]
             def create_pr(self, title, head, base, body):
                 self.created = {"number": 9, "body": body,
-                                "head": {"ref": head, "sha": "abc123"}}
+                                "head": {"ref": head, "sha": "a" * 40}}
                 return self.created
 
         mutated, calls = False, []
@@ -136,8 +136,10 @@ class DeliveryCapacityPoolAcceptance(unittest.TestCase):
                 stdout = "delivery complete"
             elif command[:3] == ["git", "status", "--porcelain"]:
                 stdout = "?? src/app.py\n" if mutated else ""
+            elif command[:4] == ["git", "diff", "--binary", "--cached"]:
+                stdout = "diff --git a/src/app.py b/src/app.py\n"
             elif command[:2] == ["git", "rev-parse"]:
-                stdout = "abc123\n"
+                stdout = "a" * 40 + "\n"
             return subprocess.CompletedProcess(command, 0, stdout, "")
 
         model = ModelCapacity("terra", "openai", Tier.BALANCED, CAPS)
