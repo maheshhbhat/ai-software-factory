@@ -112,6 +112,8 @@ def delivered_identity(outcome):
         detail = json.loads(outcome.get("detail") or "")
     except (TypeError, json.JSONDecodeError):
         return None
+    if not isinstance(detail, dict):
+        return None
     pr, head = detail.get("pull_request"), detail.get("head")
     return (pr, head) if pr and head else None
 
@@ -156,6 +158,9 @@ def review_ledger(evidence, process, numbers, attempts):
             lambda row: row.get("event_id") or (
                 row.get("pull_request"), row.get("head"), row.get("verdict")))
         identity = f"{pr}:{head}"
+        if not item.get("production_evidence_missing") and not item.get("event_id"):
+            findings.append(
+                f"PR/head production event for {identity} needs a durable event ID")
         unavailable = evidence_unavailable(
             evidence, kind="exact-head-review", story=story, identity=identity)
         if item.get("production_evidence_missing"):

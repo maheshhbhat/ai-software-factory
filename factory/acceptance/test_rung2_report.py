@@ -58,7 +58,8 @@ def fixture():
                 process.append({"event": "delivery.pull-request.written",
                                 "story": story["number"],
                                 "trace_id": outcome["trace_id"],
-                                "pull_request": pr, "head": head})
+                                "pull_request": pr, "head": head,
+                                "event_id": f"delivery-{outcome['trace_id']}"})
         process.append({"event": "review.outcome.published",
                         "story": story["number"], "pull_request": pr,
                         "head": head, "verdict": "approval",
@@ -223,12 +224,31 @@ class Rung2ReportTests(unittest.TestCase):
         values[1].extend([
             {"event": "delivery.pull-request.written", "story": 20,
              "trace_id": outcome["trace_id"], "pull_request": 120,
-             "head": final_head},
+             "head": final_head, "event_id": "delivery-final-head"},
             {"event": "review.outcome.published", "story": 20,
              "pull_request": 120, "head": final_head, "verdict": "findings",
              "event_id": "review-final-head"}])
         result = report.build(*values)
         self.assertNotEqual("INCONCLUSIVE", result["rung_verdict"])
+
+    def test_production_event_without_durable_id_is_inconclusive(self):
+        values = list(fixture())
+        production = next(row for row in values[1]
+                          if row.get("event") == "delivery.pull-request.written")
+        production.pop("event_id")
+        result = report.build(*values)
+        self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+
+    def test_non_object_delivery_detail_yields_inconclusive(self):
+        values = list(fixture())
+        outcome = next(row for row in values[1]
+                       if row.get("event") == "worker.outcome")
+        outcome["detail"] = "[]"
+        values[1] = [row for row in values[1]
+                     if not (row.get("event") == "delivery.pull-request.written"
+                             and row.get("trace_id") == outcome["trace_id"])]
+        result = report.build(*values)
+        self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
 
     def test_thresholds_can_pass_but_integrity_is_independent(self):
         values = list(fixture())
