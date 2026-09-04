@@ -663,6 +663,7 @@ def validate_pushed_recovery(value: dict, patch_text: str | None, *,
 def recovery_available(patch: pathlib.Path, *, repo: str | None = None,
                        story_number: int | None = None,
                        scope: list[str] | None = None,
+                       reconcile_cleanup: bool = True,
                        runner=subprocess.run) -> bool:
     manifest = recovery_manifest(patch)
     patch_tombstone = patch.with_name(patch.name + ".deleting")
@@ -695,6 +696,8 @@ def recovery_available(patch: pathlib.Path, *, repo: str | None = None,
         validate_pushed_recovery(
             value, patch_text, repo=repo, story_number=story_number, scope=scope,
             patch_paths=recovery_patch_paths(patch_source, runner=runner))
+        if not reconcile_cleanup:
+            return True
         try:
             for item in (patch, manifest, patch_tombstone, manifest_tombstone):
                 item.unlink(missing_ok=True)
@@ -713,9 +716,29 @@ def recovery_available(patch: pathlib.Path, *, repo: str | None = None,
         raise RecoveryError("recovery checkpoint metadata is unavailable")
     if not isinstance(value, dict):
         raise RecoveryError("recovery checkpoint metadata is not an object")
+    paths = value.get("recovered_paths")
+    expected = {"schema_version": RECOVERY_SCHEMA_VERSION,
+                "trust": RECOVERY_TRUST, "repository": repo,
+                "story": story_number}
     if value.get("patch_sha256") != hashlib.sha256(
             patch_text.encode("utf-8")).hexdigest():
         raise RecoveryError("recovery checkpoint digest does not match its manifest")
+    if any(value.get(key) != item for key, item in expected.items()):
+        raise RecoveryError("recovery checkpoint identity is invalid")
+    if (not valid_commit(value.get("base_commit")) or
+            not isinstance(paths, list) or not paths or
+            any(not isinstance(path, str) or not path for path in paths) or
+            (scope is not None and merge_gate.paths_out_of_scope(paths, scope)) or
+            any(not isinstance(value.get(key), str) or not value[key]
+                for key in ("previous_mutation_state",
+                            "previous_terminal_outcome"))):
+        raise RecoveryError("recovery checkpoint provenance is invalid")
+    if not valid_recovery_worker(
+            value.get("originating_worker"), repo=repo,
+            story_number=story_number):
+        raise RecoveryError("recovery checkpoint worker identity is invalid")
+    if not valid_utc_timestamp(value.get("recovered_at")):
+        raise RecoveryError("recovery checkpoint timestamp is invalid")
     return True
 
 
@@ -1141,7 +1164,7 @@ def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
     try:
         discovered_recovery = recovery_available(
             saved_recovery, repo=repo, story_number=story_number, scope=None,
-            runner=runner)
+            reconcile_cleanup=False, runner=runner)
     except RecoveryError as exc:
         exc.recovery_ref = str(saved_recovery)
         raise

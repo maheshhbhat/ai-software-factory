@@ -945,6 +945,74 @@ class FailedWorkCheckpointTests(unittest.TestCase):
                              caught.exception.terminal_outcome)
             self.assertEqual(str(patch), caught.exception.recovery_ref)
 
+    def test_initial_discovery_rejects_wrong_identity_before_remote_reads(self):
+        class CountingClient(FakeClient):
+            def __init__(self):
+                super().__init__()
+                self.api_calls = 0
+
+            def api(self, path, **kwargs):
+                self.api_calls += 1
+                return super().api(path, **kwargs)
+
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = RecordingRunner(["src/app.py"])
+            patch = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"),
+                repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit=self.BASE,
+                scope=["src/app.py"], mutation_state="post-mutation",
+                terminal_outcome="started-mid-work-failed",
+                originating_worker=self.WORKER, runner=runner))
+            manifest = invoke.recovery_manifest(patch)
+            value = json.loads(manifest.read_text())
+            value["repository"] = "other/repo"
+            manifest.write_text(json.dumps(value))
+            client = CountingClient()
+            with self.assertRaisesRegex(
+                    invoke.RecoveryError, "identity") as caught:
+                invoke.execute(
+                    "owner/repo", 214, "token", pathlib.Path("/checkout"),
+                    runner=runner, client=client)
+            self.assertEqual(0, client.api_calls)
+            self.assertEqual(str(patch), caught.exception.recovery_ref)
+
+    def test_initial_discovery_does_not_delete_cleanup_tombstones(self):
+        with tempfile.TemporaryDirectory() as recovery:
+            patch = pathlib.Path(recovery, "story.patch")
+            patch_tombstone = patch.with_name("story.patch.deleting")
+            manifest_tombstone = patch.with_name("story.json.deleting")
+            patch_tombstone.write_text("diff --git a/outside.py b/outside.py\n")
+            record = {
+                "schema_version": invoke.RECOVERY_SCHEMA_VERSION,
+                "trust": invoke.RECOVERY_TRUST,
+                "repository": "owner/repo", "story": 214,
+                "base_commit": self.BASE, "delivered_head": "d" * 40,
+                "recovered_paths": ["outside.py"],
+                "previous_mutation_state": "post-mutation",
+                "previous_terminal_outcome": "completed",
+                "patch_sha256": __import__("hashlib").sha256(
+                    patch_tombstone.read_bytes()).hexdigest(),
+                "originating_worker": self.WORKER,
+                "recovered_at": "2026-09-04T00:00:00Z",
+                "delivery_verified_at": "2026-09-04T00:01:00Z",
+            }
+            manifest_tombstone.write_text(json.dumps(record))
+            with mock.patch.object(
+                    invoke, "recovery_patch_paths", return_value=["outside.py"]):
+                self.assertTrue(invoke.recovery_available(
+                    patch, repo="owner/repo", story_number=214,
+                    scope=None, reconcile_cleanup=False))
+                self.assertTrue(patch_tombstone.exists())
+                self.assertTrue(manifest_tombstone.exists())
+                with self.assertRaisesRegex(invoke.RecoveryError, "provenance"):
+                    invoke.recovery_available(
+                        patch, repo="owner/repo", story_number=214,
+                        scope=["inside.py"])
+            self.assertTrue(patch_tombstone.exists())
+            self.assertTrue(manifest_tombstone.exists())
+
     def test_worktree_creation_failure_preserves_recovery_accounting(self):
         class WorktreeFailureRunner(RecordingRunner):
             def __call__(self, cmd, **kwargs):
