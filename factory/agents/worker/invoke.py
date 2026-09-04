@@ -405,8 +405,9 @@ def run(cmd: list[str], *, cwd: pathlib.Path, timeout: int, env=None,
     return result
 
 
-def git(args: list[str], cwd: pathlib.Path, *, timeout=300, runner=subprocess.run):
-    return run(["git", *args], cwd=cwd, timeout=timeout, runner=runner)
+def git(args: list[str], cwd: pathlib.Path, *, timeout=300, env=None,
+        runner=subprocess.run):
+    return run(["git", *args], cwd=cwd, timeout=timeout, env=env, runner=runner)
 
 
 def _remote_repo(url: str) -> str:
@@ -788,7 +789,7 @@ def mark_recovery_push_pending(patch: pathlib.Path, head: str) -> None:
 def validate_recovery_head_content(patch: pathlib.Path, head: str,
                                    checkout: pathlib.Path, *,
                                    runner=subprocess.run) -> None:
-    """Prove the recorded commit contains the checkpoint's exact patch."""
+    """Prove the recorded commit's tree is exactly the checkpoint result."""
     try:
         value = json.loads(
             recovery_manifest(patch).read_text(encoding="utf-8"))
@@ -798,10 +799,21 @@ def validate_recovery_head_content(patch: pathlib.Path, head: str,
     base = value.get("base_commit") if isinstance(value, dict) else None
     if not valid_commit(base) or not valid_commit(head):
         raise RecoveryError("pushed recovery checkpoint provenance is invalid")
-    committed = git(["diff", "--binary", base, head], checkout,
-                    runner=runner).stdout
-    if hashlib.sha256(committed.encode("utf-8")).hexdigest() != hashlib.sha256(
-            patch_text.encode("utf-8")).hexdigest():
+    with tempfile.TemporaryDirectory(prefix="factory-recovery-index-") as temp:
+        environment = os.environ.copy()
+        environment["GIT_INDEX_FILE"] = str(pathlib.Path(temp) / "index")
+        try:
+            git(["read-tree", base], checkout, env=environment, runner=runner)
+            run(["git", "apply", "--cached", "--binary", str(patch)],
+                cwd=checkout, timeout=300, env=environment, runner=runner)
+            expected_tree = git(["write-tree"], checkout, env=environment,
+                                runner=runner).stdout.strip()
+            delivered_tree = git(["rev-parse", f"{head}^{{tree}}"], checkout,
+                                 runner=runner).stdout.strip()
+        except Exception as exc:
+            raise RecoveryError(
+                "recovery checkpoint content could not be validated") from exc
+    if expected_tree != delivered_tree:
         raise RecoveryError("recovery checkpoint does not match recorded head")
 
 
@@ -1214,12 +1226,19 @@ def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
             setattr(exc, "recovery_ref", str(saved_recovery))
         raise
     packet = value["correction_context"]
-    obs.process_event(
-        "delivery.correction-context", trace_id=delivery_trace,
-        repo=repo, story=story_number, project=project_number,
-        retry=packet["retry"], pull_request=packet["pull_request"],
-        head=packet["head"], digest=packet["digest"],
-        source_ids=[item["comment_id"] for item in packet["records"]])
+    try:
+        obs.process_event(
+            "delivery.correction-context", trace_id=delivery_trace,
+            repo=repo, story=story_number, project=project_number,
+            retry=packet["retry"], pull_request=packet["pull_request"],
+            head=packet["head"], digest=packet["digest"],
+            source_ids=[item["comment_id"] for item in packet["records"]])
+    except Exception as exc:
+        if has_recovery:
+            setattr(exc, "mutation_state", "post-mutation")
+            setattr(exc, "terminal_outcome", "recovery-correction-event-failed")
+            setattr(exc, "recovery_ref", str(saved_recovery))
+        raise
     if has_recovery:
         try:
             reconcile_recovery_push(

@@ -295,6 +295,10 @@ class RecordingRunner:
             out = "diff --git a/src/app.py b/src/app.py\n"
         elif cmd[:4] == ["git", "apply", "--numstat", "-z"]:
             out = "".join(f"1\t0\t{path}\0" for path in self.changed)
+        elif cmd[:2] == ["git", "write-tree"]:
+            out = "f" * 40 + "\n"
+        elif cmd[:2] == ["git", "rev-parse"] and cmd[-1].endswith("^{tree}"):
+            out = "f" * 40 + "\n"
         elif cmd[:2] == ["git", "rev-parse"]:
             out = "d" * 40 + "\n"
         elif cmd[0] in ("claude", "codex"):
@@ -914,6 +918,32 @@ class FailedWorkCheckpointTests(unittest.TestCase):
             self.assertFalse(any(command and command[0] in ("codex", "claude")
                                  for command, _ in runner.calls))
 
+    def test_correction_event_failure_preserves_recovery_accounting(self):
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = RecordingRunner(["src/app.py"])
+            patch = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"),
+                repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit=self.BASE,
+                scope=["src/app.py"], mutation_state="post-mutation",
+                terminal_outcome="started-mid-work-failed",
+                originating_worker=self.WORKER, runner=runner))
+            with mock.patch.object(
+                    invoke.obs, "process_event",
+                    side_effect=OSError("event fsync failed")):
+                with self.assertRaisesRegex(OSError, "event fsync failed") as caught:
+                    invoke.execute(
+                        "owner/repo", 214, "token", pathlib.Path("/checkout"),
+                        runner=runner, client=FakeClient())
+            self.assertEqual("post-mutation", caught.exception.mutation_state)
+            self.assertEqual("recovery-correction-event-failed",
+                             caught.exception.terminal_outcome)
+            self.assertEqual(str(patch), caught.exception.recovery_ref)
+            self.assertTrue(patch.exists())
+            self.assertFalse(any(command and command[0] in ("codex", "claude")
+                                 for command, _ in runner.calls))
+
     def test_non_object_manifest_reports_prior_mutation_and_reference(self):
         with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
                 invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
@@ -1011,10 +1041,10 @@ class FailedWorkCheckpointTests(unittest.TestCase):
     def test_recorded_head_must_contain_the_checkpoint_patch(self):
         class UnrelatedHeadRunner(RecordingRunner):
             def __call__(self, cmd, **kwargs):
-                if cmd[:3] == ["git", "diff", "--binary"] and \
-                        "--cached" not in cmd:
+                if cmd[:2] == ["git", "rev-parse"] and \
+                        cmd[-1].endswith("^{tree}"):
                     return subprocess.CompletedProcess(
-                        cmd, 0, "diff --git a/other.py b/other.py\n", "")
+                        cmd, 0, "e" * 40 + "\n", "")
                 return super().__call__(cmd, **kwargs)
 
         with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
@@ -1034,6 +1064,38 @@ class FailedWorkCheckpointTests(unittest.TestCase):
                     patch, repo="owner/repo", story_number=214,
                     checkout=pathlib.Path("/checkout"),
                     scope=["src/app.py"], runner=runner)
+
+    def test_head_validation_uses_tree_not_attribute_sensitive_diff(self):
+        with tempfile.TemporaryDirectory() as directory, \
+             tempfile.TemporaryDirectory() as recovery:
+            root = pathlib.Path(directory)
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            (root / "payload.dat").write_text("base\n")
+            subprocess.run(["git", "add", "payload.dat"], cwd=root, check=True)
+            commit = ["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                      "commit", "-qm"]
+            subprocess.run([*commit, "base"], cwd=root, check=True)
+            base = subprocess.run(
+                ["git", "rev-parse", "HEAD"], cwd=root, check=True,
+                capture_output=True, text=True).stdout.strip()
+            (root / ".gitattributes").write_text("payload.dat binary\n")
+            (root / "payload.dat").write_text("delivered\n")
+            subprocess.run(["git", "add", ".gitattributes", "payload.dat"],
+                           cwd=root, check=True)
+            subprocess.run([*commit, "delivery"], cwd=root, check=True)
+            head = subprocess.run(
+                ["git", "rev-parse", "HEAD"], cwd=root, check=True,
+                capture_output=True, text=True).stdout.strip()
+            with mock.patch.dict(
+                    invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+                ref = pathlib.Path(invoke.checkpoint_failed_work(
+                    root, root, repo="owner/repo", story_number=214,
+                    default="main", base_ref=base, base_commit=base,
+                    scope=[".gitattributes", "payload.dat"],
+                    mutation_state="post-mutation",
+                    terminal_outcome="completed-awaiting-push",
+                    originating_worker=self.WORKER))
+                invoke.validate_recovery_head_content(ref, head, root)
 
     def test_interrupted_cleanup_unlink_failure_is_recovery_aware(self):
         with tempfile.TemporaryDirectory() as recovery:
