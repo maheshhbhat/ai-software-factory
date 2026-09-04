@@ -59,11 +59,13 @@ def valid_terminal_worker_outcome(row):
         return False
     if result == "LAUNCHED":
         return exit_code == 0 and valid_worker
-    if exit_code == 0:
-        return False
     if result in {"NO_ELIGIBLE_WORKER", "NO_WORKER_LAUNCHED"}:
         return row.get("worker") is None and exit_code is None
-    return valid_worker
+    if result == "AMBIGUOUS":
+        return valid_worker and exit_code is None
+    if result == "TERMINAL_FAILURE":
+        return valid_worker and exit_code is not None and exit_code != 0
+    return valid_worker and exit_code != 0
 
 
 def unique(rows, key):
@@ -150,7 +152,7 @@ def attempt_ledger(evidence, process, numbers):
         for row in process
         if row.get("event") in
         (TERMINAL_WORKER_EVENT, "worker.launch.start", "worker.launch.end",
-         "worker.failover")
+         "worker.failover", "delivery.pull-request.written")
         and row.get("repo") == repository and row.get("story") in numbers
         and row.get("trace_id")}
     for story, trace in sorted(worker_traces - claimed_traces):
@@ -196,9 +198,10 @@ def attempt_ledger(evidence, process, numbers):
                 f"claim {claim_id!r} for Story {story} needs exactly one "
                 "terminal worker outcome or evidence-unavailable record")
         outcome = outcomes[0] if len(outcomes) == 1 else None
-        if outcome and not outcome.get("event_id"):
+        if outcome and not valid_event_id(outcome.get("event_id")):
             findings.append(
-                f"terminal worker outcome for claim {claim_id!r} needs a durable event ID")
+                f"terminal worker outcome for claim {claim_id!r} needs a durable "
+                "nonempty string event ID")
         if outcome and not valid_terminal_worker_outcome(outcome):
             findings.append(
                 f"terminal worker outcome for claim {claim_id!r} needs a recognized "
@@ -233,6 +236,11 @@ def attempt_ledger(evidence, process, numbers):
             str(row.get("worker") or ""), str(row.get("event_id") or "")))
         reconciled_ends = []
         for end in launch_ends:
+            if not valid_terminal_worker_outcome(end):
+                findings.append(
+                    f"worker launch end {end.get('event_id')!r} for claim "
+                    f"{claim_id!r} needs a recognized result with a consistent "
+                    "worker and exit status")
             matching_starts = [
                 row for row in launch_starts
                 if valid_event_id(row.get("event_id")) and end.get("span_id")
@@ -265,8 +273,9 @@ def attempt_ledger(evidence, process, numbers):
                 and worker and row.get("worker") == worker]
             usable_ends = [
                 row for row in matching_ends
-                if ((row.get("result") == "LAUNCHED" and row.get("exit") == 0) or
-                    row.get("stderr") or row.get("stdout") or row.get("detail"))]
+                if valid_terminal_worker_outcome(row)
+                and ((row.get("result") == "LAUNCHED" and row.get("exit") == 0) or
+                     row.get("stderr") or row.get("stdout") or row.get("detail"))]
             unavailable_launch = evidence_unavailable(
                 evidence, kind="attempt-launch-diagnostics", story=story,
                 identity=f"{identity}:{start_id}")
@@ -306,7 +315,9 @@ def attempt_ledger(evidence, process, numbers):
                     row.get("result") not in (None, "LAUNCHED"))
                 and (row.get("stderr") or row.get("stdout") or row.get("detail"))]
             diagnostic = ((outcome.get("diagnostic_ref") or
-                           outcome.get("recovery_ref")) or
+                           outcome.get("recovery_ref") or
+                           (outcome.get("detail") if outcome.get("result") ==
+                            "NO_ELIGIBLE_WORKER" else None)) or
                           diagnostic_events or None)
             diagnostic_unavailable = evidence_unavailable(
                 evidence, kind="attempt-diagnostics", story=story,
@@ -342,6 +353,18 @@ def delivered_identity(outcome):
 def review_ledger(evidence, process, numbers, attempts):
     findings = []
     repository = evidence.get("repository")
+    scoped_reviews = [
+        row for row in process
+        if row.get("event") == REVIEW_OUTCOME_EVENT
+        and row.get("repo") == repository and row.get("story") in numbers]
+    durable_reviews = deterministic_copies(
+        [row for row in scoped_reviews if valid_event_id(row.get("event_id"))],
+        lambda row: (row.get("event_id"),), findings,
+        "scoped review event")
+    legacy_reviews = sorted(
+        [row for row in scoped_reviews if not valid_event_id(row.get("event_id"))],
+        key=lambda row: json.dumps(row, sort_keys=True, default=str))
+    scoped_reviews = durable_reviews + legacy_reviews
     grouped = {}
     for row in process:
         if (row.get("event") == "delivery.pull-request.written" and
@@ -410,10 +433,8 @@ def review_ledger(evidence, process, numbers, attempts):
         pr, head, story = (item.get("pull_request"), item.get("head"),
                            item.get("story"))
         review_candidates = [
-            row for row in process
-            if row.get("event") == REVIEW_OUTCOME_EVENT
-            and row.get("repo") == repository
-            and row.get("story") == story
+            row for row in scoped_reviews
+            if row.get("story") == story
             and row.get("pull_request") == pr and row.get("head") == head
             and row.get("verdict") in ("approval", "findings")]
         durable_reviews = deterministic_copies(
