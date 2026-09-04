@@ -1199,7 +1199,16 @@ def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
                     setattr(exc, "recovery_ref", str(saved_recovery))
                 raise
             if has_recovery:
-                mark_recovery_pushed(saved_recovery, head)
+                try:
+                    mark_recovery_pushed(saved_recovery, head)
+                except Exception as exc:
+                    # Git reported success, but without the durable promotion
+                    # marker a retry must reconcile the remote before deciding
+                    # whether another worker may run.
+                    setattr(exc, "mutation_state", "ambiguous")
+                    setattr(exc, "terminal_outcome", "push-outcome-ambiguous")
+                    setattr(exc, "recovery_ref", str(saved_recovery))
+                    raise
         except Exception as exc:
             try:
                 if (isinstance(exc, RecoveryError) or
@@ -1240,7 +1249,8 @@ def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
                                          str(checkpoint_error)).strip())
                 ref = ""
             if ref:
-                setattr(exc, "mutation_state", "post-mutation")
+                if getattr(exc, "mutation_state", "") != "ambiguous":
+                    setattr(exc, "mutation_state", "post-mutation")
                 setattr(exc, "recovery_ref", ref)
             raise
         finally:
