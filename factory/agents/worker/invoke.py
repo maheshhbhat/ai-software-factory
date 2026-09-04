@@ -115,6 +115,29 @@ class RecoveryError(DeliveryError):
                          terminal_outcome="recovery-invalid")
 
 
+def attach_recovery_failure(exc: Exception, patch: pathlib.Path,
+                            terminal_outcome: str) -> None:
+    """Keep a known prior mutation attached to every later setup failure."""
+    if not getattr(exc, "recovery_ref", ""):
+        setattr(exc, "mutation_state", "post-mutation")
+        setattr(exc, "terminal_outcome", terminal_outcome)
+        setattr(exc, "recovery_ref", str(patch))
+
+
+@contextlib.contextmanager
+def recovery_aware_temporary_directory(*, prefix: str, has_recovery: bool,
+                                       patch: pathlib.Path):
+    """Account for failures across a temporary directory's full lifecycle."""
+    try:
+        with tempfile.TemporaryDirectory(prefix=prefix) as temp:
+            yield temp
+    except Exception as exc:
+        if has_recovery:
+            attach_recovery_failure(
+                exc, patch, "recovery-delivery-worktree-lifecycle-failed")
+        raise
+
+
 def platform_diagnostics(checkout: pathlib.Path) -> dict:
     """Return non-sensitive facts that explain local filesystem failures.
 
@@ -916,6 +939,33 @@ def validate_recovery_head_content(patch: pathlib.Path, head: str,
         raise RecoveryError(
             "recovery checkpoint head could not be inspected") from exc
     try:
+        git(["cat-file", "-e", f"{base}^{{commit}}"], checkout,
+            runner=runner)
+    except DeliveryError:
+        try:
+            shallow = git(
+                ["rev-parse", "--is-shallow-repository"], checkout,
+                runner=runner).stdout.strip()
+            if shallow not in ("true", "false"):
+                raise ValueError("invalid shallow-repository response")
+            if shallow == "true":
+                git(["fetch", "--no-tags", "--unshallow", "origin"],
+                    checkout, runner=runner)
+            try:
+                git(["cat-file", "-e", f"{base}^{{commit}}"], checkout,
+                    runner=runner)
+            except DeliveryError:
+                git(["fetch", "--no-tags", "origin", base], checkout,
+                    runner=runner)
+                git(["cat-file", "-e", f"{base}^{{commit}}"], checkout,
+                    runner=runner)
+        except Exception as exc:
+            raise RecoveryError(
+                "recovery checkpoint base could not be fetched") from exc
+    except Exception as exc:
+        raise RecoveryError(
+            "recovery checkpoint base could not be inspected") from exc
+    try:
         with tempfile.TemporaryDirectory(
                 prefix="factory-recovery-index-") as temp:
             environment = os.environ.copy()
@@ -1483,7 +1533,9 @@ def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
             return Delivery(story_number, project_number, branch, fresh["number"],
                             delivered_head, False)
     originating_worker = {"task": task_key}
-    with tempfile.TemporaryDirectory(prefix=f"factory-story-{story_number}-") as temp:
+    with recovery_aware_temporary_directory(
+            prefix=f"factory-story-{story_number}-", has_recovery=has_recovery,
+            patch=saved_recovery) as temp:
         worktree = pathlib.Path(temp)
         recovery_context = {"present": False}
         restored_state = None
@@ -1751,12 +1803,24 @@ def main(argv=None) -> int:
         print("delivery failed: a valid admission reservation is required",
               file=sys.stderr)
         return 2
+    saved_recovery = recovery_patch(args.repo, args.story)
+    discovered_recovery = False
     try:
+        try:
+            discovered_recovery = recovery_available(
+                saved_recovery, repo=args.repo, story_number=args.story,
+                scope=None, reconcile_cleanup=False)
+        except RecoveryError as exc:
+            exc.recovery_ref = str(saved_recovery)
+            raise
         with checkout_for_repo(args.repo, pathlib.Path(args.checkout)) as checkout:
             result = execute(args.repo, args.story, token, checkout,
                              timeout=args.timeout, max_usd=args.max_usd,
                              reservation=args.reservation)
     except Exception as exc:
+        if discovered_recovery:
+            attach_recovery_failure(
+                exc, saved_recovery, "recovery-checkout-selection-failed")
         obs.operational_log("ERROR", "delivery worker failed", exc=exc,
                             component="delivery-worker", operation="delivery",
                             repo=args.repo, story=args.story,

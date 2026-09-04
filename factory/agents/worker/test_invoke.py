@@ -1981,6 +1981,71 @@ class FailedWorkCheckpointTests(unittest.TestCase):
             self.assertEqual("d" * 40, manifest["delivered_head"])
             self.assertTrue(runner.history_complete)
 
+    def test_shallow_matching_head_fetches_base_before_tree_reconstruction(self):
+        class ShallowBaseRunner(RecordingRunner):
+            history_complete = False
+
+            def __call__(self, cmd, **kwargs):
+                if cmd[:3] == ["git", "cat-file", "-e"]:
+                    self.calls.append((list(cmd), kwargs.get("env")))
+                    commit = cmd[-1].removesuffix("^{commit}")
+                    present = commit == "d" * 40 or self.history_complete
+                    return subprocess.CompletedProcess(
+                        cmd, 0 if present else 1, "", "missing")
+                if cmd[:3] == ["git", "rev-parse", "--is-shallow-repository"]:
+                    self.calls.append((list(cmd), kwargs.get("env")))
+                    return subprocess.CompletedProcess(cmd, 0, "true\n", "")
+                if cmd[:4] == ["git", "fetch", "--no-tags", "--unshallow"]:
+                    self.history_complete = True
+                return super().__call__(cmd, **kwargs)
+
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = ShallowBaseRunner(["src/app.py"])
+            patch = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"),
+                repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit=self.BASE,
+                scope=["src/app.py"], mutation_state="post-mutation",
+                terminal_outcome="completed-awaiting-push",
+                originating_worker=self.WORKER, runner=runner))
+            invoke.mark_recovery_pushed(patch, "d" * 40)
+            invoke.pushed_recovery_head(
+                patch, repo="owner/repo", story_number=214,
+                checkout=pathlib.Path("/checkout"), scope=["src/app.py"],
+                runner=runner)
+            self.assertTrue(runner.history_complete)
+            commands = [command for command, _ in runner.calls]
+            self.assertLess(
+                commands.index(["git", "fetch", "--no-tags", "--unshallow",
+                                "origin"]),
+                commands.index(["git", "read-tree", self.BASE]))
+
+    def test_story_tempdir_creation_failure_keeps_saved_recovery_accounting(self):
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = RecordingRunner(["src/app.py"])
+            patch = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"),
+                repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit=self.BASE,
+                scope=["src/app.py"], mutation_state="post-mutation",
+                terminal_outcome="started-mid-work-failed",
+                originating_worker=self.WORKER, runner=runner))
+            with mock.patch.object(
+                    invoke.tempfile, "TemporaryDirectory",
+                    side_effect=OSError("temporary storage unavailable")), \
+                 self.assertRaisesRegex(
+                     OSError, "temporary storage unavailable") as caught:
+                invoke.execute(
+                    "owner/repo", 214, "token", pathlib.Path("/checkout"),
+                    runner=runner, client=FakeClient())
+            self.assertEqual("post-mutation", caught.exception.mutation_state)
+            self.assertEqual(
+                "recovery-delivery-worktree-lifecycle-failed",
+                caught.exception.terminal_outcome)
+            self.assertEqual(str(patch), caught.exception.recovery_ref)
+
     def test_invalid_utf8_recovery_files_fail_through_recovery_error(self):
         with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
                 invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
@@ -2564,6 +2629,26 @@ class ProductCheckoutTests(unittest.TestCase):
             with invoke.checkout_for_repo(
                     "o/product", pathlib.Path("/factory"), runner=runner):
                 pass
+
+    def test_main_reports_saved_recovery_when_checkout_selection_fails(self):
+        error = invoke.DeliveryError("clone denied")
+        buffer = io.StringIO()
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ,
+                {"GH_TOKEN": "token", "FACTORY_RECOVERY_DIR": recovery}), \
+             mock.patch.object(invoke, "recovery_available", return_value=True), \
+             mock.patch.object(invoke, "checkout_for_repo", side_effect=error), \
+             mock.patch.object(invoke.sys, "stderr", buffer):
+            code = invoke.main([
+                "--repo", "owner/product", "--story", "214",
+                "--checkout", "/factory", "--reservation", "a" * 32,
+            ])
+        self.assertEqual(1, code)
+        report = buffer.getvalue()
+        self.assertIn('"mutation_state": "post-mutation"', report)
+        self.assertIn(
+            '"terminal_outcome": "recovery-checkout-selection-failed"', report)
+        self.assertIn('"recovery_ref":', report)
 
 
 class RepositoryTestCommandTests(unittest.TestCase):
