@@ -41,18 +41,22 @@ def fixture():
         for index in range(count):
             trace = f"trace-{story}-{index}"
             row = {"event": "story.claimed", "story": story,
+                   "repo": evidence["repository"],
                    "event_id": f"{story}-{index}", "trace_id": trace}
             process.extend([row, dict(row)])
             process.extend([
                 {"event": "worker.launch.start", "story": story,
+                 "repo": evidence["repository"],
                  "event_id": f"launch-start-{story}-{index}",
                  "trace_id": trace, "span_id": f"span-{story}-{index}",
                  "worker": "factory-worker"},
                 {"event": "worker.launch.end", "story": story,
+                 "repo": evidence["repository"],
                  "event_id": f"launch-end-{story}-{index}",
                  "trace_id": trace, "span_id": f"span-{story}-{index}",
                  "worker": "factory-worker", "result": "LAUNCHED", "exit": 0}])
             process.append({"event": "worker.outcome", "story": story,
+                            "repo": evidence["repository"],
                             "event_id": f"outcome-{story}-{index}",
                             "trace_id": trace, "worker": "factory-worker",
                             "result": "LAUNCHED", "exit": 0})
@@ -252,6 +256,34 @@ class Rung2ReportTests(unittest.TestCase):
         self.assertTrue(any("production event" in finding for finding in
                             result["measurement_integrity"]["findings"]))
 
+    def test_foreign_repository_cannot_supply_attempt_evidence(self):
+        values = list(fixture())
+        for row in values[1]:
+            if (row.get("story") == 20 and row.get("event") in
+                    ("story.claimed", "worker.launch.start",
+                     "worker.launch.end", "worker.outcome")):
+                row["repo"] = "other/product"
+        result = report.build(*values)
+        self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+        self.assertIn("Story 20 has no durable attempt claim evidence",
+                      result["measurement_integrity"]["findings"])
+        self.assertFalse(any(row["story"] == 20
+                             for row in result["attempt_ledger"]))
+
+    def test_declared_delivery_identity_must_belong_to_same_story(self):
+        values = list(fixture())
+        story_20, story_21 = values[0]["stories"][:2]
+        story_20["pull_request"] = story_21["pull_request"]
+        story_20["head"] = story_21["head"]
+        result = report.build(*values)
+        self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+        self.assertTrue(any("production event" in finding for finding in
+                            result["measurement_integrity"]["findings"]))
+        declared = next(row for row in result["review_ledger"]
+                        if row["story"] == 20 and
+                        row["pull_request"] == story_21["pull_request"])
+        self.assertIsNone(declared["review_outcome"])
+
     def test_merged_story_requires_durable_delivered_head(self):
         values = list(fixture())
         story = values[0]["stories"][0]
@@ -306,6 +338,7 @@ class Rung2ReportTests(unittest.TestCase):
                         "detail": "generic summary is not evidence"})
         values[1].append({
             "event": "worker.launch.end", "story": outcome["story"],
+            "repo": values[0]["repository"],
             "trace_id": outcome["trace_id"], "event_id": "launch-failure-20",
             "exit": 1, "stderr": "durable diagnostic"})
         result = report.build(*values)
@@ -323,10 +356,12 @@ class Rung2ReportTests(unittest.TestCase):
         for index in (1, 2):
             values[1].append({
                 "event": "worker.launch.start", "story": outcome["story"],
+                "repo": values[0]["repository"],
                 "trace_id": outcome["trace_id"], "event_id": f"start-{index}",
                 "span_id": f"span-{index}", "worker": f"worker-{index}"})
         values[1].append({
             "event": "worker.launch.end", "story": outcome["story"],
+            "repo": values[0]["repository"],
             "trace_id": outcome["trace_id"], "event_id": "end-1",
             "span_id": "span-1", "worker": "worker-1",
             "exit": 1, "stderr": "failed"})
@@ -353,10 +388,12 @@ class Rung2ReportTests(unittest.TestCase):
         for worker in ("claude", "codex"):
             values[1].append({
                 "event": "worker.launch.start", "story": outcome["story"],
+                "repo": values[0]["repository"],
                 "trace_id": outcome["trace_id"], "span_id": "shared-span",
                 "worker": worker, "event_id": f"start-{worker}"})
         values[1].append({
             "event": "worker.launch.end", "story": outcome["story"],
+            "repo": values[0]["repository"],
             "trace_id": outcome["trace_id"], "span_id": "shared-span",
             "worker": "claude", "event_id": "end-claude", "exit": 1,
             "stderr": "failed"})
@@ -364,6 +401,7 @@ class Rung2ReportTests(unittest.TestCase):
         self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
         values[1].append({
             "event": "worker.launch.end", "story": outcome["story"],
+            "repo": values[0]["repository"],
             "trace_id": outcome["trace_id"], "span_id": "shared-span",
             "worker": "codex", "event_id": "end-codex", "exit": 1,
             "stderr": "failed"})
@@ -377,10 +415,12 @@ class Rung2ReportTests(unittest.TestCase):
         for worker in ("claude", "codex"):
             values[1].append({
                 "event": "worker.launch.start", "story": outcome["story"],
+                "repo": values[0]["repository"],
                 "trace_id": outcome["trace_id"], "span_id": "shared-span",
                 "worker": worker, "event_id": f"start-{worker}"})
         values[1].append({
             "event": "worker.launch.end", "story": outcome["story"],
+            "repo": values[0]["repository"],
             "trace_id": outcome["trace_id"], "span_id": "shared-span",
             "worker": "codex", "event_id": "end-codex", "exit": 0,
             "result": "LAUNCHED"})
@@ -388,6 +428,7 @@ class Rung2ReportTests(unittest.TestCase):
         self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
         values[1].append({
             "event": "worker.launch.end", "story": outcome["story"],
+            "repo": values[0]["repository"],
             "trace_id": outcome["trace_id"], "span_id": "shared-span",
             "worker": "claude", "event_id": "end-claude", "exit": 1,
             "result": "FAILED", "stderr": "failed before fallback"})
@@ -425,9 +466,11 @@ class Rung2ReportTests(unittest.TestCase):
                        if row.get("event") == "worker.outcome")
         values[1].extend([
             {"event": "worker.launch.start", "story": outcome["story"],
+             "repo": values[0]["repository"],
              "trace_id": outcome["trace_id"], "span_id": "fallback-span",
              "worker": "failed-worker", "event_id": "fallback-start"},
             {"event": "worker.launch.end", "story": outcome["story"],
+             "repo": values[0]["repository"],
              "trace_id": outcome["trace_id"], "span_id": "fallback-span",
              "worker": "failed-worker", "event_id": "fallback-end",
              "result": "FAILED", "exit": 1}])
@@ -443,9 +486,11 @@ class Rung2ReportTests(unittest.TestCase):
                        if row.get("event") == "worker.outcome")
         values[1].extend([
             {"event": "worker.launch.start", "story": outcome["story"],
+             "repo": values[0]["repository"],
              "trace_id": outcome["trace_id"], "span_id": "shared-span",
              "event_id": "anonymous-start"},
             {"event": "worker.launch.end", "story": outcome["story"],
+             "repo": values[0]["repository"],
              "trace_id": outcome["trace_id"], "span_id": "shared-span",
              "event_id": "anonymous-end", "exit": 0, "result": "LAUNCHED"}])
         result = report.build(*values)
@@ -461,9 +506,11 @@ class Rung2ReportTests(unittest.TestCase):
         for index in (2, 1):
             values[1].extend([
                 {"event": "worker.launch.start", "story": outcome["story"],
+                 "repo": values[0]["repository"],
                  "trace_id": outcome["trace_id"], "span_id": f"span-{index}",
                  "worker": f"worker-{index}", "event_id": f"start-{index}"},
                 {"event": "worker.launch.end", "story": outcome["story"],
+                 "repo": values[0]["repository"],
                  "trace_id": outcome["trace_id"], "span_id": f"span-{index}",
                  "worker": f"worker-{index}", "event_id": f"end-{index}",
                  "exit": 1, "stderr": "failed"}])
@@ -479,6 +526,7 @@ class Rung2ReportTests(unittest.TestCase):
         outcome.update({"result": "AMBIGUOUS", "exit": None})
         values[1].append({
             "event": "worker.launch.end", "story": outcome["story"],
+            "repo": values[0]["repository"],
             "trace_id": outcome["trace_id"], "event_id": "timeout-diagnostic",
             "result": "AMBIGUOUS", "stderr": "timed out with partial output"})
         result = report.build(*values)

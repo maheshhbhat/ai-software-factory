@@ -53,9 +53,10 @@ def evidence_unavailable(evidence, *, kind, story, identity):
 
 
 def attempt_ledger(evidence, process, numbers):
+    repository = evidence.get("repository")
     claims = unique(
         [row for row in process if row.get("event") == "story.claimed"
-         and row.get("story") in numbers],
+         and row.get("story") in numbers and row.get("repo") == repository],
         lambda row: (row.get("story"), row.get("event_id")))
     claims.sort(key=lambda row: (
         row.get("story"), str(row.get("trace_id") or ""),
@@ -71,6 +72,7 @@ def attempt_ledger(evidence, process, numbers):
         outcomes = unique(
             [row for row in process
              if row.get("event") == TERMINAL_WORKER_EVENT
+             and row.get("repo") == repository
              and row.get("story") == story
              and ((trace and row.get("trace_id") == trace) or
                   (not trace and row.get("claim_event_id") == claim_id))],
@@ -93,6 +95,7 @@ def attempt_ledger(evidence, process, numbers):
         launch_starts = unique(
             [row for row in process
              if row.get("event") == "worker.launch.start"
+             and row.get("repo") == repository
              and row.get("story") == story and trace
              and row.get("trace_id") == trace],
             lambda row: (row.get("trace_id"), row.get("event_id")))
@@ -102,6 +105,7 @@ def attempt_ledger(evidence, process, numbers):
         launch_ends = unique(
             [row for row in process
              if row.get("event") == "worker.launch.end"
+             and row.get("repo") == repository
              and row.get("story") == story
              and trace and row.get("trace_id") == trace
              and row.get("event_id")
@@ -202,7 +206,8 @@ def review_ledger(evidence, process, numbers, attempts):
     for row in process:
         if (row.get("event") == "delivery.pull-request.written" and
                 row.get("story") in numbers and row.get("repo") == repository):
-            key = (row.get("trace_id"), row.get("pull_request"), row.get("head"))
+            key = (row.get("story"), row.get("trace_id"),
+                   row.get("pull_request"), row.get("head"))
             grouped.setdefault(key, []).append(row)
     produced = []
     for key in sorted(grouped, key=lambda value: tuple(str(v) for v in value)):
@@ -214,13 +219,16 @@ def review_ledger(evidence, process, numbers, attempts):
                 f"PR/head production evidence {key!r} has conflicting durable event IDs")
         produced.append(sorted(durable, key=lambda row: row["event_id"])[0]
                         if durable else candidates[0])
-    observed_pairs = {(row.get("pull_request"), row.get("head")) for row in produced}
+    observed_identities = {
+        (row.get("story"), row.get("pull_request"), row.get("head"))
+        for row in produced}
     expected = []
     for attempt in attempts:
         outcome = attempt.get("terminal_outcome") or {}
         if outcome.get("result") == "LAUNCHED":
             matching = [row for row in produced
-                        if row.get("trace_id") == attempt.get("trace_id")]
+                        if row.get("story") == attempt.get("story")
+                        and row.get("trace_id") == attempt.get("trace_id")]
             identity = ((matching[0].get("pull_request"), matching[0].get("head"))
                         if len(matching) == 1 else delivered_identity(outcome))
             if len(matching) != 1:
@@ -228,7 +236,7 @@ def review_ledger(evidence, process, numbers, attempts):
                 produced.append({"story": attempt.get("story"),
                                  "pull_request": pr, "head": head,
                                  "production_evidence_missing": True})
-                observed_pairs.add((pr, head))
+                observed_identities.add((attempt.get("story"), pr, head))
     for story in evidence.get("stories") or []:
         pr, head = story.get("pull_request"), story.get("head")
         if "pull_request" in story and not valid_pull_request(pr):
@@ -239,13 +247,14 @@ def review_ledger(evidence, process, numbers, attempts):
                 f"Story {story.get('number')} declares an invalid commit head")
         if head:
             expected.append((story.get("number"), (pr, head)))
-        elif pr and not any(row.get("pull_request") == pr for row in produced):
+        elif pr and not any(row.get("story") == story.get("number") and
+                            row.get("pull_request") == pr for row in produced):
             expected.append((story.get("number"), (pr, None)))
     for story, identity in expected:
         pr, head = identity or (None, None)
-        if (pr, head) not in observed_pairs:
+        if (story, pr, head) not in observed_identities:
             produced.append({"story": story, "pull_request": pr, "head": head})
-            observed_pairs.add((pr, head))
+            observed_identities.add((story, pr, head))
     for story in sorted(numbers):
         if not any(row.get("story") == story for row in produced):
             produced.append({"story": story, "pull_request": None, "head": None,
@@ -258,12 +267,14 @@ def review_ledger(evidence, process, numbers, attempts):
             row for row in process
             if row.get("event") == REVIEW_OUTCOME_EVENT
             and row.get("repo") == repository
+            and row.get("story") == story
             and row.get("pull_request") == pr and row.get("head") == head
             and row.get("verdict") in ("approval", "findings")]
         review_groups = {}
         for row in review_candidates:
             review_groups.setdefault(
-                (row.get("pull_request"), row.get("head"), row.get("verdict")),
+                (row.get("story"), row.get("pull_request"), row.get("head"),
+                 row.get("verdict")),
                 []).append(row)
         outcomes = []
         for key in sorted(review_groups, key=lambda value: tuple(str(v) for v in value)):
@@ -339,14 +350,11 @@ def build(evidence, process, telemetry, touches):
     reviews, review_findings = review_ledger(evidence, process, numbers, ledger)
     integrity.extend(ledger_findings)
     integrity.extend(review_findings)
-    claims = [row for row in process if row.get("event") == "story.claimed"
-              and row.get("story") in numbers]
-    claims = unique(claims, lambda row: (row.get("story"), row.get("event_id")))
     attempts_by_story = {
-        number: sum(row.get("story") == number for row in claims)
+        number: sum(row.get("story") == number for row in ledger)
         for number in sorted(numbers)
     }
-    attempts = sum(attempts_by_story.values())
+    attempts = len(ledger)
     retries = max(0, attempts - len(numbers))
 
     recovered = {row.get("number") for row in stories if row.get("human_recovery")}
