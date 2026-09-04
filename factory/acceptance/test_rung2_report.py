@@ -49,9 +49,16 @@ def fixture():
     for story in evidence["stories"]:
         pr, head = 100 + story["number"], str(story["number"])[-1] * 40
         story["pull_request"] = pr
-        process.append({"event": "delivery.pull-request.written",
-                        "story": story["number"], "pull_request": pr,
-                        "head": head})
+        story["head"] = head
+        for outcome in process:
+            if (outcome.get("event") == "worker.outcome" and
+                    outcome.get("story") == story["number"]):
+                outcome["detail"] = json.dumps(
+                    {"pull_request": pr, "head": head})
+                process.append({"event": "delivery.pull-request.written",
+                                "story": story["number"],
+                                "trace_id": outcome["trace_id"],
+                                "pull_request": pr, "head": head})
         process.append({"event": "review.outcome.published",
                         "story": story["number"], "pull_request": pr,
                         "head": head, "verdict": "approval",
@@ -151,7 +158,7 @@ class Rung2ReportTests(unittest.TestCase):
                              and row.get("story") == 20)]
         result = report.build(*values)
         self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
-        self.assertTrue(any("head None" in finding for finding in
+        self.assertTrue(any("production event" in finding for finding in
                             result["measurement_integrity"]["findings"]))
 
     def test_failed_attempt_requires_durable_diagnostic_or_unavailable_record(self):
@@ -187,6 +194,41 @@ class Rung2ReportTests(unittest.TestCase):
                       if row["trace_id"] == outcome["trace_id"])
         self.assertEqual("launch-failure-20",
                          ledger["diagnostic"][0]["event_id"])
+
+    def test_ambiguous_launch_accepts_matching_durable_diagnostic(self):
+        values = list(fixture())
+        outcome = next(row for row in values[1]
+                       if row.get("event") == "worker.outcome")
+        outcome.update({"result": "AMBIGUOUS", "exit": None})
+        values[1].append({
+            "event": "worker.launch.end", "story": outcome["story"],
+            "trace_id": outcome["trace_id"], "event_id": "timeout-diagnostic",
+            "result": "AMBIGUOUS", "stderr": "timed out with partial output"})
+        result = report.build(*values)
+        self.assertNotEqual("INCONCLUSIVE", result["rung_verdict"])
+
+    def test_reused_pr_requires_review_of_each_successful_delivered_head(self):
+        values = list(fixture())
+        outcome = next(row for row in values[1]
+                       if row.get("event") == "worker.outcome" and
+                       row.get("story") == 20)
+        final_head = "f" * 40
+        outcome["detail"] = json.dumps(
+            {"pull_request": 120, "head": final_head})
+        values[1] = [row for row in values[1]
+                     if not (row.get("event") == "delivery.pull-request.written"
+                             and row.get("trace_id") == outcome["trace_id"])]
+        result = report.build(*values)
+        self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+        values[1].extend([
+            {"event": "delivery.pull-request.written", "story": 20,
+             "trace_id": outcome["trace_id"], "pull_request": 120,
+             "head": final_head},
+            {"event": "review.outcome.published", "story": 20,
+             "pull_request": 120, "head": final_head, "verdict": "findings",
+             "event_id": "review-final-head"}])
+        result = report.build(*values)
+        self.assertNotEqual("INCONCLUSIVE", result["rung_verdict"])
 
     def test_thresholds_can_pass_but_integrity_is_independent(self):
         values = list(fixture())
