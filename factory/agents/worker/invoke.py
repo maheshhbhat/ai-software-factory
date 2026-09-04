@@ -678,8 +678,16 @@ def recovery_available(patch: pathlib.Path, *, repo: str | None = None,
 
 def _write_recovery_file(target: pathlib.Path, value: str) -> None:
     temporary = target.with_name(target.name + ".tmp")
-    temporary.write_text(value, encoding="utf-8")
+    with temporary.open("w", encoding="utf-8") as handle:
+        handle.write(value)
+        handle.flush()
+        os.fsync(handle.fileno())
     temporary.replace(target)
+    directory = os.open(target.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
 
 
 def remove_recovery(patch: pathlib.Path) -> None:
@@ -863,6 +871,24 @@ def checkout_recovered_gitlinks(worktree: pathlib.Path, paths: list[str], *,
         git(["submodule", "update", "--init", "--checkout", "--",
              *sorted(gitlinks)],
             worktree, runner=runner)
+
+
+def ensure_recovered_gitlinks_clean(worktree: pathlib.Path, paths: list[str], *,
+                                    runner=subprocess.run) -> None:
+    """Reject nested edits that the parent repository cannot record."""
+    if not paths:
+        return
+    staged = git(["ls-files", "--stage", "--", *paths], worktree,
+                 runner=runner).stdout
+    for relative in sorted(_gitlinks(staged)):
+        dirty = git(
+            ["-C", relative, "status", "--porcelain=v1",
+             "--untracked-files=all"], worktree, runner=runner).stdout
+        if dirty:
+            raise DeliveryError(
+                f"recovered submodule has uncommitted changes: {relative}",
+                mutation_state="post-mutation",
+                terminal_outcome="recovered-submodule-dirty")
 
 
 def mark_finalization_failure(exc: Exception, patch: pathlib.Path) -> None:
@@ -1249,6 +1275,9 @@ def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
             finally:
                 if owns_state:
                     state.close()
+            ensure_recovered_gitlinks_clean(
+                worktree, recovery_context.get("recovered_paths", []),
+                runner=runner)
             paths = changed_paths(worktree, f"origin/{default}", runner=runner)
             if not paths:
                 raise DeliveryError("worker produced no repository changes")

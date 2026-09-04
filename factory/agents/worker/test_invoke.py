@@ -371,6 +371,15 @@ class FailedWorkCheckpointTests(unittest.TestCase):
             self.assertEqual(
                 ["é-new.txt", "é.txt"], invoke.recovery_patch_paths(patch))
 
+    def test_recovery_file_is_fsynced_before_and_after_rename(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = pathlib.Path(directory, "checkpoint.json")
+            with mock.patch.object(invoke.os, "fsync",
+                                   wraps=invoke.os.fsync) as fsync:
+                invoke._write_recovery_file(target, "durable\n")
+            self.assertEqual("durable\n", target.read_text())
+            self.assertEqual(2, fsync.call_count)
+
     def test_in_scope_changes_are_committed_to_a_stable_local_recovery_ref(self):
         runner = RecordingRunner(["src/app.py"])
         with tempfile.TemporaryDirectory() as recovery:
@@ -754,6 +763,57 @@ class FailedWorkCheckpointTests(unittest.TestCase):
             self.assertEqual(str(patch), caught.exception.recovery_ref)
             self.assertFalse(any(command and command[0] in ("codex", "claude")
                                  for command, _ in runner.calls))
+
+    def test_dirty_recovered_submodule_blocks_tests_and_commit(self):
+        class DirtyGitlinkRunner(RecordingRunner):
+            def __call__(self, cmd, **kwargs):
+                result = super().__call__(cmd, **kwargs)
+                if cmd[:3] == ["git", "ls-files", "--stage"]:
+                    return subprocess.CompletedProcess(
+                        cmd, 0, "160000 " + "c" * 40 + " 0\tvendor/lib\n", "")
+                if cmd[:4] == ["git", "-C", "vendor/lib", "status"]:
+                    return subprocess.CompletedProcess(
+                        cmd, 0, " M local-only.py\n", "")
+                return result
+
+        class State:
+            health = None
+            @staticmethod
+            def models_for_task_prefix(*_args, **_kwargs): return ()
+
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = DirtyGitlinkRunner(["vendor/lib"])
+            patch = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"),
+                repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit="d" * 40,
+                scope=["vendor/lib"], mutation_state="post-mutation",
+                terminal_outcome="started-mid-work-failed",
+                originating_worker=self.WORKER, runner=runner))
+            result = SimpleNamespace(
+                outcome="success", output="done", terminal_outcome="completed",
+                attempts=({"model": "gpt-test", "provider": "openai",
+                           "invocation_id": "next", "reservation_id": None,
+                           "mutation_state": "post-mutation"},))
+            executor = mock.Mock()
+            executor.execute.return_value = result
+            with mock.patch.object(invoke, "CapacityExecutor",
+                                   return_value=executor), \
+                 mock.patch.object(invoke, "cli_adapter", return_value=mock.Mock()), \
+                 mock.patch.object(invoke, "repository_test_command") as tests:
+                with self.assertRaisesRegex(
+                        invoke.DeliveryError,
+                        "submodule has uncommitted changes") as caught:
+                    invoke.execute(
+                        "owner/repo", 214, "token", pathlib.Path("/checkout"),
+                        runner=runner, client=FakeClient(
+                            story_body=STORY_BODY.replace(
+                                "src/app.py", "vendor/lib")),
+                        state=State(), registry=[SimpleNamespace(provider="openai")])
+            tests.assert_not_called()
+            self.assertEqual("post-mutation", caught.exception.mutation_state)
+            self.assertEqual(str(patch), caught.exception.recovery_ref)
 
     def test_invalid_recovery_blocks_execute_before_engine_launch(self):
         with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
