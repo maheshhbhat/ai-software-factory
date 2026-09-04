@@ -197,10 +197,11 @@ def delivered_identity(outcome):
 
 def review_ledger(evidence, process, numbers, attempts):
     findings = []
+    repository = evidence.get("repository")
     grouped = {}
     for row in process:
         if (row.get("event") == "delivery.pull-request.written" and
-                row.get("story") in numbers):
+                row.get("story") in numbers and row.get("repo") == repository):
             key = (row.get("trace_id"), row.get("pull_request"), row.get("head"))
             grouped.setdefault(key, []).append(row)
     produced = []
@@ -230,6 +231,12 @@ def review_ledger(evidence, process, numbers, attempts):
                 observed_pairs.add((pr, head))
     for story in evidence.get("stories") or []:
         pr, head = story.get("pull_request"), story.get("head")
+        if "pull_request" in story and not valid_pull_request(pr):
+            findings.append(
+                f"Story {story.get('number')} declares an invalid pull-request number")
+        if "head" in story and not valid_commit_id(head):
+            findings.append(
+                f"Story {story.get('number')} declares an invalid commit head")
         if head:
             expected.append((story.get("number"), (pr, head)))
         elif pr and not any(row.get("pull_request") == pr for row in produced):
@@ -250,6 +257,7 @@ def review_ledger(evidence, process, numbers, attempts):
         review_candidates = [
             row for row in process
             if row.get("event") == REVIEW_OUTCOME_EVENT
+            and row.get("repo") == repository
             and row.get("pull_request") == pr and row.get("head") == head
             and row.get("verdict") in ("approval", "findings")]
         review_groups = {}

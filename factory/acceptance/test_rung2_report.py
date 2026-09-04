@@ -67,11 +67,13 @@ def fixture():
                     {"pull_request": pr, "head": head})
                 process.append({"event": "delivery.pull-request.written",
                                 "story": story["number"],
+                                "repo": evidence["repository"],
                                 "trace_id": outcome["trace_id"],
                                 "pull_request": pr, "head": head,
                                 "event_id": f"delivery-{outcome['trace_id']}"})
         process.append({"event": "review.outcome.published",
-                        "story": story["number"], "pull_request": pr,
+                        "story": story["number"], "repo": evidence["repository"],
+                        "pull_request": pr,
                         "head": head, "verdict": "approval",
                         "event_id": f"review-{pr}-{head}"})
     telemetry = [
@@ -227,6 +229,28 @@ class Rung2ReportTests(unittest.TestCase):
                 self.assertTrue(any("positive integer PR number" in finding
                                     for finding in
                                     result["measurement_integrity"]["findings"]))
+
+    def test_falsy_declared_pr_is_rejected_even_with_valid_process_evidence(self):
+        for invalid in (0, False):
+            with self.subTest(invalid=invalid):
+                values = list(fixture())
+                values[0]["stories"][0]["pull_request"] = invalid
+                result = report.build(*values)
+                self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+                self.assertTrue(any("declares an invalid pull-request" in finding
+                                    for finding in
+                                    result["measurement_integrity"]["findings"]))
+
+    def test_foreign_repository_cannot_supply_delivery_or_review_evidence(self):
+        values = list(fixture())
+        for row in values[1]:
+            if (row.get("story") == 20 and row.get("event") in
+                    ("delivery.pull-request.written", "review.outcome.published")):
+                row["repo"] = "other/product"
+        result = report.build(*values)
+        self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+        self.assertTrue(any("production event" in finding for finding in
+                            result["measurement_integrity"]["findings"]))
 
     def test_merged_story_requires_durable_delivered_head(self):
         values = list(fixture())
@@ -475,9 +499,11 @@ class Rung2ReportTests(unittest.TestCase):
         self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
         values[1].extend([
             {"event": "delivery.pull-request.written", "story": 20,
+             "repo": values[0]["repository"],
              "trace_id": outcome["trace_id"], "pull_request": 120,
              "head": final_head, "event_id": "delivery-final-head"},
             {"event": "review.outcome.published", "story": 20,
+             "repo": values[0]["repository"],
              "pull_request": 120, "head": final_head, "verdict": "findings",
              "event_id": "review-final-head"}])
         result = report.build(*values)
