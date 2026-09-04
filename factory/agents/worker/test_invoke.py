@@ -2021,6 +2021,87 @@ class FailedWorkCheckpointTests(unittest.TestCase):
                                 "origin"]),
                 commands.index(["git", "read-tree", self.BASE]))
 
+    def test_shallow_restore_fetches_recorded_base_before_ancestry_probe(self):
+        class ShallowRestoreRunner(RecordingRunner):
+            history_complete = False
+
+            def __call__(self, cmd, **kwargs):
+                if cmd[:3] == ["git", "cat-file", "-e"]:
+                    self.calls.append((list(cmd), kwargs.get("env")))
+                    commit = cmd[-1].removesuffix("^{commit}")
+                    present = commit != self.BASE or self.history_complete
+                    return subprocess.CompletedProcess(
+                        cmd, 0 if present else 1, "", "missing")
+                if cmd[:3] == ["git", "rev-parse", "--is-shallow-repository"]:
+                    self.calls.append((list(cmd), kwargs.get("env")))
+                    return subprocess.CompletedProcess(cmd, 0, "true\n", "")
+                if cmd[:4] == ["git", "fetch", "--no-tags", "--unshallow"]:
+                    self.history_complete = True
+                return super().__call__(cmd, **kwargs)
+
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = ShallowRestoreRunner(["src/app.py"])
+            runner.BASE = self.BASE
+            patch = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"),
+                repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit=self.BASE,
+                scope=["src/app.py"], mutation_state="post-mutation",
+                terminal_outcome="started-mid-work-failed",
+                originating_worker=self.WORKER, runner=runner))
+            invoke.restore_failed_work(
+                patch, pathlib.Path("/checkout"), repo="owner/repo",
+                story_number=214, base_commit="d" * 40,
+                scope=["src/app.py"], runner=runner)
+            commands = [command for command, _ in runner.calls]
+            self.assertLess(
+                commands.index(["git", "fetch", "--no-tags", "--unshallow",
+                                "origin"]),
+                commands.index(["git", "merge-base", "--is-ancestor",
+                                self.BASE, "d" * 40]))
+
+    def test_fallback_checkpoint_records_the_lease_that_actually_started(self):
+        class State:
+            health = None
+            @staticmethod
+            def models_for_task_prefix(*_args, **_kwargs): return ()
+
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = RecordingRunner(["src/app.py"])
+            result = SimpleNamespace(
+                outcome="failed", output="fallback worker failed",
+                terminal_outcome="worker-crashed",
+                attempts=({"model": "fallback-model", "provider": "openai",
+                           "invocation_id": "fallback-invocation",
+                           "reservation_id": "a" * 32,
+                           "mutation_state": "post-mutation"},))
+            executor = mock.Mock()
+
+            def execute(**kwargs):
+                kwargs["on_started"](SimpleNamespace(lease_id="a" * 32))
+                kwargs["on_started"](SimpleNamespace(lease_id="b" * 32))
+                return result
+
+            executor.execute.side_effect = execute
+            with mock.patch.object(invoke, "CapacityExecutor",
+                                   return_value=executor), \
+                 mock.patch.object(invoke, "cli_adapter", return_value=mock.Mock()), \
+                 mock.patch.object(invoke, "publish_worker_start"), \
+                 self.assertRaisesRegex(
+                     invoke.DeliveryError, "fallback worker failed"):
+                invoke.execute(
+                    "owner/repo", 214, "token", pathlib.Path("/checkout"),
+                    runner=runner, client=FakeClient(), state=State(),
+                    registry=[SimpleNamespace(provider="openai")])
+            patch = invoke.recovery_patch("owner/repo", 214)
+            manifest = json.loads(invoke.recovery_manifest(patch).read_text())
+            worker = manifest["originating_worker"]
+            self.assertEqual("b" * 32, worker["reservation_id"])
+            self.assertEqual("fallback-model", worker["model"])
+            self.assertEqual("fallback-invocation", worker["invocation_id"])
+
     def test_story_tempdir_creation_failure_keeps_saved_recovery_accounting(self):
         with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
                 invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):

@@ -915,6 +915,40 @@ def mark_recovery_push_pending(patch: pathlib.Path, head: str) -> None:
         manifest, json.dumps(value, indent=2, sort_keys=True) + "\n")
 
 
+def ensure_recovery_commit_available(commit: str, checkout: pathlib.Path, *,
+                                     runner=subprocess.run) -> None:
+    """Fetch an authenticated checkpoint commit omitted by shallow history."""
+    try:
+        git(["cat-file", "-e", f"{commit}^{{commit}}"], checkout,
+            runner=runner)
+        return
+    except DeliveryError:
+        pass
+    except Exception as exc:
+        raise RecoveryError(
+            "recovery checkpoint commit could not be inspected") from exc
+    try:
+        shallow = git(
+            ["rev-parse", "--is-shallow-repository"], checkout,
+            runner=runner).stdout.strip()
+        if shallow not in ("true", "false"):
+            raise ValueError("invalid shallow-repository response")
+        if shallow == "true":
+            git(["fetch", "--no-tags", "--unshallow", "origin"],
+                checkout, runner=runner)
+        try:
+            git(["cat-file", "-e", f"{commit}^{{commit}}"], checkout,
+                runner=runner)
+        except DeliveryError:
+            git(["fetch", "--no-tags", "origin", commit], checkout,
+                runner=runner)
+            git(["cat-file", "-e", f"{commit}^{{commit}}"], checkout,
+                runner=runner)
+    except Exception as exc:
+        raise RecoveryError(
+            "recovery checkpoint commit could not be fetched") from exc
+
+
 def validate_recovery_head_content(patch: pathlib.Path, head: str,
                                    checkout: pathlib.Path, *,
                                    runner=subprocess.run) -> None:
@@ -944,33 +978,7 @@ def validate_recovery_head_content(patch: pathlib.Path, head: str,
     except Exception as exc:
         raise RecoveryError(
             "recovery checkpoint head could not be inspected") from exc
-    try:
-        git(["cat-file", "-e", f"{base}^{{commit}}"], checkout,
-            runner=runner)
-    except DeliveryError:
-        try:
-            shallow = git(
-                ["rev-parse", "--is-shallow-repository"], checkout,
-                runner=runner).stdout.strip()
-            if shallow not in ("true", "false"):
-                raise ValueError("invalid shallow-repository response")
-            if shallow == "true":
-                git(["fetch", "--no-tags", "--unshallow", "origin"],
-                    checkout, runner=runner)
-            try:
-                git(["cat-file", "-e", f"{base}^{{commit}}"], checkout,
-                    runner=runner)
-            except DeliveryError:
-                git(["fetch", "--no-tags", "origin", base], checkout,
-                    runner=runner)
-                git(["cat-file", "-e", f"{base}^{{commit}}"], checkout,
-                    runner=runner)
-        except Exception as exc:
-            raise RecoveryError(
-                "recovery checkpoint base could not be fetched") from exc
-    except Exception as exc:
-        raise RecoveryError(
-            "recovery checkpoint base could not be inspected") from exc
+    ensure_recovery_commit_available(base, checkout, runner=runner)
     try:
         with tempfile.TemporaryDirectory(
                 prefix="factory-recovery-index-") as temp:
@@ -1316,6 +1324,8 @@ def restore_failed_work(patch: pathlib.Path, worktree: pathlib.Path, *,
     try:
         apply_args = ["apply", "--index", str(patch)]
         if recorded_base != base_commit:
+            ensure_recovery_commit_available(
+                recorded_base, worktree, runner=runner)
             git(["merge-base", "--is-ancestor", recorded_base, base_commit],
                 worktree, runner=runner)
             apply_args = ["apply", "--3way", "--index", str(patch)]
@@ -1600,6 +1610,13 @@ def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
                     telemetry=lambda **fields: obs.telemetry(
                         component="delivery-worker", operation="capacity-route",
                         story=story_number, project=project_number, **fields))
+                started_leases = []
+
+                def record_worker_start(lease):
+                    started_leases.append(lease.lease_id)
+                    publish_worker_start(
+                        client, repo=repo, story=story_number, version=version,
+                        reservation=lease.lease_id, invocation=task_key)
 
                 def validate(_output):
                     produced = changed_paths(
@@ -1619,16 +1636,16 @@ def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
                         request=request, registry=available,
                         payload=InvocationPayload(prompt, access="workspace-write"),
                         validate=validate, reservation_id=reservation,
-                        on_started=(lambda lease: publish_worker_start(
-                            client, repo=repo, story=story_number, version=version,
-                            reservation=lease.lease_id, invocation=task_key)))
+                        on_started=record_worker_start)
                 if result.attempts:
                     final_attempt = result.attempts[-1]
                     originating_worker.update({
                         key: final_attempt[key] for key in (
-                            "invocation_id", "reservation_id", "provider", "model")
+                            "invocation_id", "provider", "model")
                         if final_attempt.get(key) is not None
                     })
+                    if started_leases:
+                        originating_worker["reservation_id"] = started_leases[-1]
                     runlog.engine_usage(
                         story=story_number, project=project_number,
                         engine=final_attempt["model"], phase="worker",
