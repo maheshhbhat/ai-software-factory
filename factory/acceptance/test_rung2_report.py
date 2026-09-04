@@ -257,6 +257,30 @@ class Rung2ReportTests(unittest.TestCase):
         result = report.build(*values)
         self.assertNotEqual("INCONCLUSIVE", result["rung_verdict"])
 
+    def test_failed_launch_is_reconciled_when_fallback_succeeds(self):
+        values = list(fixture())
+        outcome = next(row for row in values[1]
+                       if row.get("event") == "worker.outcome")
+        for worker in ("claude", "codex"):
+            values[1].append({
+                "event": "worker.launch.start", "story": outcome["story"],
+                "trace_id": outcome["trace_id"], "span_id": "shared-span",
+                "worker": worker, "event_id": f"start-{worker}"})
+        values[1].append({
+            "event": "worker.launch.end", "story": outcome["story"],
+            "trace_id": outcome["trace_id"], "span_id": "shared-span",
+            "worker": "codex", "event_id": "end-codex", "exit": 0,
+            "result": "LAUNCHED"})
+        result = report.build(*values)
+        self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+        values[1].append({
+            "event": "worker.launch.end", "story": outcome["story"],
+            "trace_id": outcome["trace_id"], "span_id": "shared-span",
+            "worker": "claude", "event_id": "end-claude", "exit": 1,
+            "result": "FAILED", "stderr": "failed before fallback"})
+        result = report.build(*values)
+        self.assertNotEqual("INCONCLUSIVE", result["rung_verdict"])
+
     def test_nested_launch_ledger_is_independent_of_fragment_order(self):
         values = list(fixture())
         outcome = next(row for row in values[1]
