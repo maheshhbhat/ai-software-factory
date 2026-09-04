@@ -361,7 +361,7 @@ class FailedWorkCheckpointTests(unittest.TestCase):
             repo="owner/repo", story_number=214))
         self.assertTrue(invoke.valid_recovery_worker(
             self.WORKER, repo="owner/repo", story_number=214))
-        for suffix in ("", "not-an-attempt", "-1", "+1", "01", "1.0"):
+        for suffix in ("", "not-an-attempt", "-1", "+1", "01", "1.0", "²"):
             with self.subTest(suffix=suffix):
                 self.assertFalse(invoke.valid_recovery_worker(
                     {"task": f"delivery:owner/repo:214:{suffix}"},
@@ -1346,6 +1346,35 @@ class FailedWorkCheckpointTests(unittest.TestCase):
                     patch, repo="owner/repo", story_number=214,
                     checkout=pathlib.Path("/checkout"),
                     scope=["src/app.py"], runner=runner)
+
+    def test_missing_local_recovery_head_is_fetched_before_tree_validation(self):
+        class MissingHeadRunner(RecordingRunner):
+            fetched = False
+
+            def __call__(self, cmd, **kwargs):
+                if cmd[:3] == ["git", "cat-file", "-e"] and not self.fetched:
+                    self.calls.append((list(cmd), kwargs.get("env")))
+                    return subprocess.CompletedProcess(cmd, 1, "", "missing")
+                if cmd[:4] == ["git", "fetch", "--no-tags", "origin"]:
+                    self.fetched = True
+                return super().__call__(cmd, **kwargs)
+
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = MissingHeadRunner(["src/app.py"])
+            patch = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"),
+                repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit=self.BASE,
+                scope=["src/app.py"], mutation_state="post-mutation",
+                terminal_outcome="completed-awaiting-push",
+                originating_worker=self.WORKER, runner=runner))
+            invoke.mark_recovery_pushed(patch, "e" * 40)
+            self.assertEqual("e" * 40, invoke.pushed_recovery_head(
+                patch, repo="owner/repo", story_number=214,
+                checkout=pathlib.Path("/checkout"), scope=["src/app.py"],
+                runner=runner))
+            self.assertTrue(runner.fetched)
 
     def test_head_validation_uses_tree_not_attribute_sensitive_diff(self):
         with tempfile.TemporaryDirectory() as directory, \

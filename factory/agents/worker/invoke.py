@@ -83,7 +83,7 @@ def valid_recovery_worker(value, *, repo: str, story_number: int) -> bool:
     suffix = (task.removeprefix(task_prefix)
               if isinstance(task, str) and task.startswith(task_prefix) else "")
     return (isinstance(value, dict) and
-            suffix.isdigit() and str(int(suffix)) == suffix and
+            re.fullmatch(r"(?:0|[1-9][0-9]*)", suffix) is not None and
             not any(key in value and
                     (not isinstance(value[key], str) or not value[key])
                     for key in ("invocation_id", "reservation_id",
@@ -887,6 +887,19 @@ def validate_recovery_head_content(patch: pathlib.Path, head: str,
     base = value.get("base_commit") if isinstance(value, dict) else None
     if not valid_commit(base) or not valid_commit(head):
         raise RecoveryError("pushed recovery checkpoint provenance is invalid")
+    try:
+        git(["cat-file", "-e", f"{head}^{{commit}}"], checkout,
+            runner=runner)
+    except DeliveryError:
+        # A valid durable PR can be resumed from a different checkout that has
+        # not fetched its exact head object yet. Fetch that immutable object
+        # before comparing trees; failure remains recovery-aware below.
+        try:
+            git(["fetch", "--no-tags", "origin", head], checkout,
+                runner=runner)
+        except Exception as exc:
+            raise RecoveryError(
+                "recovery checkpoint head could not be fetched") from exc
     with tempfile.TemporaryDirectory(prefix="factory-recovery-index-") as temp:
         environment = os.environ.copy()
         environment["GIT_INDEX_FILE"] = str(pathlib.Path(temp) / "index")
