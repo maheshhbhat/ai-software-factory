@@ -60,6 +60,7 @@ class CapacityExecutor:
         for index, step in enumerate(plan.steps):
             invocation_id = uuid.uuid4().hex
             attempt = None
+            lease = None
             observed_failure = True
             elapsed = max(0, int(self.monotonic() - started))
             remaining_time, remaining_budget = remaining_envelope(
@@ -99,9 +100,20 @@ class CapacityExecutor:
                                 "start-evidence-failed", str(exc)[:500], records,
                                 consumed, terminal_outcome="launch-failed")
                     else:
-                        lease = self.state.reserve(
+                        fallback_reservation = self.state.reserve(
                             task_key, step.provider, step.model, attempt_budget,
                             ttl_seconds=attempt_time)
+                        lease = self.state.consume(
+                            fallback_reservation.lease_id, task_key=task_key)
+                        if index > 0:
+                            try:
+                                on_started(lease)
+                            except Exception as exc:
+                                self.state.abort_start(lease.lease_id)
+                                return self._finish(
+                                    "start-evidence-failed", str(exc)[:500],
+                                    records, consumed,
+                                    terminal_outcome="launch-failed")
                 except DuplicateTask:
                     return self._finish("duplicate-execution", "", records, consumed,
                                         terminal_outcome="not-admitted")
@@ -146,8 +158,8 @@ class CapacityExecutor:
                 attempt, charged_capacity_units=(
                     min(attempt_budget, reported) if lease is not None else 0.0))
             record = {"attempt": index + 1, "invocation_id": invocation_id,
-                      "worker_start_invocation_id": (task_key if reservation_id else None),
-                      "reservation_id": reservation_id,
+                      "worker_start_invocation_id": (task_key if lease else None),
+                      "reservation_id": (lease.lease_id if lease else None),
                       "provider": step.provider,
                       "model": step.model, "tier": step.tier.name.lower(),
                       "effort": step.effort, "outcome": attempt.outcome,
