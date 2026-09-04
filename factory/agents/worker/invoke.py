@@ -436,6 +436,32 @@ def checkout_for_repo(repo: str, configured: pathlib.Path,
         yield checkout
 
 
+def pending_paths(worktree: pathlib.Path,
+                  runner=subprocess.run) -> list[str]:
+    """Return paths represented by the current index and worktree only."""
+    # --untracked-files=all: plain --porcelain collapses a brand-new directory
+    # to one `dir/` line, which no `dir/sub/**` scope can match — the worker
+    # then refuses its own in-scope work (#358, found live by fixture #357).
+    pending = [item for item in git(
+        ["status", "--porcelain", "-z", "--untracked-files=all"], worktree,
+        runner=runner).stdout.split("\0") if item]
+    paths = []
+    index = 0
+    while index < len(pending):
+        entry = pending[index]
+        if len(entry) <= 3:
+            raise DeliveryError("Git returned malformed machine-readable status")
+        status = entry[:2]
+        paths.append(entry[3:])
+        if "R" in status or "C" in status:
+            index += 1
+            if index >= len(pending) or not pending[index]:
+                raise DeliveryError("Git returned incomplete rename status")
+            paths.append(pending[index])
+        index += 1
+    return sorted(set(path for path in paths if path))
+
+
 def changed_paths(worktree: pathlib.Path, base: str,
                   runner=subprocess.run) -> list[str]:
     tracked_items = [item for item in git(
@@ -451,27 +477,7 @@ def changed_paths(worktree: pathlib.Path, base: str,
             raise DeliveryError("Git returned incomplete committed path status")
         tracked.extend(tracked_items[index:index + path_count])
         index += path_count
-    # --untracked-files=all: plain --porcelain collapses a brand-new directory
-    # to one `dir/` line, which no `dir/sub/**` scope can match — the worker
-    # then refuses its own in-scope work (#358, found live by fixture #357).
-    pending = [item for item in git(
-        ["status", "--porcelain", "-z", "--untracked-files=all"], worktree,
-        runner=runner).stdout.split("\0") if item]
-    paths = list(tracked)
-    index = 0
-    while index < len(pending):
-        entry = pending[index]
-        if len(entry) <= 3:
-            raise DeliveryError("Git returned malformed machine-readable status")
-        status = entry[:2]
-        paths.append(entry[3:])
-        if "R" in status or "C" in status:
-            index += 1
-            if index >= len(pending) or not pending[index]:
-                raise DeliveryError("Git returned incomplete rename status")
-            paths.append(pending[index])
-        index += 1
-    return sorted(set(path for path in paths if path))
+    return sorted(set(tracked + pending_paths(worktree, runner=runner)))
 
 
 def repository_test_command(worktree: pathlib.Path) -> list[str]:
@@ -991,7 +997,13 @@ def checkpoint_failed_work(worktree: pathlib.Path, checkout: pathlib.Path, *,
         return ""
     if not valid_commit(base_commit):
         raise DeliveryError("recovery checkpoint base commit is invalid")
-    git(["add", "--", *paths], worktree, runner=runner)
+    # A post-commit checkpoint includes historical deletions and rename sources
+    # in `paths`, but those paths no longer exist in HEAD or the index. Only ask
+    # Git to stage changes that are still pending; the base-to-index diff below
+    # continues to preserve every historical path in the recovery patch.
+    pending = pending_paths(worktree, runner=runner)
+    if pending:
+        git(["add", "--", *pending], worktree, runner=runner)
     patch = git(["diff", "--binary", "--cached", base_commit],
                 worktree, runner=runner).stdout
     if not patch:

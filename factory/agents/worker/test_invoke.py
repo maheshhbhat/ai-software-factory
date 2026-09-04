@@ -423,6 +423,37 @@ class FailedWorkCheckpointTests(unittest.TestCase):
         commands = [command for command, _ in runner.calls]
         self.assertIn(["git", "add", "--", "src/app.py"], commands)
 
+    def test_committed_deletion_is_recorded_without_restaging_missing_path(self):
+        with tempfile.TemporaryDirectory() as directory, \
+             tempfile.TemporaryDirectory() as recovery:
+            root = pathlib.Path(directory)
+            subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+            deleted = root / "deleted.txt"
+            deleted.write_text("tracked\n")
+            subprocess.run(["git", "add", "deleted.txt"], cwd=root, check=True)
+            commit = ["git", "-c", "user.email=t@t", "-c", "user.name=t",
+                      "commit", "-qm"]
+            subprocess.run([*commit, "base"], cwd=root, check=True)
+            base = subprocess.run(
+                ["git", "rev-parse", "HEAD"], cwd=root, check=True,
+                capture_output=True, text=True).stdout.strip()
+            deleted.unlink()
+            subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+            subprocess.run([*commit, "delete"], cwd=root, check=True)
+
+            with mock.patch.dict(
+                    invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+                ref = pathlib.Path(invoke.checkpoint_failed_work(
+                    root, root, repo="owner/repo", story_number=214,
+                    default="main", base_ref=base, base_commit=base,
+                    scope=["deleted.txt"], mutation_state="post-mutation",
+                    terminal_outcome="post-commit-failed",
+                    originating_worker=self.WORKER))
+
+            manifest = json.loads(invoke.recovery_manifest(ref).read_text())
+            self.assertEqual(["deleted.txt"], manifest["recovered_paths"])
+            self.assertIn("deleted file mode", ref.read_text())
+
     def test_out_of_scope_changes_are_not_checkpointed(self):
         runner = RecordingRunner(["secrets.txt"])
         ref = invoke.checkpoint_failed_work(
