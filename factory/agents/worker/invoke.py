@@ -737,7 +737,11 @@ def recovery_available(patch: pathlib.Path, *, repo: str | None = None,
                         "recovery cleanup transaction could not finish") from exc
                 return False
             raise RecoveryError("recovery cleanup transaction is invalid")
-        patch_text = patch_source.read_text(encoding="utf-8")
+        try:
+            patch_text = patch_source.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise RecoveryError(
+                "recovery cleanup patch is unavailable") from exc
         validate_pushed_recovery(
             value, patch_text, repo=repo, story_number=story_number, scope=scope,
             patch_paths=recovery_patch_paths(patch_source, runner=runner))
@@ -787,7 +791,11 @@ def recovery_available(patch: pathlib.Path, *, repo: str | None = None,
     # One leftover means the active pair was never replaced or replacement
     # completed and backup cleanup was interrupted. The active pair has now
     # been validated, so the incomplete backup cannot be authoritative.
-    _unlink_recovery_files(previous_patch, previous_manifest)
+    try:
+        _unlink_recovery_files(previous_patch, previous_manifest)
+    except OSError as exc:
+        raise RecoveryError(
+            "recovery generation cleanup could not finish") from exc
     return True
 
 
@@ -900,6 +908,9 @@ def validate_recovery_head_content(patch: pathlib.Path, head: str,
         except Exception as exc:
             raise RecoveryError(
                 "recovery checkpoint head could not be fetched") from exc
+    except Exception as exc:
+        raise RecoveryError(
+            "recovery checkpoint head could not be inspected") from exc
     with tempfile.TemporaryDirectory(prefix="factory-recovery-index-") as temp:
         environment = os.environ.copy()
         environment["GIT_INDEX_FILE"] = str(pathlib.Path(temp) / "index")

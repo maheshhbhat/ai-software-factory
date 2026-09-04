@@ -1147,6 +1147,49 @@ class FailedWorkCheckpointTests(unittest.TestCase):
                     scope=["inside.py"])
             self.assertTrue(manifest_tombstone.exists())
 
+    def test_tombstone_patch_read_failure_is_recovery_aware(self):
+        with tempfile.TemporaryDirectory() as recovery:
+            patch = pathlib.Path(recovery, "story.patch")
+            patch_tombstone = patch.with_name("story.patch.deleting")
+            manifest_tombstone = patch.with_name("story.json.deleting")
+            patch_tombstone.write_text("patch")
+            record = {
+                "schema_version": invoke.RECOVERY_SCHEMA_VERSION,
+                "trust": invoke.RECOVERY_TRUST,
+                "repository": "owner/repo", "story": 214,
+            }
+            manifest_tombstone.write_text(json.dumps(record))
+            with mock.patch.object(
+                    pathlib.Path, "read_text",
+                    side_effect=[json.dumps(record), OSError("patch denied")]):
+                with self.assertRaisesRegex(
+                        invoke.RecoveryError, "cleanup patch") as caught:
+                    invoke.recovery_available(
+                        patch, repo="owner/repo", story_number=214)
+            self.assertEqual("post-mutation", caught.exception.mutation_state)
+
+    def test_orphan_backup_cleanup_failure_is_recovery_aware(self):
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = RecordingRunner(["src/app.py"])
+            patch = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"),
+                repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit=self.BASE,
+                scope=["src/app.py"], mutation_state="post-mutation",
+                terminal_outcome="started-mid-work-failed",
+                originating_worker=self.WORKER, runner=runner))
+            invoke.recovery_previous(patch)[0].write_text("orphan")
+            with mock.patch.object(
+                    invoke, "_unlink_recovery_files",
+                    side_effect=OSError("unlink denied")):
+                with self.assertRaisesRegex(
+                        invoke.RecoveryError, "generation cleanup") as caught:
+                    invoke.recovery_available(
+                        patch, repo="owner/repo", story_number=214,
+                        scope=["src/app.py"], runner=runner)
+            self.assertEqual("post-mutation", caught.exception.mutation_state)
+
     def test_cleanup_reconciliation_flushes_tombstone_deletion(self):
         with tempfile.TemporaryDirectory() as recovery:
             patch = pathlib.Path(recovery, "story.patch")
@@ -1375,6 +1418,32 @@ class FailedWorkCheckpointTests(unittest.TestCase):
                 checkout=pathlib.Path("/checkout"), scope=["src/app.py"],
                 runner=runner))
             self.assertTrue(runner.fetched)
+
+    def test_recovery_head_probe_launch_failure_is_recovery_aware(self):
+        class ProbeFailureRunner(RecordingRunner):
+            def __call__(self, cmd, **kwargs):
+                if cmd[:3] == ["git", "cat-file", "-e"]:
+                    raise OSError("probe launch failed")
+                return super().__call__(cmd, **kwargs)
+
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = ProbeFailureRunner(["src/app.py"])
+            patch = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"),
+                repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit=self.BASE,
+                scope=["src/app.py"], mutation_state="post-mutation",
+                terminal_outcome="completed-awaiting-push",
+                originating_worker=self.WORKER, runner=runner))
+            invoke.mark_recovery_pushed(patch, "e" * 40)
+            with self.assertRaisesRegex(
+                    invoke.RecoveryError, "could not be inspected") as caught:
+                invoke.pushed_recovery_head(
+                    patch, repo="owner/repo", story_number=214,
+                    checkout=pathlib.Path("/checkout"),
+                    scope=["src/app.py"], runner=runner)
+            self.assertEqual("post-mutation", caught.exception.mutation_state)
 
     def test_head_validation_uses_tree_not_attribute_sensitive_diff(self):
         with tempfile.TemporaryDirectory() as directory, \
