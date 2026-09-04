@@ -1564,6 +1564,7 @@ def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
                 setattr(exc, "terminal_outcome", "recovery-worktree-creation-failed")
                 setattr(exc, "recovery_ref", str(saved_recovery))
             raise
+        failure_for_cleanup = None
         try:
             if has_recovery:
                 recovery_context = restore_failed_work(
@@ -1777,17 +1778,26 @@ def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
                 if getattr(exc, "mutation_state", "") != "ambiguous":
                     setattr(exc, "mutation_state", "post-mutation")
                 setattr(exc, "recovery_ref", ref)
+            failure_for_cleanup = exc
             raise
         finally:
             try:
                 git(["worktree", "remove", "--force", str(worktree)], checkout,
                     runner=runner)
             except Exception as exc:
-                if has_recovery:
-                    setattr(exc, "mutation_state", "post-mutation")
-                    setattr(exc, "terminal_outcome", "worktree-cleanup-failed")
-                    setattr(exc, "recovery_ref", str(saved_recovery))
-                raise
+                if (failure_for_cleanup is not None and
+                        getattr(failure_for_cleanup, "mutation_state", "") ==
+                        "ambiguous" and not has_recovery):
+                    prior = getattr(failure_for_cleanup, "output", "")
+                    setattr(
+                        failure_for_cleanup, "output",
+                        (prior + "\nworktree cleanup failed: " + str(exc)).strip())
+                else:
+                    if has_recovery:
+                        setattr(exc, "mutation_state", "post-mutation")
+                        setattr(exc, "terminal_outcome", "worktree-cleanup-failed")
+                        setattr(exc, "recovery_ref", str(saved_recovery))
+                    raise
 
     try:
         body = f"Story: #{story_number}\n\n{durable}\n"

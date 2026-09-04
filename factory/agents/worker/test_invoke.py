@@ -2366,6 +2366,47 @@ class FailedWorkCheckpointTests(unittest.TestCase):
             self.assertEqual(str(patch), caught.exception.recovery_ref)
             self.assertTrue(patch.exists())
 
+    def test_cleanup_cannot_mask_ambiguous_checkpoint_failure(self):
+        class CleanupFailureRunner(RecordingRunner):
+            def __call__(self, cmd, **kwargs):
+                result = super().__call__(cmd, **kwargs)
+                if cmd[:4] == ["git", "worktree", "remove", "--force"]:
+                    return subprocess.CompletedProcess(
+                        cmd, 1, "", "worktree remove failed")
+                return result
+
+        class State:
+            health = None
+            @staticmethod
+            def models_for_task_prefix(*_args, **_kwargs): return ()
+
+        runner = CleanupFailureRunner(["src/app.py"])
+        result = SimpleNamespace(
+            outcome="failed", output="worker failed",
+            terminal_outcome="worker-crashed",
+            attempts=({"model": "gpt-test", "provider": "openai",
+                       "invocation_id": "first", "reservation_id": None,
+                       "mutation_state": "post-mutation"},))
+        executor = mock.Mock()
+        executor.execute.return_value = result
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}), \
+             mock.patch.object(invoke, "CapacityExecutor", return_value=executor), \
+             mock.patch.object(invoke, "cli_adapter", return_value=mock.Mock()), \
+             mock.patch.object(invoke, "checkpoint_failed_work",
+                               side_effect=OSError("checkpoint unavailable")):
+            with self.assertRaisesRegex(
+                    invoke.DeliveryError, "worker failed") as caught:
+                invoke.execute(
+                    "owner/repo", 214, "token", pathlib.Path("/checkout"),
+                    runner=runner, client=FakeClient(), state=State(),
+                    registry=[SimpleNamespace(provider="openai")])
+        self.assertEqual("ambiguous", caught.exception.mutation_state)
+        self.assertIn("checkpoint failed: checkpoint unavailable",
+                      caught.exception.output)
+        self.assertIn("worktree cleanup failed", caught.exception.output)
+        self.assertFalse(caught.exception.recovery_ref)
+
     def test_first_pass_ambiguous_push_has_a_pending_recovery_marker(self):
         class PushFailureRunner(RecordingRunner):
             def __call__(self, cmd, **kwargs):
