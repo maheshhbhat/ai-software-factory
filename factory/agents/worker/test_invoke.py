@@ -291,6 +291,8 @@ class RecordingRunner:
             out = "\n".join(f" M {path}" for path in self.changed)
         elif cmd[:4] == ["git", "diff", "--binary", "--cached"]:
             out = "diff --git a/src/app.py b/src/app.py\n"
+        elif cmd[:4] == ["git", "apply", "--numstat", "-z"]:
+            out = "".join(f"1\t0\t{path}\0" for path in self.changed)
         elif cmd[:2] == ["git", "rev-parse"]:
             out = "d" * 40 + "\n"
         elif cmd[0] in ("claude", "codex"):
@@ -524,7 +526,7 @@ class FailedWorkCheckpointTests(unittest.TestCase):
             manifest = invoke.recovery_manifest(patch)
             patch_tombstone = patch.with_name(patch.name + ".deleting")
             patch.replace(patch_tombstone)
-            self.assertFalse(invoke.recovery_available(patch))
+            self.assertFalse(invoke.recovery_available(patch, runner=runner))
             self.assertFalse(patch.exists())
             self.assertFalse(manifest.exists())
             self.assertFalse(patch_tombstone.exists())
@@ -547,7 +549,7 @@ class FailedWorkCheckpointTests(unittest.TestCase):
             patch.replace(patch_tombstone)
             manifest.replace(manifest_tombstone)
             patch_tombstone.unlink()
-            self.assertFalse(invoke.recovery_available(patch))
+            self.assertFalse(invoke.recovery_available(patch, runner=runner))
             self.assertFalse(manifest_tombstone.exists())
 
     def test_interrupted_cleanup_preserves_invalid_worker_provenance(self):
@@ -572,7 +574,7 @@ class FailedWorkCheckpointTests(unittest.TestCase):
                                         "worker identity"):
                 invoke.recovery_available(
                     patch, repo="owner/repo", story_number=214,
-                    scope=["src/app.py"])
+                    scope=["src/app.py"], runner=runner)
             self.assertTrue(patch_tombstone.exists())
             self.assertTrue(manifest.exists())
 
@@ -966,6 +968,65 @@ class FailedWorkCheckpointTests(unittest.TestCase):
                     "owner/repo", 214, "token", pathlib.Path("/checkout"),
                     runner=runner, client=client)
             self.assertEqual(str(patch), caught.exception.recovery_ref)
+            self.assertTrue(patch.exists())
+
+    def test_durable_pr_replay_binds_worker_task_to_current_story(self):
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = RecordingRunner(["src/app.py"])
+            patch = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"),
+                repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit=self.BASE,
+                scope=["src/app.py"], mutation_state="post-mutation",
+                terminal_outcome="started-mid-work-failed",
+                originating_worker=self.WORKER, runner=runner))
+            invoke.mark_recovery_pushed(patch, "c" * 40)
+            manifest = invoke.recovery_manifest(patch)
+            value = json.loads(manifest.read_text())
+            value["originating_worker"]["task"] = "delivery:owner/repo:999:1"
+            manifest.write_text(json.dumps(value))
+            client = FakeClient()
+            client.created = {
+                "number": 9,
+                "body": "Story: #214\n\n" + invoke.marker(214, "5") + "\n",
+                "head": {"ref": "story/214-delivery", "sha": "c" * 40},
+            }
+            with self.assertRaisesRegex(invoke.RecoveryError,
+                                        "worker identity"):
+                invoke.execute(
+                    "owner/repo", 214, "token", pathlib.Path("/checkout"),
+                    runner=runner, client=client)
+            self.assertTrue(patch.exists())
+
+    def test_durable_pr_replay_compares_manifest_paths_with_patch(self):
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = RecordingRunner(["src/app.py"])
+            patch = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"),
+                repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit=self.BASE,
+                scope=["src/**"], mutation_state="post-mutation",
+                terminal_outcome="started-mid-work-failed",
+                originating_worker=self.WORKER, runner=runner))
+            invoke.mark_recovery_pushed(patch, "c" * 40)
+            manifest = invoke.recovery_manifest(patch)
+            value = json.loads(manifest.read_text())
+            value["recovered_paths"] = ["src/other.py"]
+            manifest.write_text(json.dumps(value))
+            client = FakeClient(story_body=STORY_BODY.replace(
+                "src/app.py", "src/**"))
+            client.created = {
+                "number": 9,
+                "body": "Story: #214\n\n" + invoke.marker(214, "5") + "\n",
+                "head": {"ref": "story/214-delivery", "sha": "c" * 40},
+            }
+            with self.assertRaisesRegex(invoke.RecoveryError,
+                                        "provenance"):
+                invoke.execute(
+                    "owner/repo", 214, "token", pathlib.Path("/checkout"),
+                    runner=runner, client=client)
             self.assertTrue(patch.exists())
 
     def test_pending_push_is_reconciled_without_relaunch(self):

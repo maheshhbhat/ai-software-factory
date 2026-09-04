@@ -77,9 +77,12 @@ def valid_utc_timestamp(value) -> bool:
     return parsed.utcoffset() == timezone.utc.utcoffset(None)
 
 
-def valid_recovery_worker(value) -> bool:
+def valid_recovery_worker(value, *, repo: str, story_number: int) -> bool:
+    task_prefix = f"delivery:{repo.lower()}:{story_number}:"
     return (isinstance(value, dict) and
-            isinstance(value.get("task"), str) and bool(value["task"]) and
+            isinstance(value.get("task"), str) and
+            value["task"].startswith(task_prefix) and
+            len(value["task"]) > len(task_prefix) and
             not any(key in value and
                     (not isinstance(value[key], str) or not value[key])
                     for key in ("invocation_id", "reservation_id",
@@ -513,9 +516,30 @@ def recovery_manifest(patch: pathlib.Path) -> pathlib.Path:
     return patch.with_suffix(".json")
 
 
+def recovery_patch_paths(patch: pathlib.Path, *, runner=subprocess.run) -> list[str]:
+    """Read the path set Git records in a checkpoint without applying it."""
+    result = runner(
+        ["git", "apply", "--numstat", "-z", str(patch)], cwd=patch.parent,
+        capture_output=True, text=True)
+    if result.returncode:
+        raise RecoveryError("recovery checkpoint patch paths are invalid")
+    paths = []
+    for record in result.stdout.split("\0"):
+        if not record:
+            continue
+        fields = record.split("\t", 2)
+        if len(fields) != 3 or not fields[2]:
+            raise RecoveryError("recovery checkpoint patch paths are invalid")
+        paths.append(fields[2])
+    if not paths:
+        raise RecoveryError("recovery checkpoint patch paths are invalid")
+    return sorted(set(paths))
+
+
 def validate_pushed_recovery(value: dict, patch_text: str | None, *,
                              repo: str | None, story_number: int | None,
-                             scope: list[str] | None) -> str:
+                             scope: list[str] | None,
+                             patch_paths: list[str] | None = None) -> str:
     """Validate all provenance needed before durable checkpoint deletion."""
     expected_repo = repo if repo is not None else value.get("repository")
     expected_story = (story_number if story_number is not None
@@ -533,6 +557,7 @@ def validate_pushed_recovery(value: dict, patch_text: str | None, *,
             not valid_commit(head) or
             not isinstance(paths, list) or not paths or
             any(not isinstance(path, str) or not path for path in paths) or
+            (patch_paths is not None and sorted(set(paths)) != patch_paths) or
             (scope is not None and merge_gate.paths_out_of_scope(paths, scope)) or
             (patch_text is not None and
              value.get("patch_sha256") != hashlib.sha256(
@@ -541,7 +566,9 @@ def validate_pushed_recovery(value: dict, patch_text: str | None, *,
                 for key in ("previous_mutation_state",
                             "previous_terminal_outcome"))):
         raise RecoveryError("pushed recovery checkpoint provenance is invalid")
-    if not valid_recovery_worker(value.get("originating_worker")):
+    if not valid_recovery_worker(
+            value.get("originating_worker"), repo=expected_repo,
+            story_number=expected_story):
         raise RecoveryError("pushed recovery worker identity is invalid")
     for key in ("recovered_at", "delivery_verified_at"):
         if not valid_utc_timestamp(value.get(key)):
@@ -551,7 +578,8 @@ def validate_pushed_recovery(value: dict, patch_text: str | None, *,
 
 def recovery_available(patch: pathlib.Path, *, repo: str | None = None,
                        story_number: int | None = None,
-                       scope: list[str] | None = None) -> bool:
+                       scope: list[str] | None = None,
+                       runner=subprocess.run) -> bool:
     manifest = recovery_manifest(patch)
     patch_tombstone = patch.with_name(patch.name + ".deleting")
     manifest_tombstone = manifest.with_name(manifest.name + ".deleting")
@@ -577,7 +605,8 @@ def recovery_available(patch: pathlib.Path, *, repo: str | None = None,
             raise RecoveryError("recovery cleanup transaction is invalid")
         patch_text = patch_source.read_text(encoding="utf-8")
         validate_pushed_recovery(
-            value, patch_text, repo=repo, story_number=story_number, scope=scope)
+            value, patch_text, repo=repo, story_number=story_number, scope=scope,
+            patch_paths=recovery_patch_paths(patch_source, runner=runner))
         for item in (patch, manifest, patch_tombstone, manifest_tombstone):
             item.unlink(missing_ok=True)
         return False
@@ -687,7 +716,8 @@ def reconcile_recovery_push(patch: pathlib.Path, observed_head: str, *,
 
 
 def pushed_recovery_head(patch: pathlib.Path, *, repo: str, story_number: int,
-                         scope: list[str] | None = None) -> str | None:
+                         scope: list[str] | None = None,
+                         runner=subprocess.run) -> str | None:
     """Return a validated durable head, if this checkpoint was already pushed."""
     try:
         value = json.loads(recovery_manifest(patch).read_text(encoding="utf-8"))
@@ -700,7 +730,8 @@ def pushed_recovery_head(patch: pathlib.Path, *, repo: str, story_number: int,
     if head is None:
         return None
     return validate_pushed_recovery(
-        value, patch_text, repo=repo, story_number=story_number, scope=scope)
+        value, patch_text, repo=repo, story_number=story_number, scope=scope,
+        patch_paths=recovery_patch_paths(patch, runner=runner))
 
 
 def recovered_work_state(worktree: pathlib.Path, paths: list[str], *,
@@ -869,7 +900,8 @@ def restore_failed_work(patch: pathlib.Path, worktree: pathlib.Path, *,
         if not isinstance(value.get(key), str) or not value[key]:
             raise RecoveryError(f"recovery checkpoint {key} is invalid")
     worker = value.get("originating_worker")
-    if not valid_recovery_worker(worker):
+    if not valid_recovery_worker(
+            worker, repo=repo, story_number=story_number):
         raise RecoveryError("recovery checkpoint worker identity is invalid")
     recovered_at = value.get("recovered_at")
     if not valid_utc_timestamp(recovered_at):
@@ -950,7 +982,8 @@ def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
     saved_recovery = recovery_patch(repo, story_number)
     try:
         has_recovery = recovery_available(
-            saved_recovery, repo=repo, story_number=story_number, scope=scope)
+            saved_recovery, repo=repo, story_number=story_number, scope=scope,
+            runner=runner)
     except RecoveryError as exc:
         exc.recovery_ref = str(saved_recovery)
         raise
@@ -963,7 +996,7 @@ def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
                     story_number=story_number)
                 delivered_head = pushed_recovery_head(
                     saved_recovery, repo=repo, story_number=story_number,
-                    scope=scope)
+                    scope=scope, runner=runner)
             except RecoveryError as exc:
                 exc.recovery_ref = str(saved_recovery)
                 raise
@@ -1005,7 +1038,8 @@ def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
                 saved_recovery, base_commit, repo=repo,
                 story_number=story_number)
             delivered_head = pushed_recovery_head(
-                saved_recovery, repo=repo, story_number=story_number, scope=scope)
+                saved_recovery, repo=repo, story_number=story_number, scope=scope,
+                runner=runner)
         except RecoveryError as exc:
             exc.recovery_ref = str(saved_recovery)
             raise
