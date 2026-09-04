@@ -513,7 +513,45 @@ def recovery_manifest(patch: pathlib.Path) -> pathlib.Path:
     return patch.with_suffix(".json")
 
 
-def recovery_available(patch: pathlib.Path) -> bool:
+def validate_pushed_recovery(value: dict, patch_text: str | None, *,
+                             repo: str | None, story_number: int | None,
+                             scope: list[str] | None) -> str:
+    """Validate all provenance needed before durable checkpoint deletion."""
+    expected_repo = repo if repo is not None else value.get("repository")
+    expected_story = (story_number if story_number is not None
+                      else value.get("story"))
+    expected = {"schema_version": RECOVERY_SCHEMA_VERSION,
+                "trust": RECOVERY_TRUST, "repository": expected_repo,
+                "story": expected_story}
+    if (not isinstance(expected_repo, str) or not expected_repo or
+            not isinstance(expected_story, int) or expected_story <= 0 or
+            any(value.get(key) != item for key, item in expected.items())):
+        raise RecoveryError("pushed recovery checkpoint identity is invalid")
+    head = value.get("delivered_head")
+    paths = value.get("recovered_paths")
+    if (not valid_commit(value.get("base_commit")) or
+            not valid_commit(head) or
+            not isinstance(paths, list) or not paths or
+            any(not isinstance(path, str) or not path for path in paths) or
+            (scope is not None and merge_gate.paths_out_of_scope(paths, scope)) or
+            (patch_text is not None and
+             value.get("patch_sha256") != hashlib.sha256(
+                 patch_text.encode("utf-8")).hexdigest()) or
+            any(not isinstance(value.get(key), str) or not value[key]
+                for key in ("previous_mutation_state",
+                            "previous_terminal_outcome"))):
+        raise RecoveryError("pushed recovery checkpoint provenance is invalid")
+    if not valid_recovery_worker(value.get("originating_worker")):
+        raise RecoveryError("pushed recovery worker identity is invalid")
+    for key in ("recovered_at", "delivery_verified_at"):
+        if not valid_utc_timestamp(value.get(key)):
+            raise RecoveryError(f"pushed recovery {key} is invalid")
+    return head
+
+
+def recovery_available(patch: pathlib.Path, *, repo: str | None = None,
+                       story_number: int | None = None,
+                       scope: list[str] | None = None) -> bool:
     manifest = recovery_manifest(patch)
     patch_tombstone = patch.with_name(patch.name + ".deleting")
     manifest_tombstone = manifest.with_name(manifest.name + ".deleting")
@@ -530,16 +568,16 @@ def recovery_available(patch: pathlib.Path) -> bool:
         if not isinstance(value, dict):
             raise RecoveryError("recovery cleanup transaction is invalid")
         if not patch_source.is_file():
-            if (manifest_source == manifest_tombstone and
-                    valid_commit(value.get("delivered_head"))):
+            if manifest_source == manifest_tombstone:
+                validate_pushed_recovery(
+                    value, None, repo=repo, story_number=story_number,
+                    scope=scope)
                 manifest_tombstone.unlink(missing_ok=True)
                 return False
             raise RecoveryError("recovery cleanup transaction is invalid")
         patch_text = patch_source.read_text(encoding="utf-8")
-        if (not valid_commit(value.get("delivered_head")) or
-                value.get("patch_sha256") != hashlib.sha256(
-                    patch_text.encode("utf-8")).hexdigest()):
-            raise RecoveryError("recovery cleanup transaction is invalid")
+        validate_pushed_recovery(
+            value, patch_text, repo=repo, story_number=story_number, scope=scope)
         for item in (patch, manifest, patch_tombstone, manifest_tombstone):
             item.unlink(missing_ok=True)
         return False
@@ -661,31 +699,8 @@ def pushed_recovery_head(patch: pathlib.Path, *, repo: str, story_number: int,
     head = value.get("delivered_head")
     if head is None:
         return None
-    expected = {"schema_version": RECOVERY_SCHEMA_VERSION,
-                "trust": RECOVERY_TRUST, "repository": repo,
-                "story": story_number}
-    if any(value.get(key) != item for key, item in expected.items()):
-        raise RecoveryError("pushed recovery checkpoint identity is invalid")
-    paths = value.get("recovered_paths")
-    if (not valid_commit(value.get("base_commit")) or
-            not valid_commit(head) or
-            not isinstance(paths, list) or not paths or
-            any(not isinstance(path, str) or not path for path in paths) or
-            (scope is not None and merge_gate.paths_out_of_scope(paths, scope)) or
-            value.get("patch_sha256") != hashlib.sha256(
-                patch_text.encode("utf-8")).hexdigest() or
-            any(not isinstance(value.get(key), str) or not value[key]
-                for key in ("previous_mutation_state",
-                            "previous_terminal_outcome"))):
-        raise RecoveryError("pushed recovery checkpoint provenance is invalid")
-    worker = value.get("originating_worker")
-    if not valid_recovery_worker(worker):
-        raise RecoveryError("pushed recovery worker identity is invalid")
-    for key in ("recovered_at", "delivery_verified_at"):
-        timestamp = value.get(key)
-        if not valid_utc_timestamp(timestamp):
-            raise RecoveryError(f"pushed recovery {key} is invalid")
-    return head
+    return validate_pushed_recovery(
+        value, patch_text, repo=repo, story_number=story_number, scope=scope)
 
 
 def recovered_work_state(worktree: pathlib.Path, paths: list[str], *,
@@ -934,7 +949,8 @@ def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
     pulls = linked_prs(story_number, client.pull_requests())
     saved_recovery = recovery_patch(repo, story_number)
     try:
-        has_recovery = recovery_available(saved_recovery)
+        has_recovery = recovery_available(
+            saved_recovery, repo=repo, story_number=story_number, scope=scope)
     except RecoveryError as exc:
         exc.recovery_ref = str(saved_recovery)
         raise

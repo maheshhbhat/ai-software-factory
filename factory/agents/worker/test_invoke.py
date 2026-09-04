@@ -550,6 +550,32 @@ class FailedWorkCheckpointTests(unittest.TestCase):
             self.assertFalse(invoke.recovery_available(patch))
             self.assertFalse(manifest_tombstone.exists())
 
+    def test_interrupted_cleanup_preserves_invalid_worker_provenance(self):
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": directory}):
+            runner = RecordingRunner(["src/app.py"])
+            patch = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"),
+                repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit=self.BASE,
+                scope=["src/app.py"], mutation_state="post-mutation",
+                terminal_outcome="started-mid-work-failed",
+                originating_worker=self.WORKER, runner=runner))
+            invoke.mark_recovery_pushed(patch, "b" * 40)
+            manifest = invoke.recovery_manifest(patch)
+            patch_tombstone = patch.with_name(patch.name + ".deleting")
+            patch.replace(patch_tombstone)
+            value = json.loads(manifest.read_text())
+            value["originating_worker"]["model"] = ["not", "a", "model"]
+            manifest.write_text(json.dumps(value))
+            with self.assertRaisesRegex(invoke.RecoveryError,
+                                        "worker identity"):
+                invoke.recovery_available(
+                    patch, repo="owner/repo", story_number=214,
+                    scope=["src/app.py"])
+            self.assertTrue(patch_tombstone.exists())
+            self.assertTrue(manifest.exists())
+
     def test_recovered_gitlink_directory_uses_staged_state(self):
         with tempfile.TemporaryDirectory() as directory:
             worktree = pathlib.Path(directory)
