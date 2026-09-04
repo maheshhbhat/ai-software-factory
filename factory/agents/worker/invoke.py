@@ -125,13 +125,13 @@ def attach_recovery_failure(exc: Exception, patch: pathlib.Path,
 
 
 @contextlib.contextmanager
-def recovery_aware_temporary_directory(*, prefix: str, has_recovery: bool,
-                                       patch: pathlib.Path):
+def recovery_aware_temporary_directory(*, prefix: str, recovery_state):
     """Account for failures across a temporary directory's full lifecycle."""
     try:
         with tempfile.TemporaryDirectory(prefix=prefix) as temp:
             yield temp
     except Exception as exc:
+        has_recovery, patch = recovery_state()
         if has_recovery:
             attach_recovery_failure(
                 exc, patch, "recovery-delivery-worktree-lifecycle-failed")
@@ -1550,8 +1550,8 @@ def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
                             delivered_head, False)
     originating_worker = {"task": task_key}
     with recovery_aware_temporary_directory(
-            prefix=f"factory-story-{story_number}-", has_recovery=has_recovery,
-            patch=saved_recovery) as temp:
+            prefix=f"factory-story-{story_number}-",
+            recovery_state=lambda: (has_recovery, saved_recovery)) as temp:
         worktree = pathlib.Path(temp)
         recovery_context = {"present": False}
         restored_state = None

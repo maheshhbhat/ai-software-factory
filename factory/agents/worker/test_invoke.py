@@ -3058,3 +3058,25 @@ class ScopeSeesFilesTests(unittest.TestCase):
              "commit", "-qm", "rename"], cwd=root, check=True)
         self.assertEqual(
             ["new.txt", "old.txt"], invoke.changed_paths(root, base))
+
+    def test_temporary_cleanup_reads_live_recovery_state(self):
+        state = {"present": False, "patch": pathlib.Path("initial.patch")}
+
+        class CleanupFailureDirectory:
+            def __init__(self, **_): pass
+            def __enter__(self): return "/temporary-worktree"
+            def __exit__(self, *_): raise OSError("temporary cleanup failed")
+
+        with mock.patch.object(invoke.tempfile, "TemporaryDirectory",
+                               CleanupFailureDirectory):
+            with self.assertRaisesRegex(
+                    OSError, "temporary cleanup failed") as caught:
+                with invoke.recovery_aware_temporary_directory(
+                        prefix="story-", recovery_state=lambda: (
+                            state["present"], state["patch"])):
+                    state["present"] = True
+                    state["patch"] = pathlib.Path("created.patch")
+        self.assertEqual("post-mutation", caught.exception.mutation_state)
+        self.assertEqual("recovery-delivery-worktree-lifecycle-failed",
+                         caught.exception.terminal_outcome)
+        self.assertEqual("created.patch", caught.exception.recovery_ref)
