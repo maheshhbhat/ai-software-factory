@@ -225,6 +225,56 @@ class Rung2ReportTests(unittest.TestCase):
             "reason": "second launch log unavailable"}]
         result = report.build(*values)
         self.assertNotEqual("INCONCLUSIVE", result["rung_verdict"])
+        ledger = next(row for row in result["attempt_ledger"]
+                      if row["trace_id"] == outcome["trace_id"])
+        unavailable = next(row for row in ledger["launch_ledger"]
+                           if row["start"]["event_id"] == "start-2")
+        self.assertEqual("second launch log unavailable",
+                         unavailable["evidence_unavailable"]["reason"])
+
+    def test_failed_launch_diagnostics_match_worker_with_shared_span(self):
+        values = list(fixture())
+        outcome = next(row for row in values[1]
+                       if row.get("event") == "worker.outcome")
+        outcome.update({"result": "FAILED", "exit": 1})
+        for worker in ("claude", "codex"):
+            values[1].append({
+                "event": "worker.launch.start", "story": outcome["story"],
+                "trace_id": outcome["trace_id"], "span_id": "shared-span",
+                "worker": worker, "event_id": f"start-{worker}"})
+        values[1].append({
+            "event": "worker.launch.end", "story": outcome["story"],
+            "trace_id": outcome["trace_id"], "span_id": "shared-span",
+            "worker": "claude", "event_id": "end-claude", "exit": 1,
+            "stderr": "failed"})
+        result = report.build(*values)
+        self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+        values[1].append({
+            "event": "worker.launch.end", "story": outcome["story"],
+            "trace_id": outcome["trace_id"], "span_id": "shared-span",
+            "worker": "codex", "event_id": "end-codex", "exit": 1,
+            "stderr": "failed"})
+        result = report.build(*values)
+        self.assertNotEqual("INCONCLUSIVE", result["rung_verdict"])
+
+    def test_nested_launch_ledger_is_independent_of_fragment_order(self):
+        values = list(fixture())
+        outcome = next(row for row in values[1]
+                       if row.get("event") == "worker.outcome")
+        outcome.update({"result": "FAILED", "exit": 1})
+        for index in (2, 1):
+            values[1].extend([
+                {"event": "worker.launch.start", "story": outcome["story"],
+                 "trace_id": outcome["trace_id"], "span_id": f"span-{index}",
+                 "worker": f"worker-{index}", "event_id": f"start-{index}"},
+                {"event": "worker.launch.end", "story": outcome["story"],
+                 "trace_id": outcome["trace_id"], "span_id": f"span-{index}",
+                 "worker": f"worker-{index}", "event_id": f"end-{index}",
+                 "exit": 1, "stderr": "failed"}])
+        first = report.build(*values)
+        second = report.build(values[0], list(reversed(values[1])),
+                              values[2], values[3])
+        self.assertEqual(first, second)
 
     def test_ambiguous_launch_accepts_matching_durable_diagnostic(self):
         values = list(fixture())
