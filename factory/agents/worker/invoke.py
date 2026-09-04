@@ -619,7 +619,11 @@ def reconcile_recovery_push(patch: pathlib.Path, observed_head: str, *,
                 not valid_commit(pending) or
                 not prepared.endswith("Z")):
             raise ValueError("invalid pending recovery provenance")
-        datetime.fromisoformat(prepared.replace("Z", "+00:00"))
+        parsed_prepared = datetime.fromisoformat(
+            prepared.replace("Z", "+00:00"))
+        if ("T" not in prepared or
+                parsed_prepared.utcoffset() != timezone.utc.utcoffset(None)):
+            raise ValueError("pending recovery timestamp is not UTC")
     except (AttributeError, TypeError, ValueError) as exc:
         raise RecoveryError("pending recovery checkpoint is invalid") from exc
     if pending != observed_head:
