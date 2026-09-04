@@ -297,6 +297,8 @@ class RecordingRunner:
             out = "".join(f"1\t0\t{path}\0" for path in self.changed)
         elif cmd[:2] == ["git", "write-tree"]:
             out = "f" * 40 + "\n"
+        elif cmd[:3] == ["git", "rev-parse", "--is-shallow-repository"]:
+            out = "false\n"
         elif cmd[:2] == ["git", "rev-parse"] and cmd[-1].endswith("^{tree}"):
             out = "f" * 40 + "\n"
         elif cmd[:2] == ["git", "rev-parse"]:
@@ -1942,6 +1944,63 @@ class FailedWorkCheckpointTests(unittest.TestCase):
             pending_probe = commands.index(
                 ["git", "cat-file", "-e", "d" * 40 + "^{commit}"])
             self.assertLess(observed_fetch, pending_probe)
+
+    def test_shallow_observed_history_is_completed_before_pending_probe(self):
+        class ShallowCheckoutRunner(RecordingRunner):
+            history_complete = False
+
+            def __call__(self, cmd, **kwargs):
+                if cmd[:3] == ["git", "rev-parse", "--is-shallow-repository"]:
+                    self.calls.append((list(cmd), kwargs.get("env")))
+                    return subprocess.CompletedProcess(cmd, 0, "true\n", "")
+                if cmd[:4] == ["git", "fetch", "--no-tags", "--unshallow"]:
+                    self.history_complete = True
+                if cmd[:3] == ["git", "cat-file", "-e"]:
+                    self.calls.append((list(cmd), kwargs.get("env")))
+                    commit = cmd[-1].removesuffix("^{commit}")
+                    present = commit == "e" * 40 or self.history_complete
+                    return subprocess.CompletedProcess(
+                        cmd, 0 if present else 1, "", "missing")
+                return super().__call__(cmd, **kwargs)
+
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = ShallowCheckoutRunner(["src/app.py"])
+            patch = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"),
+                repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit=self.BASE,
+                scope=["src/app.py"], mutation_state="post-mutation",
+                terminal_outcome="started-mid-work-failed",
+                originating_worker=self.WORKER, runner=runner))
+            invoke.mark_recovery_push_pending(patch, "d" * 40)
+            invoke.reconcile_recovery_push(
+                patch, "e" * 40, repo="owner/repo", story_number=214,
+                checkout=pathlib.Path("/checkout"), runner=runner)
+            manifest = json.loads(invoke.recovery_manifest(patch).read_text())
+            self.assertEqual("d" * 40, manifest["delivered_head"])
+            self.assertTrue(runner.history_complete)
+
+    def test_invalid_utf8_recovery_files_fail_through_recovery_error(self):
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = RecordingRunner(["src/app.py"])
+            patch = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"),
+                repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit=self.BASE,
+                scope=["src/app.py"], mutation_state="post-mutation",
+                terminal_outcome="started-mid-work-failed",
+                originating_worker=self.WORKER, runner=runner))
+            for target in (invoke.recovery_manifest(patch), patch):
+                original = target.read_bytes()
+                target.write_bytes(b"\xff")
+                with self.subTest(target=target), self.assertRaises(
+                        invoke.RecoveryError):
+                    invoke.recovery_available(
+                        patch, repo="owner/repo", story_number=214,
+                        scope=["src/app.py"], runner=runner)
+                target.write_bytes(original)
 
     def test_pending_promotion_write_failure_keeps_recovery_accounting(self):
         with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(

@@ -132,7 +132,7 @@ def platform_diagnostics(checkout: pathlib.Path) -> dict:
                 candidate = pathlib.Path(marker.removeprefix("gitdir:").strip())
                 git_dir = candidate if candidate.is_absolute() else checkout / candidate
         git_dir = git_dir.resolve()
-    except OSError as exc:
+    except (OSError, UnicodeError) as exc:
         resolution_error = f"{type(exc).__name__}: {exc}"
 
     def describe(path: pathlib.Path) -> dict:
@@ -490,7 +490,7 @@ def repository_test_command(worktree: pathlib.Path) -> list[str]:
     if package.is_file():
         try:
             manifest = json.loads(package.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
             raise DeliveryError(f"invalid product package.json: {exc}") from exc
         if ((manifest.get("scripts") or {}).get("test") or "").strip():
             return ["npm", "test"]
@@ -591,7 +591,7 @@ def recovery_patch_paths(patch: pathlib.Path, *, runner=subprocess.run) -> list[
         paths.append(fields[2])
     try:
         patch_text = patch.read_text(encoding="utf-8")
-    except OSError as exc:
+    except (OSError, UnicodeError) as exc:
         raise RecoveryError(
             "recovery checkpoint patch paths are unavailable") from exc
     for line in patch_text.splitlines():
@@ -719,7 +719,7 @@ def recovery_available(patch: pathlib.Path, *, repo: str | None = None,
         manifest_source = manifest if manifest.is_file() else manifest_tombstone
         try:
             value = json.loads(manifest_source.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
             raise RecoveryError("recovery cleanup transaction is invalid") from exc
         if not isinstance(value, dict):
             raise RecoveryError("recovery cleanup transaction is invalid")
@@ -739,7 +739,7 @@ def recovery_available(patch: pathlib.Path, *, repo: str | None = None,
             raise RecoveryError("recovery cleanup transaction is invalid")
         try:
             patch_text = patch_source.read_text(encoding="utf-8")
-        except OSError as exc:
+        except (OSError, UnicodeError) as exc:
             raise RecoveryError(
                 "recovery cleanup patch is unavailable") from exc
         validate_pushed_recovery(
@@ -761,7 +761,7 @@ def recovery_available(patch: pathlib.Path, *, repo: str | None = None,
     try:
         value = json.loads(manifest.read_text(encoding="utf-8"))
         patch_text = patch.read_text(encoding="utf-8")
-    except (OSError, json.JSONDecodeError):
+    except (OSError, UnicodeError, json.JSONDecodeError):
         raise RecoveryError("recovery checkpoint metadata is unavailable")
     if not isinstance(value, dict):
         raise RecoveryError("recovery checkpoint metadata is not an object")
@@ -817,10 +817,14 @@ def _write_recovery_pair(target: pathlib.Path, patch_text: str,
     if target.is_file() != manifest.is_file():
         raise RecoveryError("recovery checkpoint patch/manifest pair is incomplete")
     if target.is_file():
-        _write_recovery_file(
-            previous_patch, target.read_text(encoding="utf-8"))
-        _write_recovery_file(
-            previous_manifest, manifest.read_text(encoding="utf-8"))
+        try:
+            prior_patch = target.read_text(encoding="utf-8")
+            prior_manifest = manifest.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
+            raise RecoveryError(
+                "prior recovery generation is unavailable") from exc
+        _write_recovery_file(previous_patch, prior_patch)
+        _write_recovery_file(previous_manifest, prior_manifest)
     _write_recovery_file(target, patch_text)
     _write_recovery_file(manifest, manifest_text)
     _unlink_recovery_files(previous_patch, previous_manifest)
@@ -851,7 +855,7 @@ def mark_recovery_pushed(patch: pathlib.Path, head: str) -> None:
     try:
         manifest = recovery_manifest(patch)
         value = json.loads(manifest.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise RecoveryError("recovery checkpoint metadata is unavailable") from exc
     if not isinstance(value, dict):
         raise RecoveryError("recovery checkpoint metadata is not an object")
@@ -871,7 +875,7 @@ def mark_recovery_push_pending(patch: pathlib.Path, head: str) -> None:
     try:
         manifest = recovery_manifest(patch)
         value = json.loads(manifest.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise RecoveryError("recovery checkpoint metadata is unavailable") from exc
     if not isinstance(value, dict):
         raise RecoveryError("recovery checkpoint metadata is not an object")
@@ -890,7 +894,7 @@ def validate_recovery_head_content(patch: pathlib.Path, head: str,
         value = json.loads(
             recovery_manifest(patch).read_text(encoding="utf-8"))
         patch_text = patch.read_text(encoding="utf-8")
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise RecoveryError("recovery checkpoint metadata is unavailable") from exc
     base = value.get("base_commit") if isinstance(value, dict) else None
     if not valid_commit(base) or not valid_commit(head):
@@ -940,7 +944,7 @@ def reconcile_recovery_push(patch: pathlib.Path, observed_head: str, *,
     try:
         value = json.loads(
             recovery_manifest(patch).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise RecoveryError("recovery checkpoint metadata is unavailable") from exc
     if not isinstance(value, dict):
         raise RecoveryError("recovery checkpoint metadata is not an object")
@@ -977,6 +981,18 @@ def reconcile_recovery_push(patch: pathlib.Path, observed_head: str, *,
         except Exception as exc:
             raise RecoveryError(
                 "observed recovery branch head could not be inspected") from exc
+        try:
+            shallow = git(
+                ["rev-parse", "--is-shallow-repository"], checkout,
+                runner=runner).stdout.strip()
+            if shallow not in ("true", "false"):
+                raise ValueError("invalid shallow-repository response")
+            if shallow == "true":
+                git(["fetch", "--no-tags", "--unshallow", "origin"],
+                    checkout, runner=runner)
+        except Exception as exc:
+            raise RecoveryError(
+                "observed recovery history could not be completed") from exc
         try:
             git(["cat-file", "-e", f"{pending}^{{commit}}"], checkout,
                 runner=runner)
@@ -1020,7 +1036,7 @@ def pushed_recovery_head(patch: pathlib.Path, *, repo: str, story_number: int,
     try:
         value = json.loads(recovery_manifest(patch).read_text(encoding="utf-8"))
         patch_text = patch.read_text(encoding="utf-8")
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise RecoveryError("recovery checkpoint metadata is unavailable") from exc
     if not isinstance(value, dict):
         raise RecoveryError("recovery checkpoint metadata is not an object")
@@ -1207,7 +1223,7 @@ def restore_failed_work(patch: pathlib.Path, worktree: pathlib.Path, *,
     try:
         value = json.loads(manifest_path.read_text(encoding="utf-8"))
         patch_text = patch.read_text(encoding="utf-8")
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise RecoveryError(f"recovery checkpoint metadata is unavailable: {exc}") from exc
     if not isinstance(value, dict):
         raise RecoveryError("recovery checkpoint metadata is not an object")
