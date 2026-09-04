@@ -39,9 +39,22 @@ def fixture():
     process = []
     for story, count in attempts.items():
         for index in range(count):
+            trace = f"trace-{story}-{index}"
             row = {"event": "story.claimed", "story": story,
-                   "event_id": f"{story}-{index}"}
+                   "event_id": f"{story}-{index}", "trace_id": trace}
             process.extend([row, dict(row)])
+            process.append({"event": "worker.outcome", "story": story,
+                            "event_id": f"outcome-{story}-{index}",
+                            "trace_id": trace, "result": "LAUNCHED", "exit": 0})
+    for story in evidence["stories"]:
+        pr, head = 100 + story["number"], str(story["number"])[-1] * 40
+        story["pull_request"] = pr
+        process.append({"event": "delivery.pull-request.written",
+                        "story": story["number"], "pull_request": pr,
+                        "head": head})
+        process.append({"event": "review.outcome.published",
+                        "story": story["number"], "pull_request": pr,
+                        "head": head, "verdict": "approval"})
     telemetry = [
         {"metric": "engine.usage", "story": 20, "engine": "claude",
          "usage_reported": True, "usage": {"total_cost_usd": 4.0}},
@@ -78,6 +91,71 @@ class Rung2ReportTests(unittest.TestCase):
         self.assertFalse(result["measurement_integrity"]["passed"])
         self.assertIn("acceptance decisions (1) and touch receipts (0) differ",
                       result["measurement_integrity"]["findings"])
+
+    def test_missing_terminal_worker_outcome_is_inconclusive(self):
+        values = list(fixture())
+        values[1] = [row for row in values[1]
+                     if not (row.get("event") == "worker.outcome" and
+                             row.get("trace_id") == "trace-20-0")]
+        result = report.build(*values)
+        self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+        self.assertEqual("unavailable", result["kpis"]["autonomy"]["status"])
+        self.assertEqual("unavailable",
+                         result["kpis"]["worker_attempts_retry_rate"]["status"])
+
+    def test_missing_attempt_ledger_is_inconclusive(self):
+        values = list(fixture())
+        values[1] = [row for row in values[1] if row.get("story") != 20]
+        result = report.build(*values)
+        self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+        self.assertIn("Story 20 has no durable attempt claim evidence",
+                      result["measurement_integrity"]["findings"])
+
+    def test_explicit_terminal_evidence_unavailable_completes_ledger(self):
+        values = list(fixture())
+        values[1] = [row for row in values[1]
+                     if not (row.get("event") == "worker.outcome" and
+                             row.get("trace_id") == "trace-20-0")]
+        values[0]["evidence_unavailable"] = [{
+            "kind": "attempt-terminal-outcome", "story": 20,
+            "identity": "trace-20-0", "reason": "legacy log unavailable"}]
+        result = report.build(*values)
+        self.assertNotEqual("INCONCLUSIVE", result["rung_verdict"])
+
+    def test_produced_pr_without_exact_head_review_is_inconclusive(self):
+        values = list(fixture())
+        values[1] = [row for row in values[1]
+                     if not (row.get("event") == "review.outcome.published" and
+                             row.get("story") == 20)]
+        result = report.build(*values)
+        self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+        self.assertFalse(result["qualification_series"]["eligible"])
+        self.assertEqual(0, result["qualification_series"]["pass_samples"])
+        self.assertEqual(0, result["qualification_series"]["fail_samples"])
+        self.assertIn("| Attempts | unavailable |", report.render(result))
+
+    def test_declared_pr_without_production_head_is_inconclusive(self):
+        values = list(fixture())
+        values[1] = [row for row in values[1]
+                     if not (row.get("event") == "delivery.pull-request.written"
+                             and row.get("story") == 20)]
+        result = report.build(*values)
+        self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+        self.assertTrue(any("head None" in finding for finding in
+                            result["measurement_integrity"]["findings"]))
+
+    def test_failed_attempt_requires_durable_diagnostic_or_unavailable_record(self):
+        values = list(fixture())
+        outcome = next(row for row in values[1]
+                       if row.get("event") == "worker.outcome")
+        outcome.update({"result": "FAILED", "exit": 1})
+        result = report.build(*values)
+        self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+        values[0]["evidence_unavailable"] = [{
+            "kind": "attempt-diagnostics", "story": outcome["story"],
+            "identity": outcome["trace_id"], "reason": "legacy log missing"}]
+        result = report.build(*values)
+        self.assertNotEqual("INCONCLUSIVE", result["rung_verdict"])
 
     def test_thresholds_can_pass_but_integrity_is_independent(self):
         values = list(fixture())

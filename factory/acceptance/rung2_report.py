@@ -13,6 +13,8 @@ from factory.acceptance import rung1_report as shared
 UNAVAILABLE = shared.UNAVAILABLE
 STORY_BELLS = ("plan-approval", "poison-rescue", "acceptance")
 AUTONOMY_BREAKING_ACTIONS = {"recovery", "code-intervention"}
+TERMINAL_WORKER_EVENT = "worker.outcome"
+REVIEW_OUTCOME_EVENT = "review.outcome.published"
 
 
 def unavailable(reason):
@@ -29,6 +31,98 @@ def unique(rows, key):
         seen.add(marker)
         result.append(row)
     return result
+
+
+def evidence_unavailable(evidence, *, kind, story, identity):
+    matches = [row for row in evidence.get("evidence_unavailable", [])
+               if isinstance(row, dict) and row.get("kind") == kind
+               and row.get("story") == story and row.get("identity") == identity
+               and row.get("reason")]
+    return matches[0] if len(matches) == 1 else None
+
+
+def attempt_ledger(evidence, process, numbers):
+    claims = unique(
+        [row for row in process if row.get("event") == "story.claimed"
+         and row.get("story") in numbers],
+        lambda row: (row.get("story"), row.get("event_id")))
+    rows, findings = [], []
+    claimed_stories = {row.get("story") for row in claims}
+    for story in sorted(numbers - claimed_stories):
+        findings.append(f"Story {story} has no durable attempt claim evidence")
+    for claim in claims:
+        story, claim_id = claim.get("story"), claim.get("event_id")
+        trace = claim.get("trace_id")
+        identity = trace or claim_id
+        outcomes = [row for row in process
+                    if row.get("event") == TERMINAL_WORKER_EVENT
+                    and row.get("story") == story
+                    and ((trace and row.get("trace_id") == trace) or
+                         (not trace and row.get("claim_event_id") == claim_id))]
+        unavailable = evidence_unavailable(
+            evidence, kind="attempt-terminal-outcome", story=story,
+            identity=identity)
+        if len(outcomes) + bool(unavailable) != 1:
+            findings.append(
+                f"claim {claim_id!r} for Story {story} needs exactly one "
+                "terminal worker outcome or evidence-unavailable record")
+        outcome = outcomes[0] if len(outcomes) == 1 else None
+        failed = bool(outcome and (outcome.get("exit") not in (None, 0) or
+                                  outcome.get("result") != "LAUNCHED"))
+        diagnostic = None
+        if failed:
+            diagnostic = (outcome.get("diagnostic_ref") or
+                          outcome.get("recovery_ref") or outcome.get("detail"))
+            diagnostic_unavailable = evidence_unavailable(
+                evidence, kind="attempt-diagnostics", story=story,
+                identity=identity)
+            if not diagnostic and not diagnostic_unavailable:
+                findings.append(
+                    f"failed claim {claim_id!r} for Story {story} needs durable "
+                    "diagnostics/recovery evidence or an evidence-unavailable record")
+        rows.append({"story": story, "claim_event_id": claim_id,
+                     "trace_id": trace, "terminal_outcome": outcome,
+                     "evidence_unavailable": unavailable,
+                     "diagnostic": diagnostic})
+    if any(row.get("event_id") is None for row in claims):
+        findings.append("every claim needs a durable event ID")
+    return rows, findings
+
+
+def review_ledger(evidence, process, numbers):
+    produced = unique(
+        [row for row in process
+         if row.get("event") == "delivery.pull-request.written"
+         and row.get("story") in numbers],
+        lambda row: (row.get("pull_request"), row.get("head")))
+    observed_prs = {row.get("pull_request") for row in produced}
+    for story in evidence.get("stories") or []:
+        pr = story.get("pull_request")
+        if pr not in observed_prs:
+            produced.append({"story": story.get("number"),
+                             "pull_request": pr, "head": None})
+    rows, findings = [], []
+    for item in produced:
+        pr, head, story = (item.get("pull_request"), item.get("head"),
+                           item.get("story"))
+        outcomes = unique(
+            [row for row in process
+             if row.get("event") == REVIEW_OUTCOME_EVENT
+             and row.get("pull_request") == pr and row.get("head") == head
+             and row.get("verdict")],
+            lambda row: row.get("event_id") or (
+                row.get("pull_request"), row.get("head"), row.get("verdict")))
+        identity = f"{pr}:{head}"
+        unavailable = evidence_unavailable(
+            evidence, kind="exact-head-review", story=story, identity=identity)
+        if not pr or not head or len(outcomes) + bool(unavailable) != 1:
+            findings.append(
+                f"produced PR {pr!r} head {head!r} needs exactly one exact-head "
+                "independent review outcome or evidence-unavailable record")
+        rows.append({"story": story, "pull_request": pr, "head": head,
+                     "review_outcome": outcomes[0] if len(outcomes) == 1 else None,
+                     "evidence_unavailable": unavailable})
+    return rows, findings
 
 
 def build(evidence, process, telemetry, touches):
@@ -57,13 +151,13 @@ def build(evidence, process, telemetry, touches):
         actions = []
     classes = Counter(row.get("classification") for row in project_touches)
 
-    claims = unique(
-        [row for row in process if row.get("event") == "story.claimed"
-         and row.get("story") in numbers],
-        lambda row: (row.get("story"), row.get("event_id")),
-    )
-    if any(row.get("event_id") is None for row in claims):
-        integrity.append("every claim needs a durable event ID")
+    ledger, ledger_findings = attempt_ledger(evidence, process, numbers)
+    reviews, review_findings = review_ledger(evidence, process, numbers)
+    integrity.extend(ledger_findings)
+    integrity.extend(review_findings)
+    claims = [row for row in process if row.get("event") == "story.claimed"
+              and row.get("story") in numbers]
+    claims = unique(claims, lambda row: (row.get("story"), row.get("event_id")))
     attempts_by_story = {
         number: sum(row.get("story") == number for row in claims)
         for number in sorted(numbers)
@@ -147,7 +241,21 @@ def build(evidence, process, telemetry, touches):
                            and escaped["count"] <= thresholds["escaped_defects_maximum"],
         "measurement_integrity": not integrity,
     }
-    verdict = "PASS" if all(threshold_results.values()) else "FAIL"
+    evidence_complete = not ledger_findings and not review_findings
+    verdict = ("INCONCLUSIVE" if not evidence_complete else
+               "PASS" if all(threshold_results.values()) else "FAIL")
+    if not evidence_complete:
+        unavailable_kpi = unavailable("attempt ledger is incomplete")
+        autonomy = unavailable_kpi
+        attempts_kpi = unavailable_kpi
+    else:
+        attempts_kpi = {
+            "attempts": attempts, "stories": len(numbers),
+            "attempts_by_story": attempts_by_story,
+            "attempts_per_story": attempts / len(numbers) if numbers else UNAVAILABLE,
+            "retries": retries,
+            "retry_share_of_attempts": retries / attempts if attempts else UNAVAILABLE,
+        }
 
     return {
         "schema_version": 1,
@@ -158,6 +266,12 @@ def build(evidence, process, telemetry, touches):
         "project": evidence.get("project"),
         "product_outcome": evidence.get("product_outcome"),
         "rung_verdict": verdict,
+        "attempt_ledger": ledger,
+        "review_ledger": reviews,
+        "qualification_series": {
+            "eligible": verdict != "INCONCLUSIVE",
+            "pass_samples": 1 if verdict == "PASS" else 0,
+            "fail_samples": 1 if verdict == "FAIL" else 0},
         "thresholds": thresholds,
         "threshold_results": threshold_results,
         "measurement_integrity": {"passed": not integrity, "findings": sorted(integrity)},
@@ -169,13 +283,7 @@ def build(evidence, process, telemetry, touches):
                 "operator_actions": actions,
             },
             "autonomy": autonomy,
-            "worker_attempts_retry_rate": {
-                "attempts": attempts, "stories": len(numbers),
-                "attempts_by_story": attempts_by_story,
-                "attempts_per_story": attempts / len(numbers) if numbers else UNAVAILABLE,
-                "retries": retries,
-                "retry_share_of_attempts": retries / attempts if attempts else UNAVAILABLE,
-            },
+            "worker_attempts_retry_rate": attempts_kpi,
             "poison_rate": poison,
             "escaped_defects": escaped,
             "acceptance_catches": catches,
@@ -189,13 +297,21 @@ def build(evidence, process, telemetry, touches):
 def render(report):
     k = report["kpis"]
     percent = lambda value: f"{value:.2%}" if isinstance(value, (int, float)) else str(value)
+    autonomy = k["autonomy"]
+    attempts = k["worker_attempts_retry_rate"]
+    autonomy_text = (f"{autonomy['autonomous_stories']}/{autonomy['stories']} = "
+                     f"{percent(autonomy['rate'])}"
+                     if "autonomous_stories" in autonomy else UNAVAILABLE)
+    attempts_text = (f"{attempts['attempts']} "
+                     f"({attempts['attempts_per_story']} per Story)"
+                     if "attempts" in attempts else UNAVAILABLE)
     return "\n".join([
         "# Phase 5 Rung 2 final report", "",
         f"**Verdict: {report['rung_verdict']}.** Product outcome: {report['product_outcome']}.", "",
         "| KPI | Result |", "|---|---|",
         f"| Human touches | {k['human_touches']['canonical_bells']} canonical bells; relay {k['human_touches']['relay']} |",
-        f"| Autonomy | {k['autonomy']['autonomous_stories']}/{k['autonomy']['stories']} = {percent(k['autonomy']['rate'])} |",
-        f"| Attempts | {k['worker_attempts_retry_rate']['attempts']} ({k['worker_attempts_retry_rate']['attempts_per_story']} per Story) |",
+        f"| Autonomy | {autonomy_text} |",
+        f"| Attempts | {attempts_text} |",
         f"| Poison rate | {percent(k['poison_rate']['rate'])} |",
         f"| Escaped defects | {k['escaped_defects'].get('count', UNAVAILABLE)} |",
         f"| Acceptance catches | {k['acceptance_catches'].get('count', UNAVAILABLE)} |",
