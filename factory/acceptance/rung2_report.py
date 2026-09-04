@@ -119,11 +119,23 @@ def delivered_identity(outcome):
 
 
 def review_ledger(evidence, process, numbers, attempts):
-    produced = unique(
-        [row for row in process
-         if row.get("event") == "delivery.pull-request.written"
-         and row.get("story") in numbers],
-        lambda row: (row.get("trace_id"), row.get("pull_request"), row.get("head")))
+    findings = []
+    grouped = {}
+    for row in process:
+        if (row.get("event") == "delivery.pull-request.written" and
+                row.get("story") in numbers):
+            key = (row.get("trace_id"), row.get("pull_request"), row.get("head"))
+            grouped.setdefault(key, []).append(row)
+    produced = []
+    for key in sorted(grouped, key=lambda value: tuple(str(v) for v in value)):
+        candidates = grouped[key]
+        durable = unique([row for row in candidates if row.get("event_id")],
+                         lambda row: row.get("event_id"))
+        if len(durable) > 1:
+            findings.append(
+                f"PR/head production evidence {key!r} has conflicting durable event IDs")
+        produced.append(sorted(durable, key=lambda row: row["event_id"])[0]
+                        if durable else candidates[0])
     observed_pairs = {(row.get("pull_request"), row.get("head")) for row in produced}
     expected = []
     for attempt in attempts:
@@ -139,14 +151,17 @@ def review_ledger(evidence, process, numbers, attempts):
                                  "pull_request": pr, "head": head,
                                  "production_evidence_missing": True})
     for story in evidence.get("stories") or []:
-        expected.append((story.get("number"),
-                         (story.get("pull_request"), story.get("head"))))
+        pr, head = story.get("pull_request"), story.get("head")
+        if head:
+            expected.append((story.get("number"), (pr, head)))
+        elif pr and not any(row.get("pull_request") == pr for row in produced):
+            expected.append((story.get("number"), (pr, None)))
     for story, identity in expected:
         pr, head = identity or (None, None)
         if (pr, head) not in observed_pairs:
             produced.append({"story": story, "pull_request": pr, "head": head})
             observed_pairs.add((pr, head))
-    rows, findings = [], []
+    rows = []
     for item in produced:
         pr, head, story = (item.get("pull_request"), item.get("head"),
                            item.get("story"))
