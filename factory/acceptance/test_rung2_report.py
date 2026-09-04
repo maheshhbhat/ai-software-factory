@@ -140,6 +140,13 @@ class Rung2ReportTests(unittest.TestCase):
         self.assertNotEqual("INCONCLUSIVE", result["rung_verdict"])
         self.assertEqual(11, len(result["attempt_ledger"]))
 
+    def test_attempt_ledger_is_independent_of_fragment_order(self):
+        values = list(fixture())
+        first = report.build(*values)
+        reversed_process = list(reversed(values[1]))
+        second = report.build(values[0], reversed_process, values[2], values[3])
+        self.assertEqual(first, second)
+
     def test_produced_pr_without_exact_head_review_is_inconclusive(self):
         values = list(fixture())
         values[1] = [row for row in values[1]
@@ -195,6 +202,29 @@ class Rung2ReportTests(unittest.TestCase):
                       if row["trace_id"] == outcome["trace_id"])
         self.assertEqual("launch-failure-20",
                          ledger["diagnostic"][0]["event_id"])
+
+    def test_every_failed_launch_requires_its_own_diagnostic(self):
+        values = list(fixture())
+        outcome = next(row for row in values[1]
+                       if row.get("event") == "worker.outcome")
+        outcome.update({"result": "FAILED", "exit": 1})
+        for index in (1, 2):
+            values[1].append({
+                "event": "worker.launch.start", "story": outcome["story"],
+                "trace_id": outcome["trace_id"], "event_id": f"start-{index}",
+                "span_id": f"span-{index}"})
+        values[1].append({
+            "event": "worker.launch.end", "story": outcome["story"],
+            "trace_id": outcome["trace_id"], "event_id": "end-1",
+            "span_id": "span-1", "exit": 1, "stderr": "failed"})
+        result = report.build(*values)
+        self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+        values[0]["evidence_unavailable"] = [{
+            "kind": "attempt-launch-diagnostics", "story": outcome["story"],
+            "identity": f"{outcome['trace_id']}:start-2",
+            "reason": "second launch log unavailable"}]
+        result = report.build(*values)
+        self.assertNotEqual("INCONCLUSIVE", result["rung_verdict"])
 
     def test_ambiguous_launch_accepts_matching_durable_diagnostic(self):
         values = list(fixture())

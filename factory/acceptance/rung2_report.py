@@ -46,6 +46,9 @@ def attempt_ledger(evidence, process, numbers):
         [row for row in process if row.get("event") == "story.claimed"
          and row.get("story") in numbers],
         lambda row: (row.get("story"), row.get("event_id")))
+    claims.sort(key=lambda row: (
+        row.get("story"), str(row.get("trace_id") or ""),
+        str(row.get("event_id") or "")))
     rows, findings = [], []
     claimed_stories = {row.get("story") for row in claims}
     for story in sorted(numbers - claimed_stories):
@@ -76,7 +79,14 @@ def attempt_ledger(evidence, process, numbers):
                                   outcome.get("result") != "LAUNCHED"))
         diagnostic = None
         diagnostic_unavailable = None
+        launch_starts = []
         if failed:
+            launch_starts = unique(
+                [row for row in process
+                 if row.get("event") == "worker.launch.start"
+                 and row.get("story") == story and trace
+                 and row.get("trace_id") == trace],
+                lambda row: (row.get("trace_id"), row.get("event_id")))
             diagnostic_events = unique(
                 [row for row in process
                  if row.get("event") == "worker.launch.end"
@@ -87,6 +97,21 @@ def attempt_ledger(evidence, process, numbers):
                       row.get("result") not in (None, "LAUNCHED"))
                  and (row.get("stderr") or row.get("stdout") or row.get("detail"))],
                 lambda row: (row.get("trace_id"), row.get("event_id")))
+            for start in launch_starts:
+                start_id, span = start.get("event_id"), start.get("span_id")
+                if not start_id:
+                    findings.append(
+                        f"worker launch start for claim {claim_id!r} needs a durable event ID")
+                matching_diagnostics = [
+                    row for row in diagnostic_events
+                    if span and row.get("span_id") == span]
+                unavailable_launch = evidence_unavailable(
+                    evidence, kind="attempt-launch-diagnostics", story=story,
+                    identity=f"{identity}:{start_id}")
+                if len(matching_diagnostics) + bool(unavailable_launch) != 1:
+                    findings.append(
+                        f"worker launch {start_id!r} for claim {claim_id!r} needs "
+                        "exactly one terminal diagnostic or evidence-unavailable record")
             diagnostic = ((outcome.get("diagnostic_ref") or
                            outcome.get("recovery_ref")) or
                           diagnostic_events or None)
@@ -101,7 +126,8 @@ def attempt_ledger(evidence, process, numbers):
                      "trace_id": trace, "terminal_outcome": outcome,
                      "evidence_unavailable": unavailable,
                      "diagnostic": diagnostic,
-                     "diagnostic_evidence_unavailable": diagnostic_unavailable})
+                     "diagnostic_evidence_unavailable": diagnostic_unavailable,
+                     "launches": launch_starts})
     if any(row.get("event_id") is None for row in claims):
         findings.append("every claim needs a durable event ID")
     return rows, findings
