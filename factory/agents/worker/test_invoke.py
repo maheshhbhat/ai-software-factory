@@ -389,6 +389,25 @@ class FailedWorkCheckpointTests(unittest.TestCase):
             self.assertEqual(
                 ["é-new.txt", "é.txt"], invoke.recovery_patch_paths(patch))
 
+    def test_patch_path_inspection_wraps_runner_and_file_failures(self):
+        with tempfile.TemporaryDirectory() as directory:
+            patch = pathlib.Path(directory, "recovery.patch")
+            patch.write_text("diff --git a/a b/a\n")
+            for failure in ("runner", "read"):
+                with self.subTest(failure=failure):
+                    if failure == "runner":
+                        runner = mock.Mock(side_effect=OSError("spawn failed"))
+                        context = contextlib.nullcontext()
+                    else:
+                        runner = mock.Mock(return_value=subprocess.CompletedProcess(
+                            [], 0, "1\t0\ta\0", ""))
+                        context = mock.patch.object(
+                            pathlib.Path, "read_text",
+                            side_effect=OSError("read failed"))
+                    with context, self.assertRaisesRegex(
+                            invoke.RecoveryError, "unavailable"):
+                        invoke.recovery_patch_paths(patch, runner=runner)
+
     def test_gitlink_parser_preserves_nul_terminated_unusual_paths(self):
         output = ("160000 commit " + "c" * 40 + "\tvendor/é\tline\nname\0"
                   "100644 blob " + "d" * 40 + "\tregular.txt\0")
@@ -1127,6 +1146,31 @@ class FailedWorkCheckpointTests(unittest.TestCase):
                     patch, repo="owner/repo", story_number=214,
                     scope=["inside.py"])
             self.assertTrue(manifest_tombstone.exists())
+
+    def test_cleanup_reconciliation_flushes_tombstone_deletion(self):
+        with tempfile.TemporaryDirectory() as recovery:
+            patch = pathlib.Path(recovery, "story.patch")
+            manifest_tombstone = patch.with_name("story.json.deleting")
+            record = {
+                "schema_version": invoke.RECOVERY_SCHEMA_VERSION,
+                "trust": invoke.RECOVERY_TRUST,
+                "repository": "owner/repo", "story": 214,
+                "base_commit": self.BASE, "delivered_head": "d" * 40,
+                "recovered_paths": ["src/app.py"],
+                "previous_mutation_state": "post-mutation",
+                "previous_terminal_outcome": "completed",
+                "originating_worker": self.WORKER,
+                "recovered_at": "2026-09-04T00:00:00Z",
+                "delivery_verified_at": "2026-09-04T00:01:00Z",
+            }
+            manifest_tombstone.write_text(json.dumps(record))
+            with mock.patch.object(invoke.os, "fsync",
+                                   wraps=invoke.os.fsync) as fsync:
+                self.assertFalse(invoke.recovery_available(
+                    patch, repo="owner/repo", story_number=214,
+                    scope=["src/app.py"]))
+            self.assertEqual(1, fsync.call_count)
+            self.assertFalse(manifest_tombstone.exists())
 
     def test_worktree_creation_failure_preserves_recovery_accounting(self):
         class WorktreeFailureRunner(RecordingRunner):

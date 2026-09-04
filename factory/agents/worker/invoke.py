@@ -572,9 +572,13 @@ def _fsync_recovery_directory(directory_path: pathlib.Path) -> None:
 
 def recovery_patch_paths(patch: pathlib.Path, *, runner=subprocess.run) -> list[str]:
     """Read the path set Git records in a checkpoint without applying it."""
-    result = runner(
-        ["git", "apply", "--numstat", "-z", str(patch)], cwd=patch.parent,
-        capture_output=True, text=True)
+    try:
+        result = runner(
+            ["git", "apply", "--numstat", "-z", str(patch)], cwd=patch.parent,
+            capture_output=True, text=True)
+    except Exception as exc:
+        raise RecoveryError(
+            "recovery checkpoint patch paths are unavailable") from exc
     if result.returncode:
         raise RecoveryError("recovery checkpoint patch paths are invalid")
     paths = []
@@ -585,7 +589,11 @@ def recovery_patch_paths(patch: pathlib.Path, *, runner=subprocess.run) -> list[
         if len(fields) != 3 or not fields[2]:
             raise RecoveryError("recovery checkpoint patch paths are invalid")
         paths.append(fields[2])
-    patch_text = patch.read_text(encoding="utf-8")
+    try:
+        patch_text = patch.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise RecoveryError(
+            "recovery checkpoint patch paths are unavailable") from exc
     for line in patch_text.splitlines():
         if line.startswith(("rename from ", "rename to ",
                             "copy from ", "copy to ")):
@@ -723,7 +731,7 @@ def recovery_available(patch: pathlib.Path, *, repo: str | None = None,
                 if not reconcile_cleanup:
                     return True
                 try:
-                    manifest_tombstone.unlink(missing_ok=True)
+                    _unlink_recovery_files(manifest_tombstone)
                 except OSError as exc:
                     raise RecoveryError(
                         "recovery cleanup transaction could not finish") from exc
@@ -736,8 +744,8 @@ def recovery_available(patch: pathlib.Path, *, repo: str | None = None,
         if not reconcile_cleanup:
             return True
         try:
-            for item in (patch, manifest, patch_tombstone, manifest_tombstone):
-                item.unlink(missing_ok=True)
+            _unlink_recovery_files(
+                patch, manifest, patch_tombstone, manifest_tombstone)
         except OSError as exc:
             raise RecoveryError(
                 "recovery cleanup transaction could not finish") from exc
