@@ -389,6 +389,11 @@ class FailedWorkCheckpointTests(unittest.TestCase):
             self.assertEqual(
                 ["é-new.txt", "é.txt"], invoke.recovery_patch_paths(patch))
 
+    def test_gitlink_parser_preserves_nul_terminated_unusual_paths(self):
+        output = ("160000 commit " + "c" * 40 + "\tvendor/é\tline\nname\0"
+                  "100644 blob " + "d" * 40 + "\tregular.txt\0")
+        self.assertEqual({"vendor/é\tline\nname"}, invoke._gitlinks(output))
+
     def test_quoted_path_decoder_preserves_literal_utf8_with_escapes(self):
         self.assertEqual(
             "é\tnew.txt", invoke.decode_git_quoted_path('"é\\tnew.txt"'))
@@ -401,6 +406,56 @@ class FailedWorkCheckpointTests(unittest.TestCase):
                 invoke._write_recovery_file(target, "durable\n")
             self.assertEqual("durable\n", target.read_text())
             self.assertEqual(2, fsync.call_count)
+
+    def test_interrupted_pair_replacement_restores_prior_generation(self):
+        class PatchRunner(RecordingRunner):
+            patch_text = "diff --git a/src/app.py b/src/app.py\nold\n"
+
+            def __call__(self, cmd, **kwargs):
+                if cmd[:4] == ["git", "diff", "--binary", "--cached"]:
+                    self.calls.append((list(cmd), kwargs.get("env")))
+                    return subprocess.CompletedProcess(
+                        cmd, 0, self.patch_text, "")
+                return super().__call__(cmd, **kwargs)
+
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = PatchRunner(["src/app.py"])
+            arguments = dict(
+                repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit=self.BASE,
+                scope=["src/app.py"], mutation_state="post-mutation",
+                terminal_outcome="started-mid-work-failed",
+                originating_worker=self.WORKER, runner=runner)
+            patch = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"), **arguments))
+            old_patch = patch.read_text()
+            old_manifest = invoke.recovery_manifest(patch).read_text()
+            runner.patch_text = "diff --git a/src/app.py b/src/app.py\nnew\n"
+            original_write = invoke._write_recovery_file
+
+            def interrupted(target, value):
+                if target == invoke.recovery_manifest(patch) and \
+                        invoke.recovery_previous(patch)[1].is_file():
+                    raise OSError("host stopped between pair writes")
+                return original_write(target, value)
+
+            with mock.patch.object(invoke, "_write_recovery_file",
+                                   side_effect=interrupted):
+                with self.assertRaisesRegex(OSError, "between pair writes"):
+                    invoke.checkpoint_failed_work(
+                        pathlib.Path("/old"), pathlib.Path("/checkout"),
+                        **arguments)
+            self.assertTrue(all(path.is_file()
+                                for path in invoke.recovery_previous(patch)))
+            self.assertTrue(invoke.recovery_available(
+                patch, repo="owner/repo", story_number=214,
+                scope=["src/app.py"], runner=runner))
+            self.assertEqual(old_patch, patch.read_text())
+            self.assertEqual(old_manifest,
+                             invoke.recovery_manifest(patch).read_text())
+            self.assertFalse(any(path.exists()
+                                 for path in invoke.recovery_previous(patch)))
 
     def test_in_scope_changes_are_committed_to_a_stable_local_recovery_ref(self):
         runner = RecordingRunner(["src/app.py"])
@@ -1011,6 +1066,33 @@ class FailedWorkCheckpointTests(unittest.TestCase):
                         patch, repo="owner/repo", story_number=214,
                         scope=["inside.py"])
             self.assertTrue(patch_tombstone.exists())
+            self.assertTrue(manifest_tombstone.exists())
+
+    def test_initial_discovery_preserves_lone_manifest_tombstone(self):
+        with tempfile.TemporaryDirectory() as recovery:
+            patch = pathlib.Path(recovery, "story.patch")
+            manifest_tombstone = patch.with_name("story.json.deleting")
+            record = {
+                "schema_version": invoke.RECOVERY_SCHEMA_VERSION,
+                "trust": invoke.RECOVERY_TRUST,
+                "repository": "owner/repo", "story": 214,
+                "base_commit": self.BASE, "delivered_head": "d" * 40,
+                "recovered_paths": ["outside.py"],
+                "previous_mutation_state": "post-mutation",
+                "previous_terminal_outcome": "completed",
+                "originating_worker": self.WORKER,
+                "recovered_at": "2026-09-04T00:00:00Z",
+                "delivery_verified_at": "2026-09-04T00:01:00Z",
+            }
+            manifest_tombstone.write_text(json.dumps(record))
+            self.assertTrue(invoke.recovery_available(
+                patch, repo="owner/repo", story_number=214,
+                scope=None, reconcile_cleanup=False))
+            self.assertTrue(manifest_tombstone.exists())
+            with self.assertRaisesRegex(invoke.RecoveryError, "provenance"):
+                invoke.recovery_available(
+                    patch, repo="owner/repo", story_number=214,
+                    scope=["inside.py"])
             self.assertTrue(manifest_tombstone.exists())
 
     def test_worktree_creation_failure_preserves_recovery_accounting(self):

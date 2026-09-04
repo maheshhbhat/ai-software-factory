@@ -549,6 +549,23 @@ def recovery_manifest(patch: pathlib.Path) -> pathlib.Path:
     return patch.with_suffix(".json")
 
 
+def recovery_previous(patch: pathlib.Path) -> tuple[pathlib.Path, pathlib.Path]:
+    manifest = recovery_manifest(patch)
+    return (patch.with_name(patch.name + ".previous"),
+            manifest.with_name(manifest.name + ".previous"))
+
+
+def _unlink_recovery_files(*paths: pathlib.Path) -> None:
+    for path in paths:
+        path.unlink(missing_ok=True)
+    if paths:
+        directory = os.open(paths[0].parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+
+
 def recovery_patch_paths(patch: pathlib.Path, *, runner=subprocess.run) -> list[str]:
     """Read the path set Git records in a checkpoint without applying it."""
     result = runner(
@@ -666,6 +683,15 @@ def recovery_available(patch: pathlib.Path, *, repo: str | None = None,
                        reconcile_cleanup: bool = True,
                        runner=subprocess.run) -> bool:
     manifest = recovery_manifest(patch)
+    previous_patch, previous_manifest = recovery_previous(patch)
+    if previous_patch.is_file() and previous_manifest.is_file():
+        # A replacement is not committed until both old-generation backups
+        # are removed. If the host stopped anywhere before then, restore the
+        # complete prior generation and retry from known resumable evidence.
+        _write_recovery_file(patch, previous_patch.read_text(encoding="utf-8"))
+        _write_recovery_file(
+            manifest, previous_manifest.read_text(encoding="utf-8"))
+        _unlink_recovery_files(previous_patch, previous_manifest)
     patch_tombstone = patch.with_name(patch.name + ".deleting")
     manifest_tombstone = manifest.with_name(manifest.name + ".deleting")
     if patch_tombstone.exists() or manifest_tombstone.exists():
@@ -685,6 +711,8 @@ def recovery_available(patch: pathlib.Path, *, repo: str | None = None,
                 validate_pushed_recovery(
                     value, None, repo=repo, story_number=story_number,
                     scope=scope)
+                if not reconcile_cleanup:
+                    return True
                 try:
                     manifest_tombstone.unlink(missing_ok=True)
                 except OSError as exc:
@@ -739,6 +767,10 @@ def recovery_available(patch: pathlib.Path, *, repo: str | None = None,
         raise RecoveryError("recovery checkpoint worker identity is invalid")
     if not valid_utc_timestamp(value.get("recovered_at")):
         raise RecoveryError("recovery checkpoint timestamp is invalid")
+    # One leftover means the active pair was never replaced or replacement
+    # completed and backup cleanup was interrupted. The active pair has now
+    # been validated, so the incomplete backup cannot be authoritative.
+    _unlink_recovery_files(previous_patch, previous_manifest)
     return True
 
 
@@ -754,6 +786,23 @@ def _write_recovery_file(target: pathlib.Path, value: str) -> None:
         os.fsync(directory)
     finally:
         os.close(directory)
+
+
+def _write_recovery_pair(target: pathlib.Path, patch_text: str,
+                         manifest_text: str) -> None:
+    """Publish a pair while retaining the prior valid generation on failure."""
+    manifest = recovery_manifest(target)
+    previous_patch, previous_manifest = recovery_previous(target)
+    if target.is_file() != manifest.is_file():
+        raise RecoveryError("recovery checkpoint patch/manifest pair is incomplete")
+    if target.is_file():
+        _write_recovery_file(
+            previous_patch, target.read_text(encoding="utf-8"))
+        _write_recovery_file(
+            previous_manifest, manifest.read_text(encoding="utf-8"))
+    _write_recovery_file(target, patch_text)
+    _write_recovery_file(manifest, manifest_text)
+    _unlink_recovery_files(previous_patch, previous_manifest)
 
 
 def remove_recovery(patch: pathlib.Path) -> None:
@@ -931,8 +980,8 @@ def recovered_work_state(worktree: pathlib.Path, paths: list[str], *,
 
 def _gitlinks(output: str) -> set[str]:
     result = set()
-    for line in output.splitlines():
-        metadata, separator, relative = line.partition("\t")
+    for record in output.split("\0") if "\0" in output else output.splitlines():
+        metadata, separator, relative = record.partition("\t")
         fields = metadata.split()
         if separator and fields and fields[0] == "160000":
             result.add(relative)
@@ -944,15 +993,17 @@ def checkout_recovered_gitlinks(worktree: pathlib.Path, paths: list[str], *,
                                 runner=subprocess.run) -> None:
     """Make each staged gitlink's checked-out directory match the index."""
     prior = _gitlinks(git(
-        ["ls-tree", base_commit, "--", *paths], worktree,
+        ["ls-tree", "-z", base_commit, "--", *paths], worktree,
         runner=runner).stdout)
     staged = git(
-        ["ls-files", "--stage", "--", *paths], worktree,
+        ["ls-files", "--stage", "-z", "--", *paths], worktree,
         runner=runner).stdout
     gitlinks = _gitlinks(staged)
     staged_paths = {
-        line.partition("\t")[2] for line in staged.splitlines()
-        if line.partition("\t")[1]
+        record.partition("\t")[2]
+        for record in (staged.split("\0") if "\0" in staged
+                       else staged.splitlines())
+        if record.partition("\t")[1]
     }
     root = worktree.resolve()
     for relative in sorted(prior - gitlinks):
@@ -982,7 +1033,7 @@ def ensure_recovered_gitlinks_clean(worktree: pathlib.Path, paths: list[str], *,
     """Reject nested edits that the parent repository cannot record."""
     if not paths:
         return
-    staged = git(["ls-files", "--stage", "--", *paths], worktree,
+    staged = git(["ls-files", "--stage", "-z", "--", *paths], worktree,
                  runner=runner).stdout
     for relative in sorted(_gitlinks(staged)):
         dirty = git(
@@ -1058,10 +1109,8 @@ def checkpoint_failed_work(worktree: pathlib.Path, checkout: pathlib.Path, *,
         "originating_worker": dict(originating_worker or {}),
         "recovered_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     }
-    _write_recovery_file(target, patch)
-    _write_recovery_file(
-        recovery_manifest(target),
-        json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+    _write_recovery_pair(
+        target, patch, json.dumps(manifest, indent=2, sort_keys=True) + "\n")
     return str(target)
 
 
