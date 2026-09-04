@@ -761,7 +761,13 @@ def reconcile_recovery_push(patch: pathlib.Path, observed_head: str, *,
         raise RecoveryError("pending recovery checkpoint is invalid") from exc
     if pending != observed_head:
         return
-    mark_recovery_pushed(patch, pending)
+    try:
+        mark_recovery_pushed(patch, pending)
+    except RecoveryError:
+        raise
+    except Exception as exc:
+        raise RecoveryError(
+            "pending recovery promotion could not be recorded") from exc
 
 
 def pushed_recovery_head(patch: pathlib.Path, *, repo: str, story_number: int,
@@ -1248,19 +1254,22 @@ def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
                 runner=runner)
             head = git(["rev-parse", "HEAD"], worktree,
                        runner=runner).stdout.strip()
-            if not has_recovery:
-                ref = checkpoint_failed_work(
-                    worktree, checkout, repo=repo, story_number=story_number,
-                    default=default, base_ref=base_ref,
-                    base_commit=base_commit, scope=scope,
-                    mutation_state="post-mutation",
-                    terminal_outcome="completed-awaiting-push",
-                    originating_worker=originating_worker, runner=runner)
-                if not ref:
-                    raise RecoveryError(
-                        "pre-push recovery checkpoint could not be created")
-                saved_recovery = pathlib.Path(ref)
-                has_recovery = True
+            # Replace even an existing partial checkpoint with the validated
+            # commit that is actually about to be pushed. If the remote rejects
+            # the push, the completed retry must remain resumable rather than
+            # falling back to the older partial worker output.
+            ref = checkpoint_failed_work(
+                worktree, checkout, repo=repo, story_number=story_number,
+                default=default, base_ref=base_ref,
+                base_commit=base_commit, scope=scope,
+                mutation_state="post-mutation",
+                terminal_outcome="completed-awaiting-push",
+                originating_worker=originating_worker, runner=runner)
+            if not ref:
+                raise RecoveryError(
+                    "pre-push recovery checkpoint could not be created")
+            saved_recovery = pathlib.Path(ref)
+            has_recovery = True
             mark_recovery_push_pending(saved_recovery, head)
             try:
                 git(["push", "origin", f"HEAD:refs/heads/{branch}"], worktree,
