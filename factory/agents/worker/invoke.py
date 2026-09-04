@@ -64,6 +64,17 @@ def valid_commit(value) -> bool:
     return isinstance(value, str) and FULL_COMMIT.fullmatch(value) is not None
 
 
+def valid_utc_timestamp(value) -> bool:
+    """Return whether value is a full ISO datetime with canonical UTC suffix."""
+    if not isinstance(value, str) or "T" not in value or not value.endswith("Z"):
+        return False
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return parsed.utcoffset() == timezone.utc.utcoffset(None)
+
+
 class DeliveryError(RuntimeError):
     """A bounded delivery could not be completed.
 
@@ -617,13 +628,8 @@ def reconcile_recovery_push(patch: pathlib.Path, observed_head: str, *,
     try:
         if (any(value.get(key) != item for key, item in expected.items()) or
                 not valid_commit(pending) or
-                not prepared.endswith("Z")):
+                not valid_utc_timestamp(prepared)):
             raise ValueError("invalid pending recovery provenance")
-        parsed_prepared = datetime.fromisoformat(
-            prepared.replace("Z", "+00:00"))
-        if ("T" not in prepared or
-                parsed_prepared.utcoffset() != timezone.utc.utcoffset(None)):
-            raise ValueError("pending recovery timestamp is not UTC")
     except (AttributeError, TypeError, ValueError) as exc:
         raise RecoveryError("pending recovery checkpoint is invalid") from exc
     if pending != observed_head:
@@ -661,12 +667,8 @@ def pushed_recovery_head(patch: pathlib.Path, *, repo: str, story_number: int,
         raise RecoveryError("pushed recovery worker identity is invalid")
     for key in ("recovered_at", "delivery_verified_at"):
         timestamp = value.get(key)
-        try:
-            if not timestamp.endswith("Z"):
-                raise ValueError("timestamp is not UTC")
-            datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
-        except (AttributeError, TypeError, ValueError) as exc:
-            raise RecoveryError(f"pushed recovery {key} is invalid") from exc
+        if not valid_utc_timestamp(timestamp):
+            raise RecoveryError(f"pushed recovery {key} is invalid")
     return head
 
 
@@ -842,12 +844,8 @@ def restore_failed_work(patch: pathlib.Path, worktree: pathlib.Path, *,
                 for key in ("invocation_id", "reservation_id", "provider", "model"))):
         raise RecoveryError("recovery checkpoint worker identity is invalid")
     recovered_at = value.get("recovered_at")
-    try:
-        if not recovered_at.endswith("Z"):
-            raise ValueError("timestamp is not UTC")
-        datetime.fromisoformat(recovered_at.replace("Z", "+00:00"))
-    except (AttributeError, TypeError, ValueError) as exc:
-        raise RecoveryError("recovery checkpoint timestamp is invalid") from exc
+    if not valid_utc_timestamp(recovered_at):
+        raise RecoveryError("recovery checkpoint timestamp is invalid")
     try:
         git(["apply", "--index", str(patch)], worktree, runner=runner)
         checkout_recovered_gitlinks(
