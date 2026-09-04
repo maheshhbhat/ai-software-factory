@@ -16,6 +16,10 @@ STORY_BELLS = ("plan-approval", "poison-rescue", "acceptance")
 AUTONOMY_BREAKING_ACTIONS = {"recovery", "code-intervention"}
 TERMINAL_WORKER_EVENT = "worker.outcome"
 REVIEW_OUTCOME_EVENT = "review.outcome.published"
+TERMINAL_WORKER_RESULTS = {
+    "LAUNCHED", "FAILED", "TERMINAL_FAILURE", "AMBIGUOUS",
+    "NO_ELIGIBLE_WORKER", "NO_WORKER_LAUNCHED",
+}
 FULL_COMMIT_ID = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 REPOSITORY_SLUG = re.compile(r"[^/\s]+/[^/\s]+")
 
@@ -39,6 +43,27 @@ def valid_repository(value):
 
 def valid_event_id(value):
     return isinstance(value, str) and bool(value.strip())
+
+
+def valid_terminal_worker_outcome(row):
+    result = row.get("result")
+    if not isinstance(result, str) or result not in TERMINAL_WORKER_RESULTS:
+        return False
+    exit_code = row.get("exit")
+    valid_worker = (isinstance(row.get("worker"), str) and
+                    bool(row["worker"].strip()))
+    valid_exit = (exit_code is None or
+                  (isinstance(exit_code, int) and
+                   not isinstance(exit_code, bool)))
+    if not valid_exit:
+        return False
+    if result == "LAUNCHED":
+        return exit_code == 0 and valid_worker
+    if exit_code == 0:
+        return False
+    if result in {"NO_ELIGIBLE_WORKER", "NO_WORKER_LAUNCHED"}:
+        return row.get("worker") is None and exit_code is None
+    return valid_worker
 
 
 def unique(rows, key):
@@ -124,7 +149,8 @@ def attempt_ledger(evidence, process, numbers):
         (row.get("story"), row.get("trace_id"))
         for row in process
         if row.get("event") in
-        (TERMINAL_WORKER_EVENT, "worker.launch.start", "worker.launch.end")
+        (TERMINAL_WORKER_EVENT, "worker.launch.start", "worker.launch.end",
+         "worker.failover")
         and row.get("repo") == repository and row.get("story") in numbers
         and row.get("trace_id")}
     for story, trace in sorted(worker_traces - claimed_traces):
@@ -173,6 +199,10 @@ def attempt_ledger(evidence, process, numbers):
         if outcome and not outcome.get("event_id"):
             findings.append(
                 f"terminal worker outcome for claim {claim_id!r} needs a durable event ID")
+        if outcome and not valid_terminal_worker_outcome(outcome):
+            findings.append(
+                f"terminal worker outcome for claim {claim_id!r} needs a recognized "
+                "result with a consistent worker and exit status")
         failed = bool(outcome and (outcome.get("exit") not in (None, 0) or
                                   outcome.get("result") != "LAUNCHED"))
         diagnostic = None
@@ -261,7 +291,10 @@ def attempt_ledger(evidence, process, numbers):
                     f"successful claim {claim_id!r} for Story {story} needs "
                     "exactly one successful worker-specific launch or "
                     "evidence-unavailable record")
-        elif (outcome and outcome.get("worker") and not launch_starts and
+        elif (outcome and
+              (outcome.get("worker") or
+               outcome.get("result") == "NO_WORKER_LAUNCHED") and
+              not launch_starts and
               not launch_evidence_unavailable):
             findings.append(
                 f"worker outcome for claim {claim_id!r} in Story {story} needs "
@@ -383,6 +416,16 @@ def review_ledger(evidence, process, numbers, attempts):
             and row.get("story") == story
             and row.get("pull_request") == pr and row.get("head") == head
             and row.get("verdict") in ("approval", "findings")]
+        durable_reviews = deterministic_copies(
+            [row for row in review_candidates
+             if valid_event_id(row.get("event_id"))],
+            lambda row: (row.get("event_id"),), findings,
+            "exact-head review event")
+        legacy_reviews = sorted(
+            [row for row in review_candidates
+             if not valid_event_id(row.get("event_id"))],
+            key=lambda row: json.dumps(row, sort_keys=True, default=str))
+        review_candidates = durable_reviews + legacy_reviews
         review_groups = {}
         for row in review_candidates:
             review_groups.setdefault(
@@ -392,7 +435,8 @@ def review_ledger(evidence, process, numbers, attempts):
         outcomes = []
         for key in sorted(review_groups, key=lambda value: tuple(str(v) for v in value)):
             candidates = review_groups[key]
-            durable = unique([row for row in candidates if row.get("event_id")],
+            durable = unique([row for row in candidates
+                              if valid_event_id(row.get("event_id"))],
                              lambda row: row.get("event_id"))
             if len(durable) > 1:
                 findings.append(
