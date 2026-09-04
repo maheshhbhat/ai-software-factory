@@ -28,6 +28,10 @@ def valid_commit_id(value):
     return bool(FULL_COMMIT_ID.fullmatch(text) and set(text) != {"0"})
 
 
+def valid_pull_request(value):
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
 def unique(rows, key):
     seen = set()
     result = []
@@ -141,9 +145,11 @@ def attempt_ledger(evidence, process, numbers):
                     "exactly one terminal diagnostic or evidence-unavailable record")
         if outcome and outcome.get("result") == "LAUNCHED":
             successful_launches = [
-                row for row in launch_ends
-                if row.get("worker") == outcome.get("worker")
-                and row.get("result") == "LAUNCHED" and row.get("exit") == 0]
+                row for row in launch_ledger
+                if row["start"].get("worker") == outcome.get("worker")
+                and row.get("terminal_diagnostic")
+                and row["terminal_diagnostic"].get("result") == "LAUNCHED"
+                and row["terminal_diagnostic"].get("exit") == 0]
             if len(successful_launches) + bool(launch_evidence_unavailable) != 1:
                 findings.append(
                     f"successful claim {claim_id!r} for Story {story} needs "
@@ -262,6 +268,9 @@ def review_ledger(evidence, process, numbers, attempts):
             outcomes.append(sorted(durable, key=lambda row: row["event_id"])[0]
                             if durable else candidates[0])
         identity = f"{pr}:{head}"
+        if pr is not None and not valid_pull_request(pr):
+            findings.append(
+                f"PR/head production event for {identity} needs a positive integer PR number")
         if head and not valid_commit_id(head):
             findings.append(
                 f"PR/head production event for {identity} needs a full commit SHA")

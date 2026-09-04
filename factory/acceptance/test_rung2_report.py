@@ -212,6 +212,22 @@ class Rung2ReportTests(unittest.TestCase):
         result = report.build(*values)
         self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
 
+    def test_pull_request_identity_must_be_positive_integer(self):
+        for invalid in ("not-a-pr", -1, True):
+            with self.subTest(invalid=invalid):
+                values = list(fixture())
+                story = values[0]["stories"][0]
+                old_pr = story["pull_request"]
+                story["pull_request"] = invalid
+                for row in values[1]:
+                    if row.get("pull_request") == old_pr:
+                        row["pull_request"] = invalid
+                result = report.build(*values)
+                self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+                self.assertTrue(any("positive integer PR number" in finding
+                                    for finding in
+                                    result["measurement_integrity"]["findings"]))
+
     def test_merged_story_requires_durable_delivered_head(self):
         values = list(fixture())
         story = values[0]["stories"][0]
@@ -363,6 +379,17 @@ class Rung2ReportTests(unittest.TestCase):
             if row.get("event") == "worker.launch.end" and row.get("trace_id") == trace:
                 row.update({"result": "FAILED", "exit": 1,
                             "detail": "worker rejected assignment"})
+        result = report.build(*values)
+        self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+        self.assertTrue(any("successful worker-specific launch" in finding
+                            for finding in result["measurement_integrity"]["findings"]))
+
+    def test_successful_launch_end_requires_matching_start(self):
+        values = list(fixture())
+        trace = "trace-20-0"
+        values[1] = [row for row in values[1]
+                     if not (row.get("event") == "worker.launch.start" and
+                             row.get("trace_id") == trace)]
         result = report.build(*values)
         self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
         self.assertTrue(any("successful worker-specific launch" in finding
