@@ -534,7 +534,7 @@ class FailedWorkCheckpointTests(unittest.TestCase):
                 self.assertTrue(manifest["recovered_at"].endswith("Z"))
         self.assertTrue(ref.endswith("owner--repo/story-214.patch"))
         commands = [command for command, _ in runner.calls]
-        self.assertIn(["git", "add", "--", "src/app.py"], commands)
+        self.assertIn(["git", "add", "--all", "--", "."], commands)
 
     def test_committed_deletion_is_recorded_without_restaging_missing_path(self):
         with tempfile.TemporaryDirectory() as directory, \
@@ -2972,6 +2972,32 @@ class ScopeSeesFilesTests(unittest.TestCase):
             check=True, capture_output=True, text=True).stdout
         self.assertIn("old.txt", staged)
         self.assertIn("new.txt", staged)
+
+    def test_pending_rename_can_be_written_to_recovery_checkpoint(self):
+        root = self.repo()
+        source = root / "old.txt"
+        source.write_text("tracked\n")
+        subprocess.run(["git", "add", "old.txt"], cwd=root, check=True)
+        subprocess.run(
+            ["git", "-c", "user.email=t@t", "-c", "user.name=t",
+             "commit", "-qm", "tracked"], cwd=root, check=True)
+        base = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=root, check=True,
+            capture_output=True, text=True).stdout.strip()
+        subprocess.run(["git", "mv", "old.txt", "new.txt"], cwd=root,
+                       check=True)
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            ref = invoke.checkpoint_failed_work(
+                root, root, repo="owner/repo", story_number=214,
+                default="main", base_ref=base, base_commit=base,
+                scope=["old.txt", "new.txt"],
+                mutation_state="post-mutation",
+                terminal_outcome="worker-crashed",
+                originating_worker={"task": "delivery:owner/repo:214:1"})
+            patch = pathlib.Path(ref).read_text()
+        self.assertIn("rename from old.txt", patch)
+        self.assertIn("rename to new.txt", patch)
 
     def test_committed_rename_lists_source_and_destination_paths(self):
         root = self.repo()

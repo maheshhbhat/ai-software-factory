@@ -1253,7 +1253,7 @@ def checkpoint_failed_work(worktree: pathlib.Path, checkout: pathlib.Path, *,
     # continues to preserve every historical path in the recovery patch.
     pending = pending_paths(worktree, runner=runner)
     if pending:
-        git(["add", "--", *pending], worktree, runner=runner)
+        stage_pending_work(worktree, runner=runner)
     patch = git(["diff", "--binary", "--cached", base_commit],
                 worktree, runner=runner).stdout
     if not patch:
