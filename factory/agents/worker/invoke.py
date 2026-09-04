@@ -911,10 +911,11 @@ def validate_recovery_head_content(patch: pathlib.Path, head: str,
     except Exception as exc:
         raise RecoveryError(
             "recovery checkpoint head could not be inspected") from exc
-    with tempfile.TemporaryDirectory(prefix="factory-recovery-index-") as temp:
-        environment = os.environ.copy()
-        environment["GIT_INDEX_FILE"] = str(pathlib.Path(temp) / "index")
-        try:
+    try:
+        with tempfile.TemporaryDirectory(
+                prefix="factory-recovery-index-") as temp:
+            environment = os.environ.copy()
+            environment["GIT_INDEX_FILE"] = str(pathlib.Path(temp) / "index")
             git(["read-tree", base], checkout, env=environment, runner=runner)
             run(["git", "apply", "--cached", "--binary", str(patch)],
                 cwd=checkout, timeout=300, env=environment, runner=runner)
@@ -922,9 +923,11 @@ def validate_recovery_head_content(patch: pathlib.Path, head: str,
                                 runner=runner).stdout.strip()
             delivered_tree = git(["rev-parse", f"{head}^{{tree}}"], checkout,
                                  runner=runner).stdout.strip()
-        except Exception as exc:
-            raise RecoveryError(
-                "recovery checkpoint content could not be validated") from exc
+    except RecoveryError:
+        raise
+    except Exception as exc:
+        raise RecoveryError(
+            "recovery checkpoint content could not be validated") from exc
     if expected_tree != delivered_tree:
         raise RecoveryError("recovery checkpoint does not match recorded head")
 
