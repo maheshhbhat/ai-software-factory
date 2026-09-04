@@ -54,9 +54,10 @@ def fixture():
                  "worker": "factory-worker", "result": "LAUNCHED", "exit": 0}])
             process.append({"event": "worker.outcome", "story": story,
                             "event_id": f"outcome-{story}-{index}",
-                            "trace_id": trace, "result": "LAUNCHED", "exit": 0})
+                            "trace_id": trace, "worker": "factory-worker",
+                            "result": "LAUNCHED", "exit": 0})
     for story in evidence["stories"]:
-        pr, head = 100 + story["number"], str(story["number"])[-1] * 40
+        pr, head = 100 + story["number"], f"{story['number']:040x}"
         story["pull_request"] = pr
         story["head"] = head
         for outcome in process:
@@ -200,6 +201,36 @@ class Rung2ReportTests(unittest.TestCase):
         self.assertTrue(any("needs a full commit SHA" in finding for finding in
                             result["measurement_integrity"]["findings"]))
 
+    def test_null_object_id_is_not_exact_head_evidence(self):
+        values = list(fixture())
+        story = values[0]["stories"][0]
+        old_head = story["head"]
+        story["head"] = "0" * 40
+        for row in values[1]:
+            if row.get("pull_request") == story["pull_request"] and row.get("head") == old_head:
+                row["head"] = "0" * 40
+        result = report.build(*values)
+        self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+
+    def test_merged_story_requires_durable_delivered_head(self):
+        values = list(fixture())
+        story = values[0]["stories"][0]
+        story.pop("pull_request")
+        story.pop("head")
+        values[1] = [row for row in values[1]
+                     if not (row.get("story") == story["number"] and
+                             row.get("event") in
+                             ("delivery.pull-request.written",
+                              "review.outcome.published"))]
+        for row in values[1]:
+            if row.get("story") == story["number"] and row.get("event") == "worker.outcome":
+                row.update({"result": "FAILED", "exit": 1,
+                            "diagnostic_ref": "durable-diagnostic"})
+        result = report.build(*values)
+        self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+        self.assertIn("merged Story 20 lacks a durable PR/head production event",
+                      result["measurement_integrity"]["findings"])
+
     def test_declared_pr_without_production_head_is_inconclusive(self):
         values = list(fixture())
         values[1] = [row for row in values[1]
@@ -320,6 +351,38 @@ class Rung2ReportTests(unittest.TestCase):
             "trace_id": outcome["trace_id"], "span_id": "shared-span",
             "worker": "claude", "event_id": "end-claude", "exit": 1,
             "result": "FAILED", "stderr": "failed before fallback"})
+        result = report.build(*values)
+        self.assertNotEqual("INCONCLUSIVE", result["rung_verdict"])
+
+    def test_launched_outcome_requires_successful_matching_launch_end(self):
+        values = list(fixture())
+        outcome = next(row for row in values[1]
+                       if row.get("event") == "worker.outcome")
+        trace = outcome["trace_id"]
+        for row in values[1]:
+            if row.get("event") == "worker.launch.end" and row.get("trace_id") == trace:
+                row.update({"result": "FAILED", "exit": 1,
+                            "detail": "worker rejected assignment"})
+        result = report.build(*values)
+        self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+        self.assertTrue(any("successful worker-specific launch" in finding
+                            for finding in result["measurement_integrity"]["findings"]))
+
+    def test_failed_fallback_launch_end_requires_diagnostic_content(self):
+        values = list(fixture())
+        outcome = next(row for row in values[1]
+                       if row.get("event") == "worker.outcome")
+        values[1].extend([
+            {"event": "worker.launch.start", "story": outcome["story"],
+             "trace_id": outcome["trace_id"], "span_id": "fallback-span",
+             "worker": "failed-worker", "event_id": "fallback-start"},
+            {"event": "worker.launch.end", "story": outcome["story"],
+             "trace_id": outcome["trace_id"], "span_id": "fallback-span",
+             "worker": "failed-worker", "event_id": "fallback-end",
+             "result": "FAILED", "exit": 1}])
+        result = report.build(*values)
+        self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+        values[1][-1]["stderr"] = "worker rejected assignment"
         result = report.build(*values)
         self.assertNotEqual("INCONCLUSIVE", result["rung_verdict"])
 

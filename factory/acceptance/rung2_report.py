@@ -23,6 +23,11 @@ def unavailable(reason):
     return shared.unavailable(reason)
 
 
+def valid_commit_id(value):
+    text = str(value or "")
+    return bool(FULL_COMMIT_ID.fullmatch(text) and set(text) != {"0"})
+
+
 def unique(rows, key):
     seen = set()
     result = []
@@ -118,23 +123,32 @@ def attempt_ledger(evidence, process, numbers):
                 row for row in launch_ends
                 if span and row.get("span_id") == span
                 and worker and row.get("worker") == worker]
+            usable_ends = [
+                row for row in matching_ends
+                if ((row.get("result") == "LAUNCHED" and row.get("exit") == 0) or
+                    row.get("stderr") or row.get("stdout") or row.get("detail"))]
             unavailable_launch = evidence_unavailable(
                 evidence, kind="attempt-launch-diagnostics", story=story,
                 identity=f"{identity}:{start_id}")
             launch_ledger.append({
                 "start": start,
-                "terminal_diagnostic": (matching_ends[0]
-                                        if len(matching_ends) == 1 else None),
+                "terminal_diagnostic": (usable_ends[0]
+                                        if len(usable_ends) == 1 else None),
                 "evidence_unavailable": unavailable_launch})
-            if len(matching_ends) + bool(unavailable_launch) != 1:
+            if len(usable_ends) + bool(unavailable_launch) != 1:
                 findings.append(
                     f"worker launch {start_id!r} for claim {claim_id!r} needs "
                     "exactly one terminal diagnostic or evidence-unavailable record")
-        if (outcome and outcome.get("result") == "LAUNCHED" and
-                not launch_starts and not launch_evidence_unavailable):
-            findings.append(
-                f"successful claim {claim_id!r} for Story {story} needs a "
-                "reconciled worker launch or evidence-unavailable record")
+        if outcome and outcome.get("result") == "LAUNCHED":
+            successful_launches = [
+                row for row in launch_ends
+                if row.get("worker") == outcome.get("worker")
+                and row.get("result") == "LAUNCHED" and row.get("exit") == 0]
+            if len(successful_launches) + bool(launch_evidence_unavailable) != 1:
+                findings.append(
+                    f"successful claim {claim_id!r} for Story {story} needs "
+                    "exactly one successful worker-specific launch or "
+                    "evidence-unavailable record")
         if failed:
             diagnostic_events = [
                 row for row in launch_ends
@@ -207,6 +221,7 @@ def review_ledger(evidence, process, numbers, attempts):
                 produced.append({"story": attempt.get("story"),
                                  "pull_request": pr, "head": head,
                                  "production_evidence_missing": True})
+                observed_pairs.add((pr, head))
     for story in evidence.get("stories") or []:
         pr, head = story.get("pull_request"), story.get("head")
         if head:
@@ -218,6 +233,10 @@ def review_ledger(evidence, process, numbers, attempts):
         if (pr, head) not in observed_pairs:
             produced.append({"story": story, "pull_request": pr, "head": head})
             observed_pairs.add((pr, head))
+    for story in sorted(numbers):
+        if not any(row.get("story") == story for row in produced):
+            produced.append({"story": story, "pull_request": None, "head": None,
+                             "story_delivery_missing": True})
     rows = []
     for item in produced:
         pr, head, story = (item.get("pull_request"), item.get("head"),
@@ -243,10 +262,11 @@ def review_ledger(evidence, process, numbers, attempts):
             outcomes.append(sorted(durable, key=lambda row: row["event_id"])[0]
                             if durable else candidates[0])
         identity = f"{pr}:{head}"
-        if head and not FULL_COMMIT_ID.fullmatch(str(head)):
+        if head and not valid_commit_id(head):
             findings.append(
                 f"PR/head production event for {identity} needs a full commit SHA")
-        if not item.get("production_evidence_missing") and not item.get("event_id"):
+        if (not item.get("production_evidence_missing") and
+                not item.get("story_delivery_missing") and not item.get("event_id")):
             findings.append(
                 f"PR/head production event for {identity} needs a durable event ID")
         unavailable = evidence_unavailable(
@@ -255,6 +275,9 @@ def review_ledger(evidence, process, numbers, attempts):
             findings.append(
                 f"successful attempt for Story {story} lacks a matching durable "
                 f"PR/head production event for {identity}")
+        if item.get("story_delivery_missing"):
+            findings.append(
+                f"merged Story {story} lacks a durable PR/head production event")
         if (not pr or not head or len(outcomes) + bool(unavailable) != 1):
             findings.append(
                 f"produced PR {pr!r} head {head!r} needs exactly one exact-head "
