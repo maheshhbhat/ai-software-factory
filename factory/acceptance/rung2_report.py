@@ -226,9 +226,7 @@ def attempt_ledger(evidence, process, numbers):
              if row.get("event") == "worker.launch.end"
              and row.get("repo") == repository
              and row.get("story") == story
-             and trace and row.get("trace_id") == trace
-             and valid_event_id(row.get("event_id"))
-             and (row.get("exit") is not None or row.get("result"))],
+             and trace and row.get("trace_id") == trace],
             lambda row: (row.get("trace_id"), row.get("event_id")),
             findings, "worker launch end")
         launch_ends.sort(key=lambda row: (
@@ -236,6 +234,10 @@ def attempt_ledger(evidence, process, numbers):
             str(row.get("worker") or ""), str(row.get("event_id") or "")))
         reconciled_ends = []
         for end in launch_ends:
+            if not valid_event_id(end.get("event_id")):
+                findings.append(
+                    f"worker launch end for claim {claim_id!r} needs a durable "
+                    "nonempty string event ID")
             if not valid_terminal_worker_outcome(end):
                 findings.append(
                     f"worker launch end {end.get('event_id')!r} for claim "
@@ -375,13 +377,17 @@ def review_ledger(evidence, process, numbers, attempts):
     produced = []
     for key in sorted(grouped, key=lambda value: tuple(str(v) for v in value)):
         candidates = grouped[key]
-        durable = unique([row for row in candidates if row.get("event_id")],
+        durable = unique([row for row in candidates
+                          if valid_event_id(row.get("event_id"))],
                          lambda row: row.get("event_id"))
         if len(durable) > 1:
             findings.append(
                 f"PR/head production evidence {key!r} has conflicting durable event IDs")
         produced.append(sorted(durable, key=lambda row: row["event_id"])[0]
-                        if durable else candidates[0])
+                        if durable else sorted(
+                            candidates,
+                            key=lambda row: json.dumps(
+                                row, sort_keys=True, default=str))[0])
     observed_identities = {
         (row.get("story"), row.get("pull_request"), row.get("head"))
         for row in produced}
@@ -472,9 +478,11 @@ def review_ledger(evidence, process, numbers, attempts):
             findings.append(
                 f"PR/head production event for {identity} needs a full commit SHA")
         if (not item.get("production_evidence_missing") and
-                not item.get("story_delivery_missing") and not item.get("event_id")):
+                not item.get("story_delivery_missing") and
+                not valid_event_id(item.get("event_id"))):
             findings.append(
-                f"PR/head production event for {identity} needs a durable event ID")
+                f"PR/head production event for {identity} needs a durable "
+                "nonempty string event ID")
         unavailable = evidence_unavailable(
             evidence, kind="exact-head-review", story=story, identity=identity)
         if item.get("production_evidence_missing"):
@@ -488,10 +496,11 @@ def review_ledger(evidence, process, numbers, attempts):
             findings.append(
                 f"produced PR {pr!r} head {head!r} needs exactly one exact-head "
                 "independent review outcome or evidence-unavailable record")
-        if len(outcomes) == 1 and not outcomes[0].get("event_id"):
+        if (len(outcomes) == 1 and
+                not valid_event_id(outcomes[0].get("event_id"))):
             findings.append(
                 f"exact-head review outcome for PR {pr!r} head {head!r} "
-                "needs a durable event ID")
+                "needs a durable nonempty string event ID")
         rows.append({"story": story, "pull_request": pr, "head": head,
                      "review_outcome": outcomes[0] if len(outcomes) == 1 else None,
                      "evidence_unavailable": unavailable})

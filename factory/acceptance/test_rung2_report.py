@@ -834,6 +834,22 @@ class Rung2ReportTests(unittest.TestCase):
                             for finding in
                             result["measurement_integrity"]["findings"]))
 
+    def test_malformed_launch_end_is_validated_before_filtering(self):
+        values = list(fixture())
+        launch_end = next(row for row in values[1]
+                          if row.get("event") == "worker.launch.end")
+        malformed = dict(launch_end)
+        malformed["event_id"] = "malformed-launch-end"
+        malformed.pop("result")
+        malformed.pop("exit")
+        values[1].append(malformed)
+        result = report.build(*values)
+        self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+        self.assertTrue(any("malformed-launch-end" in finding and
+                            "recognized result" in finding
+                            for finding in
+                            result["measurement_integrity"]["findings"]))
+
     def test_reused_pr_requires_review_of_each_successful_delivered_head(self):
         values = list(fixture())
         outcome = next(row for row in values[1]
@@ -878,6 +894,21 @@ class Rung2ReportTests(unittest.TestCase):
         production.pop("event_id")
         result = report.build(*values)
         self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+
+    def test_production_event_requires_string_event_id(self):
+        for invalid in ("   ", 123):
+            with self.subTest(invalid=invalid):
+                values = list(fixture())
+                production = next(
+                    row for row in values[1]
+                    if row.get("event") == "delivery.pull-request.written")
+                production["event_id"] = invalid
+                result = report.build(*values)
+                self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+                self.assertTrue(any("production event" in finding and
+                                    "nonempty string event ID" in finding
+                                    for finding in result[
+                                        "measurement_integrity"]["findings"]))
 
     def test_pr_only_declaration_uses_durable_process_head(self):
         values = list(fixture())
@@ -944,6 +975,18 @@ class Rung2ReportTests(unittest.TestCase):
                             "conflicting durable copies" in finding
                             for finding in
                             first["measurement_integrity"]["findings"]))
+
+    def test_exact_head_review_requires_string_event_id(self):
+        values = list(fixture())
+        reviewed = next(row for row in values[1]
+                        if row.get("event") == "review.outcome.published")
+        reviewed["event_id"] = 123
+        result = report.build(*values)
+        self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+        self.assertTrue(any("exact-head review outcome" in finding and
+                            "nonempty string event ID" in finding
+                            for finding in
+                            result["measurement_integrity"]["findings"]))
 
     def test_non_object_delivery_detail_yields_inconclusive(self):
         values = list(fixture())
