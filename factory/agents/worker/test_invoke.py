@@ -1689,6 +1689,42 @@ class FailedWorkCheckpointTests(unittest.TestCase):
             self.assertEqual("post-mutation", caught.exception.mutation_state)
             self.assertEqual(str(patch), caught.exception.recovery_ref)
 
+    def test_durable_pr_replay_refreshes_head_before_cleanup(self):
+        class AdvancingClient(FakeClient):
+            def __init__(self):
+                super().__init__()
+                self.reads = 0
+
+            def pull_requests(self):
+                self.reads += 1
+                head = "c" * 40 if self.reads == 1 else "d" * 40
+                return [{
+                    "number": 9,
+                    "body": ("Story: #214\n\n" +
+                             invoke.marker(214, "5") + "\n"),
+                    "head": {"ref": "story/214-delivery", "sha": head},
+                }]
+
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = RecordingRunner(["src/app.py"])
+            patch = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"),
+                repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit=self.BASE,
+                scope=["src/app.py"], mutation_state="post-mutation",
+                terminal_outcome="started-mid-work-failed",
+                originating_worker=self.WORKER, runner=runner))
+            invoke.mark_recovery_pushed(patch, "c" * 40)
+            with self.assertRaisesRegex(
+                    invoke.RecoveryError, "refreshed pull request head") as caught:
+                invoke.execute(
+                    "owner/repo", 214, "token", pathlib.Path("/checkout"),
+                    runner=runner, client=AdvancingClient())
+            self.assertEqual("post-mutation", caught.exception.mutation_state)
+            self.assertEqual(str(patch), caught.exception.recovery_ref)
+            self.assertTrue(patch.exists())
+
     def test_durable_pr_replay_revalidates_recovery_scope_before_cleanup(self):
         with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
                 invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):

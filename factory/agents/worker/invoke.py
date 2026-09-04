@@ -1321,6 +1321,20 @@ def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
                 exc.recovery_ref = str(saved_recovery)
                 raise exc
             if delivered_head == pull["head"]["sha"]:
+                try:
+                    pull = read_back_pr(client, story_number, durable)
+                except Exception as exc:
+                    setattr(exc, "mutation_state", "post-mutation")
+                    setattr(exc, "terminal_outcome",
+                            "recovery-pr-read-back-failed")
+                    setattr(exc, "recovery_ref", str(saved_recovery))
+                    raise
+                if delivered_head != pull["head"]["sha"]:
+                    exc = RecoveryError(
+                        "durable recovery head does not match refreshed "
+                        "pull request head")
+                    exc.recovery_ref = str(saved_recovery)
+                    raise exc
                 remove_delivered_recovery(saved_recovery)
         return Delivery(story_number, project_number, pull["head"]["ref"],
                         pull["number"], pull["head"]["sha"], True)
