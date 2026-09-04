@@ -360,6 +360,17 @@ class FailedWorkCheckpointTests(unittest.TestCase):
             self.assertEqual(
                 ["new.txt", "old.txt"], invoke.recovery_patch_paths(patch))
 
+    def test_patch_path_reader_decodes_utf8_octal_rename_headers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            patch = pathlib.Path(directory, "rename.patch")
+            patch.write_text(
+                'diff --git "a/\\303\\251.txt" "b/\\303\\251-new.txt"\n'
+                "similarity index 100%\n"
+                'rename from "\\303\\251.txt"\n'
+                'rename to "\\303\\251-new.txt"\n')
+            self.assertEqual(
+                ["é-new.txt", "é.txt"], invoke.recovery_patch_paths(patch))
+
     def test_in_scope_changes_are_committed_to_a_stable_local_recovery_ref(self):
         runner = RecordingRunner(["src/app.py"])
         with tempfile.TemporaryDirectory() as recovery:
@@ -760,6 +771,37 @@ class FailedWorkCheckpointTests(unittest.TestCase):
             self.assertEqual("recovery-invalid",
                              caught.exception.terminal_outcome)
             self.assertEqual(str(patch), caught.exception.recovery_ref)
+            self.assertFalse(any(command and command[0] in ("codex", "claude")
+                                 for command, _ in runner.calls))
+
+    def test_input_preflight_failure_preserves_recovery_accounting(self):
+        class InputFailureClient(FakeClient):
+            def pages(self, path):
+                if path.endswith("/timeline"):
+                    return super().pages(path)
+                if path == "/issues/214/comments":
+                    raise OSError("GitHub input read failed")
+                return super().pages(path)
+
+        with tempfile.TemporaryDirectory() as recovery, mock.patch.dict(
+                invoke.os.environ, {"FACTORY_RECOVERY_DIR": recovery}):
+            runner = RecordingRunner(["src/app.py"])
+            patch = pathlib.Path(invoke.checkpoint_failed_work(
+                pathlib.Path("/old"), pathlib.Path("/checkout"),
+                repo="owner/repo", story_number=214, default="main",
+                base_ref="origin/main", base_commit=self.BASE,
+                scope=["src/app.py"], mutation_state="post-mutation",
+                terminal_outcome="started-mid-work-failed",
+                originating_worker=self.WORKER, runner=runner))
+            with self.assertRaisesRegex(OSError, "input read failed") as caught:
+                invoke.execute(
+                    "owner/repo", 214, "token", pathlib.Path("/checkout"),
+                    runner=runner, client=InputFailureClient())
+            self.assertEqual("post-mutation", caught.exception.mutation_state)
+            self.assertEqual("recovery-input-preflight-failed",
+                             caught.exception.terminal_outcome)
+            self.assertEqual(str(patch), caught.exception.recovery_ref)
+            self.assertTrue(patch.exists())
             self.assertFalse(any(command and command[0] in ("codex", "claude")
                                  for command, _ in runner.calls))
 

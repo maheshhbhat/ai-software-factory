@@ -563,9 +563,18 @@ def recovery_patch_paths(patch: pathlib.Path, *, runner=subprocess.run) -> list[
                             "copy from ", "copy to ")):
             encoded = line.split(" ", 2)[2]
             try:
-                decoded = (ast.literal_eval(encoded)
-                           if encoded.startswith('"') else encoded)
-            except (SyntaxError, ValueError) as exc:
+                if encoded.startswith('"'):
+                    # Git's quoted paths are byte strings: octal escapes such
+                    # as \303\251 are the UTF-8 bytes for "é", not Latin-1
+                    # characters. Parse the C-style quoting into bytes first.
+                    quoted = ast.literal_eval(encoded)
+                    if not isinstance(quoted, str):
+                        raise ValueError("quoted Git path is not text")
+                    decoded = quoted.encode("latin-1").decode("utf-8")
+                else:
+                    decoded = encoded
+            except (SyntaxError, ValueError, UnicodeDecodeError,
+                    UnicodeEncodeError) as exc:
                 raise RecoveryError(
                     "recovery checkpoint patch paths are invalid") from exc
             if not isinstance(decoded, str) or not decoded:
@@ -1068,8 +1077,15 @@ def execute(repo: str, story_number: int, token: str, checkout: pathlib.Path,
             checkout, runner=runner)
     base_ref = f"origin/{branch}" if remote else f"origin/{default}"
     base_commit = git(["rev-parse", base_ref], checkout, runner=runner).stdout.strip()
-    value = build_input(client, story, project, repo=repo,
-                        pull_request=pulls[0] if pulls else None)
+    try:
+        value = build_input(client, story, project, repo=repo,
+                            pull_request=pulls[0] if pulls else None)
+    except Exception as exc:
+        if has_recovery:
+            setattr(exc, "mutation_state", "post-mutation")
+            setattr(exc, "terminal_outcome", "recovery-input-preflight-failed")
+            setattr(exc, "recovery_ref", str(saved_recovery))
+        raise
     packet = value["correction_context"]
     obs.process_event(
         "delivery.correction-context", trace_id=delivery_trace,
