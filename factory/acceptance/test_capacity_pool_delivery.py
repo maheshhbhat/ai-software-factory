@@ -135,7 +135,7 @@ class DeliveryCapacityPoolAcceptance(unittest.TestCase):
                 mutated = True
                 stdout = "delivery complete"
             elif command[:3] == ["git", "status", "--porcelain"]:
-                stdout = "?? src/app.py\n" if mutated else ""
+                stdout = "?? src/app.py\0" if mutated else ""
             elif command[:4] == ["git", "diff", "--binary", "--cached"]:
                 stdout = "diff --git a/src/app.py b/src/app.py\n"
             elif command[:2] == ["git", "rev-parse"]:

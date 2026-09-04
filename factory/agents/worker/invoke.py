@@ -10,6 +10,7 @@ writes the linked pull request only after those checks pass.
 from __future__ import annotations
 
 import argparse
+import ast
 import contextlib
 import hashlib
 import json
@@ -437,14 +438,29 @@ def checkout_for_repo(repo: str, configured: pathlib.Path,
 
 def changed_paths(worktree: pathlib.Path, base: str,
                   runner=subprocess.run) -> list[str]:
-    tracked = git(["diff", "--name-only", f"{base}...HEAD"], worktree,
-                  runner=runner).stdout.splitlines()
+    tracked = [path for path in git(
+        ["diff", "--name-only", "-z", f"{base}...HEAD"], worktree,
+        runner=runner).stdout.split("\0") if path]
     # --untracked-files=all: plain --porcelain collapses a brand-new directory
     # to one `dir/` line, which no `dir/sub/**` scope can match — the worker
     # then refuses its own in-scope work (#358, found live by fixture #357).
-    pending = git(["status", "--porcelain", "--untracked-files=all"], worktree,
-                  runner=runner).stdout.splitlines()
-    paths = tracked + [line[3:] for line in pending if len(line) > 3]
+    pending = [item for item in git(
+        ["status", "--porcelain", "-z", "--untracked-files=all"], worktree,
+        runner=runner).stdout.split("\0") if item]
+    paths = list(tracked)
+    index = 0
+    while index < len(pending):
+        entry = pending[index]
+        if len(entry) <= 3:
+            raise DeliveryError("Git returned malformed machine-readable status")
+        status = entry[:2]
+        paths.append(entry[3:])
+        if "R" in status or "C" in status:
+            index += 1
+            if index >= len(pending) or not pending[index]:
+                raise DeliveryError("Git returned incomplete rename status")
+            paths.append(pending[index])
+        index += 1
     return sorted(set(path for path in paths if path))
 
 
@@ -531,6 +547,20 @@ def recovery_patch_paths(patch: pathlib.Path, *, runner=subprocess.run) -> list[
         if len(fields) != 3 or not fields[2]:
             raise RecoveryError("recovery checkpoint patch paths are invalid")
         paths.append(fields[2])
+    patch_text = patch.read_text(encoding="utf-8")
+    for line in patch_text.splitlines():
+        if line.startswith(("rename from ", "rename to ",
+                            "copy from ", "copy to ")):
+            encoded = line.split(" ", 2)[2]
+            try:
+                decoded = (ast.literal_eval(encoded)
+                           if encoded.startswith('"') else encoded)
+            except (SyntaxError, ValueError) as exc:
+                raise RecoveryError(
+                    "recovery checkpoint patch paths are invalid") from exc
+            if not isinstance(decoded, str) or not decoded:
+                raise RecoveryError("recovery checkpoint patch paths are invalid")
+            paths.append(decoded)
     if not paths:
         raise RecoveryError("recovery checkpoint patch paths are invalid")
     return sorted(set(paths))

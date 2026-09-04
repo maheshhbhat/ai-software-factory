@@ -286,9 +286,9 @@ class RecordingRunner:
         out = ""
         code = 0
         if cmd[:3] == ["git", "diff", "--name-only"]:
-            out = "\n".join(self.changed)
+            out = "\0".join(self.changed) + ("\0" if self.changed else "")
         elif cmd[:3] == ["git", "status", "--porcelain"]:
-            out = "\n".join(f" M {path}" for path in self.changed)
+            out = "".join(f" M {path}\0" for path in self.changed)
         elif cmd[:4] == ["git", "diff", "--binary", "--cached"]:
             out = "diff --git a/src/app.py b/src/app.py\n"
         elif cmd[:4] == ["git", "apply", "--numstat", "-z"]:
@@ -348,6 +348,17 @@ class FailedWorkCheckpointTests(unittest.TestCase):
     BASE = "a" * 40
     WORKER = {"task": "delivery:owner/repo:214:5", "provider": "openai",
               "model": "gpt-test", "invocation_id": "invoke-1"}
+
+    def test_patch_path_reader_includes_both_sides_of_a_rename(self):
+        with tempfile.TemporaryDirectory() as directory:
+            patch = pathlib.Path(directory, "rename.patch")
+            patch.write_text(
+                "diff --git a/old.txt b/new.txt\n"
+                "similarity index 100%\n"
+                "rename from old.txt\n"
+                "rename to new.txt\n")
+            self.assertEqual(
+                ["new.txt", "old.txt"], invoke.recovery_patch_paths(patch))
 
     def test_in_scope_changes_are_committed_to_a_stable_local_recovery_ref(self):
         runner = RecordingRunner(["src/app.py"])
@@ -1637,3 +1648,16 @@ class ScopeSeesFilesTests(unittest.TestCase):
         (root / "forbidden" / "escape.py").write_text("x")
         paths = invoke.changed_paths(root, "HEAD")
         self.assertIn("forbidden/escape.py", paths)
+
+    def test_pending_rename_lists_source_and_destination_paths(self):
+        root = self.repo()
+        source = root / "old.txt"
+        source.write_text("tracked\n")
+        subprocess.run(["git", "add", "old.txt"], cwd=root, check=True)
+        subprocess.run(
+            ["git", "-c", "user.email=t@t", "-c", "user.name=t",
+             "commit", "-qm", "tracked"], cwd=root, check=True)
+        source.rename(root / "new.txt")
+        subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+        self.assertEqual(
+            ["new.txt", "old.txt"], invoke.changed_paths(root, "HEAD"))
