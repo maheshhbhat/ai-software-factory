@@ -106,10 +106,14 @@ def attempt_ledger(evidence, process, numbers):
             if not start_id:
                 findings.append(
                     f"worker launch start for claim {claim_id!r} needs a durable event ID")
+            if not worker:
+                findings.append(
+                    f"worker launch {start_id!r} for claim {claim_id!r} needs "
+                    "a worker identity")
             matching_ends = [
                 row for row in launch_ends
                 if span and row.get("span_id") == span
-                and row.get("worker") == worker]
+                and worker and row.get("worker") == worker]
             unavailable_launch = evidence_unavailable(
                 evidence, kind="attempt-launch-diagnostics", story=story,
                 identity=f"{identity}:{start_id}")

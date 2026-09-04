@@ -212,11 +212,12 @@ class Rung2ReportTests(unittest.TestCase):
             values[1].append({
                 "event": "worker.launch.start", "story": outcome["story"],
                 "trace_id": outcome["trace_id"], "event_id": f"start-{index}",
-                "span_id": f"span-{index}"})
+                "span_id": f"span-{index}", "worker": f"worker-{index}"})
         values[1].append({
             "event": "worker.launch.end", "story": outcome["story"],
             "trace_id": outcome["trace_id"], "event_id": "end-1",
-            "span_id": "span-1", "exit": 1, "stderr": "failed"})
+            "span_id": "span-1", "worker": "worker-1",
+            "exit": 1, "stderr": "failed"})
         result = report.build(*values)
         self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
         values[0]["evidence_unavailable"] = [{
@@ -280,6 +281,22 @@ class Rung2ReportTests(unittest.TestCase):
             "result": "FAILED", "stderr": "failed before fallback"})
         result = report.build(*values)
         self.assertNotEqual("INCONCLUSIVE", result["rung_verdict"])
+
+    def test_launch_records_require_worker_identity(self):
+        values = list(fixture())
+        outcome = next(row for row in values[1]
+                       if row.get("event") == "worker.outcome")
+        values[1].extend([
+            {"event": "worker.launch.start", "story": outcome["story"],
+             "trace_id": outcome["trace_id"], "span_id": "shared-span",
+             "event_id": "anonymous-start"},
+            {"event": "worker.launch.end", "story": outcome["story"],
+             "trace_id": outcome["trace_id"], "span_id": "shared-span",
+             "event_id": "anonymous-end", "exit": 0, "result": "LAUNCHED"}])
+        result = report.build(*values)
+        self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+        self.assertTrue(any("needs a worker identity" in finding for finding in
+                            result["measurement_integrity"]["findings"]))
 
     def test_nested_launch_ledger_is_independent_of_fragment_order(self):
         values = list(fixture())
