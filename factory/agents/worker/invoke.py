@@ -60,6 +60,10 @@ RECOVERY_TRUST = "untrusted-partial-work-from-failed-worker"
 FULL_COMMIT = re.compile(r"^[0-9a-f]{40}$")
 
 
+def valid_commit(value) -> bool:
+    return isinstance(value, str) and FULL_COMMIT.fullmatch(value) is not None
+
+
 class DeliveryError(RuntimeError):
     """A bounded delivery could not be completed.
 
@@ -505,12 +509,12 @@ def recovery_available(patch: pathlib.Path) -> bool:
             raise RecoveryError("recovery cleanup transaction is invalid")
         if not patch_source.is_file():
             if (manifest_source == manifest_tombstone and
-                    FULL_COMMIT.fullmatch(value.get("delivered_head", ""))):
+                    valid_commit(value.get("delivered_head"))):
                 manifest_tombstone.unlink(missing_ok=True)
                 return False
             raise RecoveryError("recovery cleanup transaction is invalid")
         patch_text = patch_source.read_text(encoding="utf-8")
-        if (not FULL_COMMIT.fullmatch(value.get("delivered_head", "")) or
+        if (not valid_commit(value.get("delivered_head")) or
                 value.get("patch_sha256") != hashlib.sha256(
                     patch_text.encode("utf-8")).hexdigest()):
             raise RecoveryError("recovery cleanup transaction is invalid")
@@ -557,7 +561,7 @@ def remove_recovery(patch: pathlib.Path) -> None:
 
 def mark_recovery_pushed(patch: pathlib.Path, head: str) -> None:
     """Record that verified recovered work is durable on an exact branch head."""
-    if not FULL_COMMIT.fullmatch(head):
+    if not valid_commit(head):
         raise RecoveryError("pushed recovery head is invalid")
     try:
         manifest = recovery_manifest(patch)
@@ -577,7 +581,7 @@ def mark_recovery_pushed(patch: pathlib.Path, head: str) -> None:
 
 def mark_recovery_push_pending(patch: pathlib.Path, head: str) -> None:
     """Durably bind the checkpoint to the commit before remote mutation."""
-    if not FULL_COMMIT.fullmatch(head):
+    if not valid_commit(head):
         raise RecoveryError("pending recovery head is invalid")
     try:
         manifest = recovery_manifest(patch)
@@ -612,7 +616,7 @@ def reconcile_recovery_push(patch: pathlib.Path, observed_head: str, *,
     prepared = value.get("push_prepared_at")
     try:
         if (any(value.get(key) != item for key, item in expected.items()) or
-                not FULL_COMMIT.fullmatch(pending) or
+                not valid_commit(pending) or
                 not prepared.endswith("Z")):
             raise ValueError("invalid pending recovery provenance")
         datetime.fromisoformat(prepared.replace("Z", "+00:00"))
@@ -639,8 +643,8 @@ def pushed_recovery_head(patch: pathlib.Path, *, repo: str, story_number: int,
     if any(value.get(key) != item for key, item in expected.items()):
         raise RecoveryError("pushed recovery checkpoint identity is invalid")
     paths = value.get("recovered_paths")
-    if (not FULL_COMMIT.fullmatch(value.get("base_commit", "")) or
-            not FULL_COMMIT.fullmatch(head) or
+    if (not valid_commit(value.get("base_commit")) or
+            not valid_commit(head) or
             not isinstance(paths, list) or not paths or
             any(not isinstance(path, str) or not path for path in paths) or
             (scope is not None and merge_gate.paths_out_of_scope(paths, scope))):
@@ -760,7 +764,7 @@ def checkpoint_failed_work(worktree: pathlib.Path, checkout: pathlib.Path, *,
     paths = changed_paths(worktree, base_ref, runner=runner)
     if not paths or merge_gate.paths_out_of_scope(paths, scope):
         return ""
-    if not FULL_COMMIT.fullmatch(base_commit):
+    if not valid_commit(base_commit):
         raise DeliveryError("recovery checkpoint base commit is invalid")
     git(["add", "--", *paths], worktree, runner=runner)
     patch = git(["diff", "--binary", "--cached", base_commit],
@@ -812,7 +816,7 @@ def restore_failed_work(patch: pathlib.Path, worktree: pathlib.Path, *,
     }
     if any(value.get(key) != item for key, item in expected.items()):
         raise RecoveryError("recovery checkpoint identity is invalid")
-    if not FULL_COMMIT.fullmatch(value["base_commit"]):
+    if not valid_commit(value["base_commit"]):
         raise RecoveryError("recovery checkpoint base commit is invalid")
     if (not isinstance(paths, list) or not paths or
             any(not isinstance(path, str) or not path for path in paths)):
