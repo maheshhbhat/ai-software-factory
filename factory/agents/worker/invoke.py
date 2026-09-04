@@ -79,10 +79,11 @@ def valid_utc_timestamp(value) -> bool:
 
 def valid_recovery_worker(value, *, repo: str, story_number: int) -> bool:
     task_prefix = f"delivery:{repo.lower()}:{story_number}:"
+    task = value.get("task") if isinstance(value, dict) else None
+    suffix = (task.removeprefix(task_prefix)
+              if isinstance(task, str) and task.startswith(task_prefix) else "")
     return (isinstance(value, dict) and
-            isinstance(value.get("task"), str) and
-            value["task"].startswith(task_prefix) and
-            len(value["task"]) > len(task_prefix) and
+            suffix.isdigit() and str(int(suffix)) == suffix and
             not any(key in value and
                     (not isinstance(value[key], str) or not value[key])
                     for key in ("invocation_id", "reservation_id",

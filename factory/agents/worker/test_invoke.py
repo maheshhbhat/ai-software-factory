@@ -351,6 +351,18 @@ class FailedWorkCheckpointTests(unittest.TestCase):
     WORKER = {"task": "delivery:owner/repo:214:5", "provider": "openai",
               "model": "gpt-test", "invocation_id": "invoke-1"}
 
+    def test_recovery_worker_task_requires_canonical_integer_suffix(self):
+        self.assertTrue(invoke.valid_recovery_worker(
+            {"task": "delivery:owner/repo:214:0"},
+            repo="owner/repo", story_number=214))
+        self.assertTrue(invoke.valid_recovery_worker(
+            self.WORKER, repo="owner/repo", story_number=214))
+        for suffix in ("", "not-an-attempt", "-1", "+1", "01", "1.0"):
+            with self.subTest(suffix=suffix):
+                self.assertFalse(invoke.valid_recovery_worker(
+                    {"task": f"delivery:owner/repo:214:{suffix}"},
+                    repo="owner/repo", story_number=214))
+
     def test_patch_path_reader_includes_both_sides_of_a_rename(self):
         with tempfile.TemporaryDirectory() as directory:
             patch = pathlib.Path(directory, "rename.patch")
