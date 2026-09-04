@@ -7,6 +7,7 @@ import argparse
 from collections import Counter
 import json
 from pathlib import Path
+import re
 
 from factory.acceptance import rung1_report as shared
 
@@ -15,6 +16,7 @@ STORY_BELLS = ("plan-approval", "poison-rescue", "acceptance")
 AUTONOMY_BREAKING_ACTIONS = {"recovery", "code-intervention"}
 TERMINAL_WORKER_EVENT = "worker.outcome"
 REVIEW_OUTCOME_EVENT = "review.outcome.published"
+FULL_COMMIT_ID = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 
 
 def unavailable(reason):
@@ -100,6 +102,8 @@ def attempt_ledger(evidence, process, numbers):
             str(row.get("trace_id") or ""), str(row.get("span_id") or ""),
             str(row.get("worker") or ""), str(row.get("event_id") or "")))
         launch_ledger = []
+        launch_evidence_unavailable = evidence_unavailable(
+            evidence, kind="attempt-launches", story=story, identity=identity)
         for start in launch_starts:
             start_id, span = start.get("event_id"), start.get("span_id")
             worker = start.get("worker")
@@ -126,6 +130,11 @@ def attempt_ledger(evidence, process, numbers):
                 findings.append(
                     f"worker launch {start_id!r} for claim {claim_id!r} needs "
                     "exactly one terminal diagnostic or evidence-unavailable record")
+        if (outcome and outcome.get("result") == "LAUNCHED" and
+                not launch_starts and not launch_evidence_unavailable):
+            findings.append(
+                f"successful claim {claim_id!r} for Story {story} needs a "
+                "reconciled worker launch or evidence-unavailable record")
         if failed:
             diagnostic_events = [
                 row for row in launch_ends
@@ -148,6 +157,7 @@ def attempt_ledger(evidence, process, numbers):
                      "diagnostic": diagnostic,
                      "diagnostic_evidence_unavailable": diagnostic_unavailable,
                      "launches": launch_starts,
+                     "launch_evidence_unavailable": launch_evidence_unavailable,
                      "launch_ledger": launch_ledger})
     if any(row.get("event_id") is None for row in claims):
         findings.append("every claim needs a durable event ID")
@@ -233,6 +243,9 @@ def review_ledger(evidence, process, numbers, attempts):
             outcomes.append(sorted(durable, key=lambda row: row["event_id"])[0]
                             if durable else candidates[0])
         identity = f"{pr}:{head}"
+        if head and not FULL_COMMIT_ID.fullmatch(str(head)):
+            findings.append(
+                f"PR/head production event for {identity} needs a full commit SHA")
         if not item.get("production_evidence_missing") and not item.get("event_id"):
             findings.append(
                 f"PR/head production event for {identity} needs a durable event ID")

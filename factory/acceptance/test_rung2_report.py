@@ -43,6 +43,15 @@ def fixture():
             row = {"event": "story.claimed", "story": story,
                    "event_id": f"{story}-{index}", "trace_id": trace}
             process.extend([row, dict(row)])
+            process.extend([
+                {"event": "worker.launch.start", "story": story,
+                 "event_id": f"launch-start-{story}-{index}",
+                 "trace_id": trace, "span_id": f"span-{story}-{index}",
+                 "worker": "factory-worker"},
+                {"event": "worker.launch.end", "story": story,
+                 "event_id": f"launch-end-{story}-{index}",
+                 "trace_id": trace, "span_id": f"span-{story}-{index}",
+                 "worker": "factory-worker", "result": "LAUNCHED", "exit": 0}])
             process.append({"event": "worker.outcome", "story": story,
                             "event_id": f"outcome-{story}-{index}",
                             "trace_id": trace, "result": "LAUNCHED", "exit": 0})
@@ -112,6 +121,25 @@ class Rung2ReportTests(unittest.TestCase):
         self.assertEqual("unavailable",
                          result["kpis"]["worker_attempts_retry_rate"]["status"])
 
+    def test_launched_outcome_without_launch_evidence_is_inconclusive(self):
+        values = list(fixture())
+        trace = "trace-20-0"
+        values[1] = [row for row in values[1]
+                     if not (row.get("trace_id") == trace and
+                             row.get("event") in
+                             ("worker.launch.start", "worker.launch.end"))]
+        result = report.build(*values)
+        self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+        values[0]["evidence_unavailable"] = [{
+            "kind": "attempt-launches", "story": 20, "identity": trace,
+            "reason": "legacy launch evidence unavailable"}]
+        result = report.build(*values)
+        self.assertNotEqual("INCONCLUSIVE", result["rung_verdict"])
+        ledger = next(row for row in result["attempt_ledger"]
+                      if row["trace_id"] == trace)
+        self.assertEqual("legacy launch evidence unavailable",
+                         ledger["launch_evidence_unavailable"]["reason"])
+
     def test_missing_attempt_ledger_is_inconclusive(self):
         values = list(fixture())
         values[1] = [row for row in values[1] if row.get("story") != 20]
@@ -158,6 +186,19 @@ class Rung2ReportTests(unittest.TestCase):
         self.assertEqual(0, result["qualification_series"]["pass_samples"])
         self.assertEqual(0, result["qualification_series"]["fail_samples"])
         self.assertIn("| Attempts | unavailable |", report.render(result))
+
+    def test_mutable_head_name_is_not_exact_head_evidence(self):
+        values = list(fixture())
+        story = values[0]["stories"][0]
+        old_head = story["head"]
+        story["head"] = "main"
+        for row in values[1]:
+            if row.get("pull_request") == story["pull_request"] and row.get("head") == old_head:
+                row["head"] = "main"
+        result = report.build(*values)
+        self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+        self.assertTrue(any("needs a full commit SHA" in finding for finding in
+                            result["measurement_integrity"]["findings"]))
 
     def test_declared_pr_without_production_head_is_inconclusive(self):
         values = list(fixture())
