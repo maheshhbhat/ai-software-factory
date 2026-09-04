@@ -270,6 +270,19 @@ class Rung2ReportTests(unittest.TestCase):
         self.assertFalse(any(row["story"] == 20
                              for row in result["attempt_ledger"]))
 
+    def test_missing_repository_cannot_scope_legacy_evidence(self):
+        values = list(fixture())
+        values[0].pop("repository")
+        for row in values[1]:
+            row.pop("repo", None)
+        result = report.build(*values)
+        self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+        self.assertEqual([], result["attempt_ledger"])
+        self.assertEqual([], result["review_ledger"])
+        self.assertIn(
+            "qualification evidence needs a valid measured owner/name repository",
+            result["measurement_integrity"]["findings"])
+
     def test_declared_delivery_identity_must_belong_to_same_story(self):
         values = list(fixture())
         story_20, story_21 = values[0]["stories"][:2]
@@ -336,17 +349,40 @@ class Rung2ReportTests(unittest.TestCase):
                        if row.get("event") == "worker.outcome")
         outcome.update({"result": "FAILED", "exit": 1,
                         "detail": "generic summary is not evidence"})
-        values[1].append({
-            "event": "worker.launch.end", "story": outcome["story"],
-            "repo": values[0]["repository"],
-            "trace_id": outcome["trace_id"], "event_id": "launch-failure-20",
-            "exit": 1, "stderr": "durable diagnostic"})
+        launch_end = next(
+            row for row in values[1]
+            if row.get("event") == "worker.launch.end" and
+            row.get("trace_id") == outcome["trace_id"])
+        launch_end.update({"event_id": "launch-failure-20", "result": "FAILED",
+                           "exit": 1, "stderr": "durable diagnostic"})
         result = report.build(*values)
         self.assertNotEqual("INCONCLUSIVE", result["rung_verdict"])
         ledger = next(row for row in result["attempt_ledger"]
                       if row["trace_id"] == outcome["trace_id"])
         self.assertEqual("launch-failure-20",
                          ledger["diagnostic"][0]["event_id"])
+
+    def test_failed_launch_end_requires_matching_durable_start(self):
+        values = list(fixture())
+        outcome = next(row for row in values[1]
+                       if row.get("event") == "worker.outcome")
+        outcome.update({"result": "FAILED", "exit": 1})
+        trace = outcome["trace_id"]
+        values[1] = [
+            row for row in values[1]
+            if not (row.get("event") == "worker.launch.start" and
+                    row.get("trace_id") == trace)]
+        launch_end = next(
+            row for row in values[1]
+            if row.get("event") == "worker.launch.end" and
+            row.get("trace_id") == trace)
+        launch_end.update({"result": "FAILED", "exit": 1,
+                           "stderr": "durable diagnostic"})
+        result = report.build(*values)
+        self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+        self.assertTrue(any("matching durable launch start" in finding
+                            for finding in
+                            result["measurement_integrity"]["findings"]))
 
     def test_every_failed_launch_requires_its_own_diagnostic(self):
         values = list(fixture())
@@ -524,11 +560,13 @@ class Rung2ReportTests(unittest.TestCase):
         outcome = next(row for row in values[1]
                        if row.get("event") == "worker.outcome")
         outcome.update({"result": "AMBIGUOUS", "exit": None})
-        values[1].append({
-            "event": "worker.launch.end", "story": outcome["story"],
-            "repo": values[0]["repository"],
-            "trace_id": outcome["trace_id"], "event_id": "timeout-diagnostic",
-            "result": "AMBIGUOUS", "stderr": "timed out with partial output"})
+        launch_end = next(
+            row for row in values[1]
+            if row.get("event") == "worker.launch.end" and
+            row.get("trace_id") == outcome["trace_id"])
+        launch_end.update({"event_id": "timeout-diagnostic", "exit": None,
+                           "result": "AMBIGUOUS",
+                           "stderr": "timed out with partial output"})
         result = report.build(*values)
         self.assertNotEqual("INCONCLUSIVE", result["rung_verdict"])
 

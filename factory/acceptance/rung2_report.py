@@ -17,6 +17,7 @@ AUTONOMY_BREAKING_ACTIONS = {"recovery", "code-intervention"}
 TERMINAL_WORKER_EVENT = "worker.outcome"
 REVIEW_OUTCOME_EVENT = "review.outcome.published"
 FULL_COMMIT_ID = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
+REPOSITORY_SLUG = re.compile(r"[^/\s]+/[^/\s]+")
 
 
 def unavailable(reason):
@@ -30,6 +31,10 @@ def valid_commit_id(value):
 
 def valid_pull_request(value):
     return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def valid_repository(value):
+    return isinstance(value, str) and bool(REPOSITORY_SLUG.fullmatch(value))
 
 
 def unique(rows, key):
@@ -114,6 +119,20 @@ def attempt_ledger(evidence, process, numbers):
         launch_ends.sort(key=lambda row: (
             str(row.get("trace_id") or ""), str(row.get("span_id") or ""),
             str(row.get("worker") or ""), str(row.get("event_id") or "")))
+        reconciled_ends = []
+        for end in launch_ends:
+            matching_starts = [
+                row for row in launch_starts
+                if row.get("event_id") and end.get("span_id")
+                and row.get("span_id") == end.get("span_id")
+                and end.get("worker")
+                and row.get("worker") == end.get("worker")]
+            if len(matching_starts) != 1:
+                findings.append(
+                    f"worker launch end {end.get('event_id')!r} for claim "
+                    f"{claim_id!r} needs exactly one matching durable launch start")
+            else:
+                reconciled_ends.append(end)
         launch_ledger = []
         launch_evidence_unavailable = evidence_unavailable(
             evidence, kind="attempt-launches", story=story, identity=identity)
@@ -128,7 +147,7 @@ def attempt_ledger(evidence, process, numbers):
                     f"worker launch {start_id!r} for claim {claim_id!r} needs "
                     "a worker identity")
             matching_ends = [
-                row for row in launch_ends
+                row for row in reconciled_ends
                 if span and row.get("span_id") == span
                 and worker and row.get("worker") == worker]
             usable_ends = [
@@ -161,7 +180,7 @@ def attempt_ledger(evidence, process, numbers):
                     "evidence-unavailable record")
         if failed:
             diagnostic_events = [
-                row for row in launch_ends
+                row for row in reconciled_ends
                 if (row.get("exit") not in (None, 0) or
                     row.get("result") not in (None, "LAUNCHED"))
                 and (row.get("stderr") or row.get("stdout") or row.get("detail"))]
@@ -346,8 +365,15 @@ def build(evidence, process, telemetry, touches):
         actions = []
     classes = Counter(row.get("classification") for row in project_touches)
 
-    ledger, ledger_findings = attempt_ledger(evidence, process, numbers)
-    reviews, review_findings = review_ledger(evidence, process, numbers, ledger)
+    if valid_repository(evidence.get("repository")):
+        ledger, ledger_findings = attempt_ledger(evidence, process, numbers)
+        reviews, review_findings = review_ledger(
+            evidence, process, numbers, ledger)
+    else:
+        ledger, reviews = [], []
+        ledger_findings = [
+            "qualification evidence needs a valid measured owner/name repository"]
+        review_findings = []
     integrity.extend(ledger_findings)
     integrity.extend(review_findings)
     attempts_by_story = {
