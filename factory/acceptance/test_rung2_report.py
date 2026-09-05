@@ -241,6 +241,41 @@ class Rung2ReportTests(unittest.TestCase):
         self.assert_order_independent_inconclusive(
             values, "needs exactly one matching worker launch")
 
+    def test_failover_result_must_match_worker_launch_end(self):
+        values = list(fixture())
+        trace = "trace-20-0"
+        launch_end = next(
+            row for row in values[1]
+            if row.get("event") == "worker.launch.end"
+            and row.get("trace_id") == trace)
+        launch_end.update({
+            "result": "AMBIGUOUS", "exit": None,
+            "detail": "worker acknowledgement was unverifiable"})
+        values[1].extend([
+            {"event": "worker.failover", "story": 20,
+             "repo": values[0]["repository"], "trace_id": trace,
+             "event_id": "unsafe-fallback", "worker": "factory-worker",
+             "decision": "FELL_BACK", "result": "FAILED"},
+            {"event": "worker.launch.start", "story": 20,
+             "repo": values[0]["repository"], "trace_id": trace,
+             "event_id": "fallback-start", "span_id": "fallback-span",
+             "worker": "fallback-worker"},
+            {"event": "worker.launch.end", "story": 20,
+             "repo": values[0]["repository"], "trace_id": trace,
+             "event_id": "fallback-end", "span_id": "fallback-span",
+             "worker": "fallback-worker", "result": "LAUNCHED", "exit": 0},
+            {"event": "worker.failover", "story": 20,
+             "repo": values[0]["repository"], "trace_id": trace,
+             "event_id": "fallback-accepted", "worker": "fallback-worker",
+             "decision": "NOT_NEEDED", "result": "LAUNCHED"}])
+        outcome = next(
+            row for row in values[1]
+            if row.get("event") == "worker.outcome"
+            and row.get("trace_id") == trace)
+        outcome["worker"] = "fallback-worker"
+        self.assert_order_independent_inconclusive(
+            values, "must match exactly one terminal launch result")
+
     def test_conflicting_failover_event_payloads_fail_deterministically(self):
         values = list(fixture())
         common = {

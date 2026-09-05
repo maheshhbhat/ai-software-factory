@@ -414,6 +414,16 @@ def attempt_ledger(evidence, process, numbers):
                     f"{claim_id!r} needs exactly one matching durable launch start")
             else:
                 reconciled_ends.append(end)
+        for failover in failovers:
+            matching_ends = [
+                row for row in reconciled_ends
+                if valid_event_id(failover.get("worker"))
+                and row.get("worker") == failover.get("worker")]
+            if (len(matching_ends) != 1 or
+                    matching_ends[0].get("result") != failover.get("result")):
+                findings.append(
+                    f"worker failover {failover.get('event_id')!r} for claim "
+                    f"{claim_id!r} must match exactly one terminal launch result")
         launch_ledger = []
         launch_evidence_unavailable = evidence_unavailable(
             evidence, kind="attempt-launches", story=story, identity=identity)
