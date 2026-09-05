@@ -277,6 +277,32 @@ class Rung2ReportTests(unittest.TestCase):
                             for finding in
                             result["measurement_integrity"]["findings"]))
 
+    def test_failed_terminal_outcome_requires_nonzero_integer_exit(self):
+        values = list(fixture())
+        outcome = next(row for row in values[1]
+                       if row.get("event") == "worker.outcome")
+        outcome.update({"result": "FAILED", "exit": None,
+                        "diagnostic_ref": "durable failure"})
+        result = report.build(*values)
+        self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+        self.assertTrue(any("recognized result with a consistent worker" in finding
+                            for finding in
+                            result["measurement_integrity"]["findings"]))
+
+    def test_attempt_trace_requires_nonempty_string_identity(self):
+        for invalid in (123, "   "):
+            with self.subTest(invalid=invalid):
+                values = list(fixture())
+                trace = "trace-20-0"
+                for row in values[1]:
+                    if row.get("trace_id") == trace:
+                        row["trace_id"] = invalid
+                result = report.build(*values)
+                self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+                self.assertTrue(any("nonempty string attempt trace ID" in finding
+                                    for finding in result[
+                                        "measurement_integrity"]["findings"]))
+
     def test_no_eligible_worker_uses_terminal_detail_as_diagnostic(self):
         values = list(fixture())
         trace = "trace-20-0"
@@ -456,6 +482,17 @@ class Rung2ReportTests(unittest.TestCase):
                 self.assertTrue(any("declares an invalid pull-request" in finding
                                     for finding in
                                     result["measurement_integrity"]["findings"]))
+
+    def test_unhashable_declared_delivery_identity_is_inconclusive(self):
+        for field, invalid in (("pull_request", []), ("head", {})):
+            with self.subTest(field=field):
+                values = list(fixture())
+                values[0]["stories"][0][field] = invalid
+                result = report.build(*values)
+                self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+                self.assertTrue(any("declares an invalid" in finding
+                                    for finding in result[
+                                        "measurement_integrity"]["findings"]))
 
     def test_foreign_repository_cannot_supply_delivery_or_review_evidence(self):
         values = list(fixture())
@@ -849,6 +886,21 @@ class Rung2ReportTests(unittest.TestCase):
                             "recognized result" in finding
                             for finding in
                             result["measurement_integrity"]["findings"]))
+
+    def test_launch_span_requires_nonempty_string_identity(self):
+        for invalid in (123, "   "):
+            with self.subTest(invalid=invalid):
+                values = list(fixture())
+                trace = "trace-20-0"
+                for row in values[1]:
+                    if (row.get("trace_id") == trace and row.get("event") in
+                            ("worker.launch.start", "worker.launch.end")):
+                        row["span_id"] = invalid
+                result = report.build(*values)
+                self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+                self.assertTrue(any("nonempty string span ID" in finding
+                                    for finding in result[
+                                        "measurement_integrity"]["findings"]))
 
     def test_reused_pr_requires_review_of_each_successful_delivered_head(self):
         values = list(fixture())

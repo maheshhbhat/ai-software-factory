@@ -45,7 +45,7 @@ def valid_event_id(value):
     return isinstance(value, str) and bool(value.strip())
 
 
-def valid_terminal_worker_outcome(row):
+def valid_terminal_worker_outcome(row, *, allow_missing_failed_exit=False):
     result = row.get("result")
     if not isinstance(result, str) or result not in TERMINAL_WORKER_RESULTS:
         return False
@@ -65,7 +65,8 @@ def valid_terminal_worker_outcome(row):
         return valid_worker and exit_code is None
     if result == "TERMINAL_FAILURE":
         return valid_worker and exit_code is not None and exit_code != 0
-    return valid_worker and exit_code != 0
+    return (valid_worker and exit_code != 0 and
+            (exit_code is not None or allow_missing_failed_exit))
 
 
 def unique(rows, key):
@@ -126,10 +127,18 @@ def attempt_ledger(evidence, process, numbers):
         selected_claims.append(sorted(
             candidates,
             key=lambda row: json.dumps(row, sort_keys=True, default=str))[0])
+    for row in selected_claims:
+        if ("trace_id" in row and
+                not valid_event_id(row.get("trace_id"))):
+            findings.append(
+                f"claim {row.get('event_id')!r} for Story {row.get('story')} "
+                "needs a nonempty string attempt trace ID")
     trace_groups = {}
     for row in selected_claims:
-        trace_key = ((row.get("story"), "trace", row.get("trace_id"))
-                     if row.get("trace_id") else
+        trace_id = (row.get("trace_id")
+                    if valid_event_id(row.get("trace_id")) else None)
+        trace_key = ((row.get("story"), "trace", trace_id)
+                     if trace_id else
                      (row.get("story"), "event", row.get("event_id")))
         trace_groups.setdefault(trace_key, []).append(row)
     claims = []
@@ -146,7 +155,7 @@ def attempt_ledger(evidence, process, numbers):
         str(row.get("event_id") or "")))
     claimed_traces = {
         (row.get("story"), row.get("trace_id"))
-        for row in claims if row.get("trace_id")}
+        for row in claims if valid_event_id(row.get("trace_id"))}
     worker_traces = {
         (row.get("story"), row.get("trace_id"))
         for row in process
@@ -154,7 +163,7 @@ def attempt_ledger(evidence, process, numbers):
         (TERMINAL_WORKER_EVENT, "worker.launch.start", "worker.launch.end",
          "worker.failover", "delivery.pull-request.written")
         and row.get("repo") == repository and row.get("story") in numbers
-        and row.get("trace_id")}
+        and valid_event_id(row.get("trace_id"))}
     for story, trace in sorted(worker_traces - claimed_traces):
         findings.append(
             f"worker attempt trace {trace!r} for Story {story} has no matching "
@@ -164,7 +173,8 @@ def attempt_ledger(evidence, process, numbers):
         findings.append(f"Story {story} has no durable attempt claim evidence")
     for claim in claims:
         story, claim_id = claim.get("story"), claim.get("event_id")
-        trace = claim.get("trace_id")
+        trace = (claim.get("trace_id")
+                 if valid_event_id(claim.get("trace_id")) else None)
         identity = trace or claim_id
         outcome_groups = {}
         for row in process:
@@ -238,14 +248,21 @@ def attempt_ledger(evidence, process, numbers):
                 findings.append(
                     f"worker launch end for claim {claim_id!r} needs a durable "
                     "nonempty string event ID")
-            if not valid_terminal_worker_outcome(end):
+            if not valid_event_id(end.get("span_id")):
+                findings.append(
+                    f"worker launch end {end.get('event_id')!r} for claim "
+                    f"{claim_id!r} needs a nonempty string span ID")
+            if not valid_terminal_worker_outcome(
+                    end, allow_missing_failed_exit=True):
                 findings.append(
                     f"worker launch end {end.get('event_id')!r} for claim "
                     f"{claim_id!r} needs a recognized result with a consistent "
                     "worker and exit status")
             matching_starts = [
                 row for row in launch_starts
-                if valid_event_id(row.get("event_id")) and end.get("span_id")
+                if valid_event_id(row.get("event_id"))
+                and valid_event_id(end.get("span_id"))
+                and valid_event_id(row.get("span_id"))
                 and row.get("span_id") == end.get("span_id")
                 and end.get("worker")
                 and row.get("worker") == end.get("worker")]
@@ -265,17 +282,22 @@ def attempt_ledger(evidence, process, numbers):
                 findings.append(
                     f"worker launch start for claim {claim_id!r} needs a durable "
                     "string event ID")
-            if not worker:
+            if not valid_event_id(span):
                 findings.append(
                     f"worker launch {start_id!r} for claim {claim_id!r} needs "
-                    "a worker identity")
+                    "a nonempty string span ID")
+            if not valid_event_id(worker):
+                findings.append(
+                    f"worker launch {start_id!r} for claim {claim_id!r} needs "
+                    "a worker identity as a nonempty string")
             matching_ends = [
                 row for row in reconciled_ends
-                if span and row.get("span_id") == span
-                and worker and row.get("worker") == worker]
+                if valid_event_id(span) and row.get("span_id") == span
+                and valid_event_id(worker) and row.get("worker") == worker]
             usable_ends = [
                 row for row in matching_ends
-                if valid_terminal_worker_outcome(row)
+                if valid_terminal_worker_outcome(
+                    row, allow_missing_failed_exit=True)
                 and ((row.get("result") == "LAUNCHED" and row.get("exit") == 0) or
                      row.get("stderr") or row.get("stdout") or row.get("detail"))]
             unavailable_launch = evidence_unavailable(
@@ -371,6 +393,24 @@ def review_ledger(evidence, process, numbers, attempts):
     for row in process:
         if (row.get("event") == "delivery.pull-request.written" and
                 row.get("story") in numbers and row.get("repo") == repository):
+            production_invalid = False
+            identity = f"{row.get('pull_request')}:{row.get('head')}"
+            if not valid_pull_request(row.get("pull_request")):
+                findings.append(
+                    f"PR/head production event for {identity} needs a positive "
+                    "integer PR number")
+                production_invalid = True
+            if not valid_commit_id(row.get("head")):
+                findings.append(
+                    f"PR/head production event for {identity} needs a full commit SHA")
+                production_invalid = True
+            if not valid_event_id(row.get("trace_id")):
+                findings.append(
+                    f"Story {row.get('story')} PR/head production event needs a "
+                    "nonempty string attempt trace ID")
+                production_invalid = True
+            if production_invalid:
+                continue
             key = (row.get("story"), row.get("trace_id"),
                    row.get("pull_request"), row.get("head"))
             grouped.setdefault(key, []).append(row)
@@ -414,12 +454,17 @@ def review_ledger(evidence, process, numbers, attempts):
                 observed_identities.add((attempt.get("story"), pr, head))
     for story in evidence.get("stories") or []:
         pr, head = story.get("pull_request"), story.get("head")
+        valid_declared_pr = ("pull_request" not in story or
+                             valid_pull_request(pr))
+        valid_declared_head = ("head" not in story or valid_commit_id(head))
         if "pull_request" in story and not valid_pull_request(pr):
             findings.append(
                 f"Story {story.get('number')} declares an invalid pull-request number")
         if "head" in story and not valid_commit_id(head):
             findings.append(
                 f"Story {story.get('number')} declares an invalid commit head")
+        if not valid_declared_pr or not valid_declared_head:
+            continue
         if head:
             expected.append((story.get("number"), (pr, head)))
         elif pr and not any(row.get("story") == story.get("number") and
