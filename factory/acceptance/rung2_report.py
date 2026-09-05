@@ -45,7 +45,7 @@ def valid_event_id(value):
     return isinstance(value, str) and bool(value.strip())
 
 
-def valid_terminal_worker_outcome(row, *, allow_missing_failed_exit=False):
+def valid_terminal_worker_outcome(row):
     result = row.get("result")
     if not isinstance(result, str) or result not in TERMINAL_WORKER_RESULTS:
         return False
@@ -65,8 +65,7 @@ def valid_terminal_worker_outcome(row, *, allow_missing_failed_exit=False):
         return valid_worker and exit_code is None
     if result == "TERMINAL_FAILURE":
         return valid_worker and exit_code is not None and exit_code != 0
-    return (valid_worker and exit_code != 0 and
-            (exit_code is not None or allow_missing_failed_exit))
+    return valid_worker and exit_code is not None and exit_code != 0
 
 
 def unique(rows, key):
@@ -111,6 +110,19 @@ def evidence_unavailable(evidence, *, kind, story, identity):
 def attempt_ledger(evidence, process, numbers):
     repository = evidence.get("repository")
     rows, findings = [], []
+    attempt_events = {
+        TERMINAL_WORKER_EVENT, "worker.launch.start", "worker.launch.end",
+        "worker.failover", "delivery.pull-request.written",
+    }
+    for row in process:
+        if (row.get("event") in attempt_events and
+                row.get("repo") == repository and row.get("story") in numbers and
+                not valid_event_id(row.get("trace_id")) and
+                not (row.get("event") == TERMINAL_WORKER_EVENT and
+                     valid_event_id(row.get("claim_event_id")))):
+            findings.append(
+                f"{row.get('event')} event for Story {row.get('story')} needs a "
+                "nonempty string attempt trace ID")
     claim_groups = {}
     for row in process:
         if (row.get("event") == "story.claimed" and
@@ -252,8 +264,7 @@ def attempt_ledger(evidence, process, numbers):
                 findings.append(
                     f"worker launch end {end.get('event_id')!r} for claim "
                     f"{claim_id!r} needs a nonempty string span ID")
-            if not valid_terminal_worker_outcome(
-                    end, allow_missing_failed_exit=True):
+            if not valid_terminal_worker_outcome(end):
                 findings.append(
                     f"worker launch end {end.get('event_id')!r} for claim "
                     f"{claim_id!r} needs a recognized result with a consistent "
@@ -296,8 +307,7 @@ def attempt_ledger(evidence, process, numbers):
                 and valid_event_id(worker) and row.get("worker") == worker]
             usable_ends = [
                 row for row in matching_ends
-                if valid_terminal_worker_outcome(
-                    row, allow_missing_failed_exit=True)
+                if valid_terminal_worker_outcome(row)
                 and ((row.get("result") == "LAUNCHED" and row.get("exit") == 0) or
                      row.get("stderr") or row.get("stdout") or row.get("detail"))]
             unavailable_launch = evidence_unavailable(
@@ -313,17 +323,25 @@ def attempt_ledger(evidence, process, numbers):
                     f"worker launch {start_id!r} for claim {claim_id!r} needs "
                     "exactly one terminal diagnostic or evidence-unavailable record")
         if outcome and outcome.get("result") == "LAUNCHED":
-            successful_launches = [
+            all_successful_launches = [
                 row for row in launch_ledger
-                if row["start"].get("worker") == outcome.get("worker")
-                and row.get("terminal_diagnostic")
+                if row.get("terminal_diagnostic")
                 and row["terminal_diagnostic"].get("result") == "LAUNCHED"
                 and row["terminal_diagnostic"].get("exit") == 0]
-            if len(successful_launches) + bool(launch_evidence_unavailable) != 1:
+            matching_successful_launches = [
+                row for row in all_successful_launches
+                if row["start"].get("worker") == outcome.get("worker")]
+            if (len(all_successful_launches) +
+                    bool(launch_evidence_unavailable) != 1):
                 findings.append(
                     f"successful claim {claim_id!r} for Story {story} needs "
-                    "exactly one successful worker-specific launch or "
+                    "exactly one successful worker-specific launch overall or "
                     "evidence-unavailable record")
+            elif (all_successful_launches and
+                  len(matching_successful_launches) != 1):
+                findings.append(
+                    f"successful claim {claim_id!r} for Story {story} needs its "
+                    "single successful launch to match the terminal worker")
         elif (outcome and
               (outcome.get("worker") or
                outcome.get("result") == "NO_WORKER_LAUNCHED") and

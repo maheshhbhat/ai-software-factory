@@ -303,6 +303,22 @@ class Rung2ReportTests(unittest.TestCase):
                                     for finding in result[
                                         "measurement_integrity"]["findings"]))
 
+    def test_orphan_attempt_event_requires_valid_trace_identity(self):
+        for invalid in (None, 123, "   "):
+            with self.subTest(invalid=invalid):
+                values = list(fixture())
+                values[1].append({
+                    "event": "worker.failover", "story": 20,
+                    "repo": values[0]["repository"], "trace_id": invalid,
+                    "event_id": "uncorrelated-failover", "worker": "worker-x",
+                    "decision": "EXHAUSTED", "result": "FAILED"})
+                result = report.build(*values)
+                self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+                self.assertTrue(any("worker.failover" in finding and
+                                    "nonempty string attempt trace ID" in finding
+                                    for finding in result[
+                                        "measurement_integrity"]["findings"]))
+
     def test_no_eligible_worker_uses_terminal_detail_as_diagnostic(self):
         values = list(fixture())
         trace = "trace-20-0"
@@ -719,18 +735,12 @@ class Rung2ReportTests(unittest.TestCase):
         values = list(fixture())
         outcome = next(row for row in values[1]
                        if row.get("event") == "worker.outcome")
-        for worker in ("claude", "codex"):
+        for worker in ("claude",):
             values[1].append({
                 "event": "worker.launch.start", "story": outcome["story"],
                 "repo": values[0]["repository"],
                 "trace_id": outcome["trace_id"], "span_id": "shared-span",
                 "worker": worker, "event_id": f"start-{worker}"})
-        values[1].append({
-            "event": "worker.launch.end", "story": outcome["story"],
-            "repo": values[0]["repository"],
-            "trace_id": outcome["trace_id"], "span_id": "shared-span",
-            "worker": "codex", "event_id": "end-codex", "exit": 0,
-            "result": "LAUNCHED"})
         result = report.build(*values)
         self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
         values[1].append({
@@ -741,6 +751,26 @@ class Rung2ReportTests(unittest.TestCase):
             "result": "FAILED", "stderr": "failed before fallback"})
         result = report.build(*values)
         self.assertNotEqual("INCONCLUSIVE", result["rung_verdict"])
+
+    def test_attempt_rejects_multiple_successful_worker_launches(self):
+        values = list(fixture())
+        outcome = next(row for row in values[1]
+                       if row.get("event") == "worker.outcome")
+        values[1].extend([
+            {"event": "worker.launch.start", "story": outcome["story"],
+             "repo": values[0]["repository"], "trace_id": outcome["trace_id"],
+             "span_id": "second-success-span", "worker": "second-worker",
+             "event_id": "second-success-start"},
+            {"event": "worker.launch.end", "story": outcome["story"],
+             "repo": values[0]["repository"], "trace_id": outcome["trace_id"],
+             "span_id": "second-success-span", "worker": "second-worker",
+             "event_id": "second-success-end", "result": "LAUNCHED",
+             "exit": 0}])
+        result = report.build(*values)
+        self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+        self.assertTrue(any("exactly one successful worker-specific launch overall"
+                            in finding for finding in
+                            result["measurement_integrity"]["findings"]))
 
     def test_launched_outcome_requires_successful_matching_launch_end(self):
         values = list(fixture())
@@ -868,6 +898,19 @@ class Rung2ReportTests(unittest.TestCase):
         self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
         self.assertTrue(any("worker launch end" in finding and
                             "recognized result" in finding
+                            for finding in
+                            result["measurement_integrity"]["findings"]))
+
+    def test_failed_launch_end_requires_nonzero_exit(self):
+        values = list(fixture())
+        launch_end = next(row for row in values[1]
+                          if row.get("event") == "worker.launch.end")
+        launch_end.update({"result": "FAILED", "exit": None,
+                           "detail": "unstructured exception claim"})
+        result = report.build(*values)
+        self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+        self.assertTrue(any("worker launch end" in finding and
+                            "consistent worker and exit status" in finding
                             for finding in
                             result["measurement_integrity"]["findings"]))
 
