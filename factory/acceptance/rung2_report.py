@@ -362,17 +362,33 @@ def attempt_ledger(evidence, process, numbers):
                     f"worker failover {failover.get('event_id')!r} for claim "
                     f"{claim_id!r} needs exactly one matching worker launch")
             if failover.get("decision") in {"NOT_NEEDED", "SUPPRESSED"} and (
-                    not outcome or failover.get("worker") != outcome.get("worker") or
-                    failover.get("result") != outcome.get("result")):
+                    not unavailable and
+                    (not outcome or
+                     failover.get("worker") != outcome.get("worker") or
+                     failover.get("result") != outcome.get("result"))):
                 findings.append(
                     f"terminal worker failover {failover.get('event_id')!r} for "
                     f"claim {claim_id!r} must match its terminal worker outcome")
             if failover.get("decision") == "EXHAUSTED" and (
-                    not outcome or outcome.get("result") != "NO_WORKER_LAUNCHED" or
-                    outcome.get("worker") is not None):
+                    not unavailable and
+                    (not outcome or
+                     outcome.get("result") != "NO_WORKER_LAUNCHED" or
+                     outcome.get("worker") is not None)):
                 findings.append(
                     f"exhausted worker failover {failover.get('event_id')!r} for "
                     f"claim {claim_id!r} must end in NO_WORKER_LAUNCHED")
+            if failover.get("decision") == "FELL_BACK":
+                next_worker = failover.get("next")
+                next_launches = [
+                    row for row in launch_starts
+                    if valid_event_id(next_worker)
+                    and row.get("worker") == next_worker
+                    and next_worker != failover.get("worker")]
+                if len(next_launches) != 1:
+                    findings.append(
+                        f"fallback decision {failover.get('event_id')!r} for "
+                        f"claim {claim_id!r} needs exactly one launch of its "
+                        "nonempty next-worker identity")
         launch_ends = deterministic_copies(
             [row for row in process
              if row.get("event") == "worker.launch.end"
@@ -455,15 +471,28 @@ def attempt_ledger(evidence, process, numbers):
             unavailable_launch = evidence_unavailable(
                 evidence, kind="attempt-launch-diagnostics", story=story,
                 identity=f"{identity}:{start_id}")
+            matching_failovers = [
+                row for row in failovers
+                if valid_event_id(worker) and row.get("worker") == worker]
+            unavailable_failover = evidence_unavailable(
+                evidence, kind="attempt-failover", story=story,
+                identity=f"{identity}:{start_id}")
             launch_ledger.append({
                 "start": start,
                 "terminal_diagnostic": (usable_ends[0]
                                         if len(usable_ends) == 1 else None),
-                "evidence_unavailable": unavailable_launch})
+                "evidence_unavailable": unavailable_launch,
+                "failover": (matching_failovers[0]
+                             if len(matching_failovers) == 1 else None),
+                "failover_evidence_unavailable": unavailable_failover})
             if len(usable_ends) + bool(unavailable_launch) != 1:
                 findings.append(
                     f"worker launch {start_id!r} for claim {claim_id!r} needs "
                     "exactly one terminal diagnostic or evidence-unavailable record")
+            if len(matching_failovers) + bool(unavailable_failover) != 1:
+                findings.append(
+                    f"worker launch {start_id!r} for claim {claim_id!r} needs "
+                    "exactly one failover decision or evidence-unavailable record")
         all_successful_launches = [
             row for row in launch_ledger
             if row.get("terminal_diagnostic")

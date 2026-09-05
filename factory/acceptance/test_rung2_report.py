@@ -54,7 +54,12 @@ def fixture():
                  "repo": evidence["repository"],
                  "event_id": f"launch-end-{story}-{index}",
                  "trace_id": trace, "span_id": f"span-{story}-{index}",
-                 "worker": "factory-worker", "result": "LAUNCHED", "exit": 0}])
+                 "worker": "factory-worker", "result": "LAUNCHED", "exit": 0},
+                {"event": "worker.failover", "story": story,
+                 "repo": evidence["repository"],
+                 "event_id": f"failover-{story}-{index}", "trace_id": trace,
+                 "worker": "factory-worker", "decision": "NOT_NEEDED",
+                 "result": "LAUNCHED"}])
             process.append({"event": "worker.outcome", "story": story,
                             "repo": evidence["repository"],
                             "event_id": f"outcome-{story}-{index}",
@@ -101,6 +106,20 @@ def remove_delivery_for_trace(values, trace):
         row for row in values[1]
         if not (row.get("event") == "delivery.pull-request.written" and
                 row.get("trace_id") == trace)]
+
+
+def remove_failovers_for_trace(values, trace):
+    values[1] = [
+        row for row in values[1]
+        if not (row.get("event") == "worker.failover" and
+                row.get("trace_id") == trace)]
+
+
+def add_failover_unavailable(values, trace, start_id, story=20):
+    values[0].setdefault("evidence_unavailable", []).append({
+        "kind": "attempt-failover", "story": story,
+        "identity": f"{trace}:{start_id}",
+        "reason": "legacy routing evidence unavailable"})
 
 
 class Rung2ReportTests(unittest.TestCase):
@@ -150,7 +169,8 @@ class Rung2ReportTests(unittest.TestCase):
         values[1] = [row for row in values[1]
                      if not (row.get("trace_id") == trace and
                              row.get("event") in
-                             ("worker.launch.start", "worker.launch.end"))]
+                             ("worker.launch.start", "worker.launch.end",
+                              "worker.failover"))]
         result = report.build(*values)
         self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
         values[0]["evidence_unavailable"] = [{
@@ -241,6 +261,28 @@ class Rung2ReportTests(unittest.TestCase):
         self.assert_order_independent_inconclusive(
             values, "needs exactly one matching worker launch")
 
+    def test_every_launch_requires_a_failover_decision_or_unavailable_record(self):
+        values = list(fixture())
+        trace = "trace-20-0"
+        values[1] = [
+            row for row in values[1]
+            if not (row.get("event") == "worker.failover"
+                    and row.get("trace_id") == trace)]
+        self.assert_order_independent_inconclusive(
+            values, "exactly one failover decision or evidence-unavailable record")
+        values[0]["evidence_unavailable"] = [{
+            "kind": "attempt-failover", "story": 20,
+            "identity": f"{trace}:launch-start-20-0",
+            "reason": "legacy routing evidence unavailable"}]
+        result = report.build(*values)
+        self.assertNotEqual("INCONCLUSIVE", result["rung_verdict"])
+        launch = next(
+            row for row in result["attempt_ledger"]
+            if row["trace_id"] == trace)["launch_ledger"][0]
+        self.assertEqual(
+            "legacy routing evidence unavailable",
+            launch["failover_evidence_unavailable"]["reason"])
+
     def test_failover_result_must_match_worker_launch_end(self):
         values = list(fixture())
         trace = "trace-20-0"
@@ -276,6 +318,43 @@ class Rung2ReportTests(unittest.TestCase):
         self.assert_order_independent_inconclusive(
             values, "must match exactly one terminal launch result")
 
+    def test_fell_back_decision_requires_launch_of_named_next_worker(self):
+        values = list(fixture())
+        trace = "trace-20-0"
+        launch_end = next(
+            row for row in values[1]
+            if row.get("event") == "worker.launch.end"
+            and row.get("trace_id") == trace)
+        launch_end.update({
+            "result": "FAILED", "exit": 1, "detail": "definite failure"})
+        failover = next(
+            row for row in values[1]
+            if row.get("event") == "worker.failover"
+            and row.get("trace_id") == trace)
+        failover.update({
+            "decision": "FELL_BACK", "result": "FAILED",
+            "next": "missing-worker"})
+        values[1].extend([
+            {"event": "worker.launch.start", "story": 20,
+             "repo": values[0]["repository"], "trace_id": trace,
+             "event_id": "fallback-start", "span_id": "fallback-span",
+             "worker": "fallback-worker"},
+            {"event": "worker.launch.end", "story": 20,
+             "repo": values[0]["repository"], "trace_id": trace,
+             "event_id": "fallback-end", "span_id": "fallback-span",
+             "worker": "fallback-worker", "result": "LAUNCHED", "exit": 0},
+            {"event": "worker.failover", "story": 20,
+             "repo": values[0]["repository"], "trace_id": trace,
+             "event_id": "fallback-accepted", "worker": "fallback-worker",
+             "decision": "NOT_NEEDED", "result": "LAUNCHED"}])
+        outcome = next(
+            row for row in values[1]
+            if row.get("event") == "worker.outcome"
+            and row.get("trace_id") == trace)
+        outcome["worker"] = "fallback-worker"
+        self.assert_order_independent_inconclusive(
+            values, "needs exactly one launch of its nonempty next-worker identity")
+
     def test_conflicting_failover_event_payloads_fail_deterministically(self):
         values = list(fixture())
         common = {
@@ -291,11 +370,11 @@ class Rung2ReportTests(unittest.TestCase):
     def test_identical_failover_event_payload_may_repeat_across_traces(self):
         values = list(fixture())
         for trace in ("trace-20-0", "trace-20-1"):
-            values[1].append({
-                "event": "worker.failover", "story": 20,
-                "repo": values[0]["repository"], "trace_id": trace,
-                "event_id": "repeated-identical-failover", "worker": "factory-worker",
-                "decision": "NOT_NEEDED", "result": "LAUNCHED"})
+            failover = next(
+                row for row in values[1]
+                if row.get("event") == "worker.failover"
+                and row.get("trace_id") == trace)
+            failover["event_id"] = "repeated-identical-failover"
         first = report.build(*values)
         second = report.build(
             values[0], list(reversed(values[1])), values[2], values[3])
@@ -483,7 +562,8 @@ class Rung2ReportTests(unittest.TestCase):
         values[1] = [row for row in values[1]
                      if not (row.get("trace_id") == trace and
                              row.get("event") in
-                             ("worker.launch.start", "worker.launch.end"))]
+                             ("worker.launch.start", "worker.launch.end",
+                              "worker.failover"))]
         result = report.build(*values)
         self.assertNotEqual("INCONCLUSIVE", result["rung_verdict"])
         ledger = next(row for row in result["attempt_ledger"]
@@ -503,7 +583,8 @@ class Rung2ReportTests(unittest.TestCase):
         values[1] = [row for row in values[1]
                      if not (row.get("trace_id") == trace and
                              row.get("event") in
-                             ("worker.launch.start", "worker.launch.end"))]
+                             ("worker.launch.start", "worker.launch.end",
+                              "worker.failover"))]
         result = report.build(*values)
         self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
         self.assertTrue(any("needs durable launch evidence" in finding
@@ -762,7 +843,8 @@ class Rung2ReportTests(unittest.TestCase):
         trace = outcome["trace_id"]
         values[1] = [row for row in values[1]
                      if not (row.get("trace_id") == trace and row.get("event") in
-                             ("worker.launch.start", "worker.launch.end"))]
+                             ("worker.launch.start", "worker.launch.end",
+                              "worker.failover"))]
         remove_delivery_for_trace(values, trace)
         values[0]["evidence_unavailable"] = [{
             "kind": "attempt-launches", "story": outcome["story"],
@@ -790,7 +872,8 @@ class Rung2ReportTests(unittest.TestCase):
         values[1] = [
             row for row in values[1]
             if not (row.get("trace_id") == trace and row.get("event") in
-                    ("worker.launch.start", "worker.launch.end"))]
+                    ("worker.launch.start", "worker.launch.end",
+                     "worker.failover"))]
         result = report.build(*values)
         self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
         self.assertTrue(any("durable launch evidence" in finding
@@ -814,6 +897,9 @@ class Rung2ReportTests(unittest.TestCase):
             row.get("trace_id") == outcome["trace_id"])
         launch_end.update({"event_id": "launch-failure-20", "result": "FAILED",
                            "exit": 1, "stderr": "durable diagnostic"})
+        remove_failovers_for_trace(values, outcome["trace_id"])
+        add_failover_unavailable(
+            values, outcome["trace_id"], "launch-start-20-0")
         remove_delivery_for_trace(values, outcome["trace_id"])
         result = report.build(*values)
         self.assertNotEqual("INCONCLUSIVE", result["rung_verdict"])
@@ -856,6 +942,8 @@ class Rung2ReportTests(unittest.TestCase):
             row.get("trace_id") == trace)
         original_end.update({"result": "FAILED", "exit": 1,
                              "stderr": "original worker failed"})
+        remove_failovers_for_trace(values, trace)
+        add_failover_unavailable(values, trace, "launch-start-20-0")
         remove_delivery_for_trace(values, trace)
         for index in (1, 2):
             values[1].append({
@@ -863,6 +951,7 @@ class Rung2ReportTests(unittest.TestCase):
                 "repo": values[0]["repository"],
                 "trace_id": outcome["trace_id"], "event_id": f"start-{index}",
                 "span_id": f"span-{index}", "worker": f"worker-{index}"})
+            add_failover_unavailable(values, trace, f"start-{index}")
         values[1].append({
             "event": "worker.launch.end", "story": outcome["story"],
             "repo": values[0]["repository"],
@@ -871,10 +960,10 @@ class Rung2ReportTests(unittest.TestCase):
             "result": "FAILED", "exit": 1, "stderr": "failed"})
         result = report.build(*values)
         self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
-        values[0]["evidence_unavailable"] = [{
+        values[0]["evidence_unavailable"].append({
             "kind": "attempt-launch-diagnostics", "story": outcome["story"],
             "identity": f"{outcome['trace_id']}:start-2",
-            "reason": "second launch log unavailable"}]
+            "reason": "second launch log unavailable"})
         result = report.build(*values)
         self.assertNotEqual("INCONCLUSIVE", result["rung_verdict"])
         ledger = next(row for row in result["attempt_ledger"]
@@ -896,6 +985,8 @@ class Rung2ReportTests(unittest.TestCase):
             row.get("trace_id") == trace)
         original_end.update({"result": "FAILED", "exit": 1,
                              "stderr": "original worker failed"})
+        remove_failovers_for_trace(values, trace)
+        add_failover_unavailable(values, trace, "launch-start-20-0")
         remove_delivery_for_trace(values, trace)
         for worker in ("claude", "codex"):
             values[1].append({
@@ -903,6 +994,7 @@ class Rung2ReportTests(unittest.TestCase):
                 "repo": values[0]["repository"],
                 "trace_id": outcome["trace_id"], "span_id": "shared-span",
                 "worker": worker, "event_id": f"start-{worker}"})
+            add_failover_unavailable(values, trace, f"start-{worker}")
         values[1].append({
             "event": "worker.launch.end", "story": outcome["story"],
             "repo": values[0]["repository"],
@@ -938,6 +1030,12 @@ class Rung2ReportTests(unittest.TestCase):
             "trace_id": outcome["trace_id"], "span_id": "shared-span",
             "worker": "claude", "event_id": "end-claude", "exit": 1,
             "result": "FAILED", "stderr": "failed before fallback"})
+        values[1].append({
+            "event": "worker.failover", "story": outcome["story"],
+            "repo": values[0]["repository"], "trace_id": outcome["trace_id"],
+            "worker": "claude", "event_id": "failover-claude",
+            "decision": "FELL_BACK", "result": "FAILED",
+            "next": "factory-worker"})
         result = report.build(*values)
         self.assertNotEqual("INCONCLUSIVE", result["rung_verdict"])
 
@@ -956,7 +1054,12 @@ class Rung2ReportTests(unittest.TestCase):
              "worker": "missing-worker", "event_id": "missing-end",
              "result": "FAILED", "exit": None,
              "detail": ("not launchable: [Errno 2] No such file or directory: "
-                        "'/missing/worker'")}])
+                        "'/missing/worker'")},
+            {"event": "worker.failover", "story": outcome["story"],
+             "repo": values[0]["repository"], "trace_id": outcome["trace_id"],
+             "event_id": "missing-failover", "worker": "missing-worker",
+             "decision": "FELL_BACK", "result": "FAILED",
+             "next": "factory-worker"}])
         result = report.build(*values)
         reversed_result = report.build(
             values[0], list(reversed(values[1])), values[2], values[3])
@@ -1036,10 +1139,18 @@ class Rung2ReportTests(unittest.TestCase):
              "repo": values[0]["repository"],
              "trace_id": outcome["trace_id"], "span_id": "fallback-span",
              "worker": "failed-worker", "event_id": "fallback-end",
-             "result": "FAILED", "exit": 1}])
+             "result": "FAILED", "exit": 1},
+            {"event": "worker.failover", "story": outcome["story"],
+             "repo": values[0]["repository"], "trace_id": outcome["trace_id"],
+             "worker": "failed-worker", "event_id": "fallback-routing",
+             "decision": "FELL_BACK", "result": "FAILED",
+             "next": "factory-worker"}])
         result = report.build(*values)
         self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
-        values[1][-1]["stderr"] = "worker rejected assignment"
+        launch_end = next(
+            row for row in values[1]
+            if row.get("event_id") == "fallback-end")
+        launch_end["stderr"] = "worker rejected assignment"
         result = report.build(*values)
         self.assertNotEqual("INCONCLUSIVE", result["rung_verdict"])
 
@@ -1111,6 +1222,11 @@ class Rung2ReportTests(unittest.TestCase):
         launch_end.update({"event_id": "timeout-diagnostic", "exit": None,
                            "result": "AMBIGUOUS",
                            "stderr": "timed out with partial output"})
+        failover = next(
+            row for row in values[1]
+            if row.get("event") == "worker.failover"
+            and row.get("trace_id") == outcome["trace_id"])
+        failover.update({"decision": "SUPPRESSED", "result": "AMBIGUOUS"})
         remove_delivery_for_trace(values, outcome["trace_id"])
         result = report.build(*values)
         self.assertNotEqual("INCONCLUSIVE", result["rung_verdict"])
@@ -1324,6 +1440,7 @@ class Rung2ReportTests(unittest.TestCase):
                 row for row in values[1]
                 if not (row.get("trace_id") == trace and row.get("event") in
                         ("worker.launch.start", "worker.launch.end",
+                         "worker.failover",
                          "delivery.pull-request.written"))]
         result = report.build(*values)
         reversed_result = report.build(
