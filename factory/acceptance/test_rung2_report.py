@@ -835,6 +835,28 @@ class Rung2ReportTests(unittest.TestCase):
         result = report.build(*values)
         self.assertNotEqual("INCONCLUSIVE", result["rung_verdict"])
 
+    def test_missing_executable_launch_failure_allows_successful_fallback(self):
+        values = list(fixture())
+        outcome = next(row for row in values[1]
+                       if row.get("event") == "worker.outcome")
+        values[1].extend([
+            {"event": "worker.launch.start", "story": outcome["story"],
+             "repo": values[0]["repository"],
+             "trace_id": outcome["trace_id"], "span_id": "missing-span",
+             "worker": "missing-worker", "event_id": "missing-start"},
+            {"event": "worker.launch.end", "story": outcome["story"],
+             "repo": values[0]["repository"],
+             "trace_id": outcome["trace_id"], "span_id": "missing-span",
+             "worker": "missing-worker", "event_id": "missing-end",
+             "result": "FAILED", "exit": None,
+             "detail": ("not launchable: [Errno 2] No such file or directory: "
+                        "'/missing/worker'")}])
+        result = report.build(*values)
+        reversed_result = report.build(
+            values[0], list(reversed(values[1])), values[2], values[3])
+        self.assertEqual(result, reversed_result)
+        self.assertNotEqual("INCONCLUSIVE", result["rung_verdict"])
+
     def test_attempt_rejects_multiple_successful_worker_launches(self):
         values = list(fixture())
         outcome = next(row for row in values[1]
@@ -1158,6 +1180,26 @@ class Rung2ReportTests(unittest.TestCase):
         productions[1]["event_id"] = productions[0]["event_id"]
         self.assert_order_independent_inconclusive(
             values, "is reused across multiple attempt or delivery identities")
+
+    def test_conflicting_production_event_copies_fail_deterministically(self):
+        values = list(fixture())
+        production = next(
+            row for row in values[1]
+            if row.get("event") == "delivery.pull-request.written")
+        conflict = dict(production)
+        conflict["production_evidence_missing"] = True
+        values[1].append(conflict)
+        self.assert_order_independent_inconclusive(
+            values, "PR/head production event")
+
+    def test_terminal_event_id_cannot_be_reused_across_attempts(self):
+        values = list(fixture())
+        outcomes = [row for row in values[1]
+                    if row.get("event") == "worker.outcome"]
+        self.assertGreaterEqual(len(outcomes), 2)
+        outcomes[1]["event_id"] = outcomes[0]["event_id"]
+        self.assert_order_independent_inconclusive(
+            values, "is reused across multiple attempts")
 
     def test_pr_only_declaration_uses_durable_process_head(self):
         values = list(fixture())

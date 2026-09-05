@@ -45,7 +45,7 @@ def valid_event_id(value):
     return isinstance(value, str) and bool(value.strip())
 
 
-def valid_terminal_worker_outcome(row):
+def valid_terminal_worker_outcome(row, *, allow_missing_executable=False):
     result = row.get("result")
     if not isinstance(result, str) or result not in TERMINAL_WORKER_RESULTS:
         return False
@@ -65,7 +65,14 @@ def valid_terminal_worker_outcome(row):
         return valid_worker and exit_code is None
     if result == "TERMINAL_FAILURE":
         return valid_worker and exit_code is not None and exit_code != 0
-    return valid_worker and exit_code is not None and exit_code != 0
+    if valid_worker and exit_code is not None and exit_code != 0:
+        return True
+    return bool(
+        allow_missing_executable and result == "FAILED" and valid_worker and
+        exit_code is None and isinstance(row.get("detail"), str) and
+        re.fullmatch(
+            r"not launchable: \[Errno 2\] No such file or directory: .+",
+            row["detail"]))
 
 
 def unique(rows, key):
@@ -126,6 +133,20 @@ def attempt_ledger(evidence, process, numbers):
             findings.append(
                 f"{row.get('event')} event for Story {row.get('story')} needs a "
                 "nonempty string attempt trace ID")
+    terminal_event_ids = {}
+    for row in process:
+        if (row.get("event") == TERMINAL_WORKER_EVENT and
+                row.get("repo") == repository and row.get("story") in numbers and
+                valid_event_id(row.get("event_id"))):
+            identity = json.dumps(
+                (row.get("story"), row.get("trace_id"),
+                 row.get("claim_event_id")), sort_keys=True, default=str)
+            terminal_event_ids.setdefault(row["event_id"], set()).add(identity)
+    for event_id, identities in sorted(terminal_event_ids.items()):
+        if len(identities) > 1:
+            findings.append(
+                f"terminal worker outcome event ID {event_id!r} is reused "
+                "across multiple attempts")
     claim_groups = {}
     for row in process:
         if (row.get("event") == "story.claimed" and
@@ -286,7 +307,8 @@ def attempt_ledger(evidence, process, numbers):
                 findings.append(
                     f"worker launch end {end.get('event_id')!r} for claim "
                     f"{claim_id!r} needs a nonempty string span ID")
-            if not valid_terminal_worker_outcome(end):
+            if not valid_terminal_worker_outcome(
+                    end, allow_missing_executable=True):
                 findings.append(
                     f"worker launch end {end.get('event_id')!r} for claim "
                     f"{claim_id!r} needs a recognized result with a consistent "
@@ -329,7 +351,8 @@ def attempt_ledger(evidence, process, numbers):
                 and valid_event_id(worker) and row.get("worker") == worker]
             usable_ends = [
                 row for row in matching_ends
-                if valid_terminal_worker_outcome(row)
+                if valid_terminal_worker_outcome(
+                    row, allow_missing_executable=True)
                 and ((row.get("result") == "LAUNCHED" and row.get("exit") == 0) or
                      row.get("stderr") or row.get("stdout") or row.get("detail"))]
             unavailable_launch = evidence_unavailable(
@@ -488,9 +511,10 @@ def review_ledger(evidence, process, numbers, attempts):
     produced = []
     for key in sorted(grouped, key=lambda value: tuple(str(v) for v in value)):
         candidates = grouped[key]
-        durable = unique([row for row in candidates
-                          if valid_event_id(row.get("event_id"))],
-                         lambda row: row.get("event_id"))
+        durable = deterministic_copies(
+            [row for row in candidates if valid_event_id(row.get("event_id"))],
+            lambda row: (row.get("event_id"),), findings,
+            "PR/head production event")
         if len(durable) > 1:
             findings.append(
                 f"PR/head production evidence {key!r} has conflicting durable event IDs")
