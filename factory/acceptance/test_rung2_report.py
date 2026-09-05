@@ -403,6 +403,41 @@ class Rung2ReportTests(unittest.TestCase):
         self.assert_order_independent_inconclusive(
             values, "needs one acyclic failover chain")
 
+    def test_unhashable_fallback_target_fails_closed(self):
+        values = list(fixture())
+        trace = "trace-20-0"
+        launch_end = next(
+            row for row in values[1]
+            if row.get("event") == "worker.launch.end"
+            and row.get("trace_id") == trace)
+        launch_end.update({
+            "result": "FAILED", "exit": 1, "detail": "definite failure"})
+        failover = next(
+            row for row in values[1]
+            if row.get("event") == "worker.failover"
+            and row.get("trace_id") == trace)
+        failover.update({
+            "decision": "FELL_BACK", "result": "FAILED", "next": []})
+        outcome = next(
+            row for row in values[1]
+            if row.get("event") == "worker.outcome"
+            and row.get("trace_id") == trace)
+        outcome.update({
+            "worker": None, "result": "NO_WORKER_LAUNCHED", "exit": None,
+            "detail": "every eligible worker failed definitely"})
+        remove_delivery_for_trace(values, trace)
+        self.assert_order_independent_inconclusive(
+            values, "nonempty next-worker identity")
+
+    def test_terminal_failover_cannot_name_a_next_worker(self):
+        values = list(fixture())
+        failover = next(
+            row for row in values[1]
+            if row.get("event") == "worker.failover")
+        failover["next"] = "ghost-worker"
+        self.assert_order_independent_inconclusive(
+            values, "cannot name a next worker")
+
     def test_conflicting_failover_event_payloads_fail_deterministically(self):
         values = list(fixture())
         common = {

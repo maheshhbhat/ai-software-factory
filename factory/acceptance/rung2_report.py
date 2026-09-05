@@ -389,6 +389,10 @@ def attempt_ledger(evidence, process, numbers):
                         f"fallback decision {failover.get('event_id')!r} for "
                         f"claim {claim_id!r} needs exactly one launch of its "
                         "nonempty next-worker identity")
+            elif failover.get("next") is not None:
+                findings.append(
+                    f"terminal failover decision {failover.get('event_id')!r} "
+                    f"for claim {claim_id!r} cannot name a next worker")
         launch_ends = deterministic_copies(
             [row for row in process
              if row.get("event") == "worker.launch.end"
@@ -501,7 +505,8 @@ def attempt_ledger(evidence, process, numbers):
             edges = {
                 row["failover"].get("worker"): row["failover"].get("next")
                 for row in launch_ledger
-                if row["failover"].get("decision") == "FELL_BACK"}
+                if row["failover"].get("decision") == "FELL_BACK"
+                and valid_event_id(row["failover"].get("next"))}
             terminals = [
                 row["failover"].get("worker") for row in launch_ledger
                 if row["failover"].get("decision") != "FELL_BACK"]
