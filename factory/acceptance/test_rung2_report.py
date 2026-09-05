@@ -206,6 +206,21 @@ class Rung2ReportTests(unittest.TestCase):
                             for finding in
                             result["measurement_integrity"]["findings"]))
 
+    def test_malformed_failover_record_fails_deterministically(self):
+        for mutation, finding in (
+                ({"event_id": []}, "durable nonempty string event ID"),
+                ({"decision": "GARBAGE"}, "inconsistent decision and result"),
+                ({"worker": []}, "nonempty string worker identity")):
+            with self.subTest(mutation=mutation):
+                values = list(fixture())
+                values[1].append({
+                    "event": "worker.failover", "story": 20,
+                    "repo": values[0]["repository"],
+                    "trace_id": "trace-20-0", "event_id": "failover-event",
+                    "worker": "factory-worker", "decision": "NOT_NEEDED",
+                    "result": "LAUNCHED", **mutation})
+                self.assert_order_independent_inconclusive(values, finding)
+
     def test_delivery_trace_without_claim_is_inconclusive(self):
         values = list(fixture())
         values[1].extend([
@@ -442,6 +457,16 @@ class Rung2ReportTests(unittest.TestCase):
         self.assertTrue(any("conflicting trace identities" in finding
                             for finding in
                             first["measurement_integrity"]["findings"]))
+
+    def test_same_trace_claim_payload_conflict_fails_deterministically(self):
+        values = list(fixture())
+        claim = next(row for row in values[1]
+                     if row.get("event") == "story.claimed")
+        conflict = dict(claim)
+        conflict["attempt"] = 99
+        values[1].append(conflict)
+        self.assert_order_independent_inconclusive(
+            values, "has conflicting durable copies")
 
     def test_claim_event_id_must_be_nonempty_string(self):
         for invalid in ("", 7):
@@ -1198,8 +1223,32 @@ class Rung2ReportTests(unittest.TestCase):
                     if row.get("event") == "worker.outcome"]
         self.assertGreaterEqual(len(outcomes), 2)
         outcomes[1]["event_id"] = outcomes[0]["event_id"]
+        outcomes[1]["elapsed_ms"] = 99
         self.assert_order_independent_inconclusive(
-            values, "is reused across multiple attempts")
+            values, "identifies conflicting producer payloads")
+
+    def test_identical_terminal_payload_id_may_repeat_across_traces(self):
+        values = list(fixture())
+        outcomes = [row for row in values[1]
+                    if row.get("event") == "worker.outcome" and
+                    row.get("story") == 20][:2]
+        self.assertEqual(2, len(outcomes))
+        for outcome in outcomes:
+            trace = outcome["trace_id"]
+            outcome.update({
+                "event_id": "producer-repeated-outcome",
+                "worker": None, "result": "NO_ELIGIBLE_WORKER", "exit": None,
+                "detail": "no configured worker is both capable and healthy"})
+            values[1] = [
+                row for row in values[1]
+                if not (row.get("trace_id") == trace and row.get("event") in
+                        ("worker.launch.start", "worker.launch.end",
+                         "delivery.pull-request.written"))]
+        result = report.build(*values)
+        reversed_result = report.build(
+            values[0], list(reversed(values[1])), values[2], values[3])
+        self.assertEqual(result, reversed_result)
+        self.assertNotEqual("INCONCLUSIVE", result["rung_verdict"])
 
     def test_pr_only_declaration_uses_durable_process_head(self):
         values = list(fixture())

@@ -134,19 +134,47 @@ def attempt_ledger(evidence, process, numbers):
                 f"{row.get('event')} event for Story {row.get('story')} needs a "
                 "nonempty string attempt trace ID")
     terminal_event_ids = {}
+    unhashed_context = {
+        "schema_version", "record_type", "timestamp", "event_id", "trace_id",
+        "repo", "commitment", "component", "span_id", "parent_span_id",
+    }
     for row in process:
         if (row.get("event") == TERMINAL_WORKER_EVENT and
                 row.get("repo") == repository and row.get("story") in numbers and
                 valid_event_id(row.get("event_id"))):
-            identity = json.dumps(
-                (row.get("story"), row.get("trace_id"),
-                 row.get("claim_event_id")), sort_keys=True, default=str)
-            terminal_event_ids.setdefault(row["event_id"], set()).add(identity)
-    for event_id, identities in sorted(terminal_event_ids.items()):
-        if len(identities) > 1:
+            producer_payload = {
+                key: value for key, value in row.items()
+                if key not in unhashed_context}
+            encoded = json.dumps(
+                producer_payload, sort_keys=True, default=str)
+            terminal_event_ids.setdefault(row["event_id"], set()).add(encoded)
+    for event_id, payloads in sorted(terminal_event_ids.items()):
+        if len(payloads) > 1:
             findings.append(
-                f"terminal worker outcome event ID {event_id!r} is reused "
-                "across multiple attempts")
+                f"terminal worker outcome event ID {event_id!r} identifies "
+                "conflicting producer payloads")
+    valid_failover = {
+        "NOT_NEEDED": {"LAUNCHED"},
+        "SUPPRESSED": {"AMBIGUOUS", "TERMINAL_FAILURE"},
+        "FELL_BACK": {"FAILED"},
+        "EXHAUSTED": {"FAILED"},
+    }
+    for row in process:
+        if (row.get("event") == "worker.failover" and
+                row.get("repo") == repository and row.get("story") in numbers):
+            if not valid_event_id(row.get("event_id")):
+                findings.append(
+                    f"worker failover for Story {row.get('story')} needs a "
+                    "durable nonempty string event ID")
+            if not valid_event_id(row.get("worker")):
+                findings.append(
+                    f"worker failover for Story {row.get('story')} needs a "
+                    "nonempty string worker identity")
+            if row.get("result") not in valid_failover.get(
+                    row.get("decision"), set()):
+                findings.append(
+                    f"worker failover for Story {row.get('story')} has an "
+                    "inconsistent decision and result")
     claim_groups = {}
     for row in process:
         if (row.get("event") == "story.claimed" and
@@ -167,6 +195,12 @@ def attempt_ledger(evidence, process, numbers):
     selected_claims = []
     for key in sorted(claim_groups, key=lambda value: tuple(str(v) for v in value)):
         candidates = claim_groups[key]
+        encodings = {
+            json.dumps(row, sort_keys=True, default=str) for row in candidates}
+        if len(encodings) > 1:
+            findings.append(
+                f"claim {key[1]!r} for Story {key[0]} has conflicting "
+                "durable copies")
         trace_identities = {
             json.dumps(row.get("trace_id"), sort_keys=True, default=str)
             for row in candidates}
