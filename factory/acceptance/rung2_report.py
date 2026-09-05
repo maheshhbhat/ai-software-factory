@@ -21,6 +21,7 @@ TERMINAL_WORKER_RESULTS = {
     "NO_ELIGIBLE_WORKER", "NO_WORKER_LAUNCHED",
 }
 FULL_COMMIT_ID = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
+FACTORY_REVISION = re.compile(r"[0-9a-f]{40}")
 REPOSITORY_SLUG = re.compile(r"[^/\s]+/[^/\s]+")
 
 
@@ -30,6 +31,11 @@ def unavailable(reason):
 
 def valid_commit_id(value):
     return bool(isinstance(value, str) and FULL_COMMIT_ID.fullmatch(value)
+                and set(value) != {"0"})
+
+
+def valid_factory_revision(value):
+    return bool(isinstance(value, str) and FACTORY_REVISION.fullmatch(value)
                 and set(value) != {"0"})
 
 
@@ -820,6 +826,25 @@ def review_ledger(evidence, process, numbers, attempts):
 
 def build(evidence, process, telemetry, touches):
     integrity = []
+    revision = evidence.get("factory_revision")
+    revision = revision if isinstance(revision, dict) else {}
+    revision_start = revision.get("start")
+    revision_closeout = revision.get("closeout")
+    valid_revision_start = valid_factory_revision(revision_start)
+    valid_revision_closeout = valid_factory_revision(revision_closeout)
+    if not valid_revision_start:
+        integrity.append(
+            "qualification start needs an exact lowercase 40-character "
+            "factory commit")
+    if not valid_revision_closeout:
+        integrity.append(
+            "qualification closeout needs an exact lowercase 40-character "
+            "factory commit")
+    if (valid_revision_start and valid_revision_closeout and
+            revision_start != revision_closeout):
+        integrity.append(
+            "factory revision drifted during qualification: "
+            f"start {revision_start}, closeout {revision_closeout}")
     stories = evidence.get("stories") or []
     numbers = {row.get("number") for row in stories if isinstance(row.get("number"), int)}
     repository = evidence.get("repository")
@@ -1007,6 +1032,12 @@ def build(evidence, process, telemetry, touches):
         "repository": evidence.get("repository"),
         "commitment": evidence.get("commitment"),
         "project": evidence.get("project"),
+        "factory_revision": {
+            "start": revision_start,
+            "closeout": revision_closeout,
+            "stable": (valid_revision_start and valid_revision_closeout and
+                       revision_start == revision_closeout),
+        },
         "product_outcome": evidence.get("product_outcome"),
         "rung_verdict": verdict,
         "attempt_ledger": ledger,
@@ -1051,6 +1082,10 @@ def render(report):
     return "\n".join([
         "# Phase 5 Rung 2 final report", "",
         f"**Verdict: {report['rung_verdict']}.** Product outcome: {report['product_outcome']}.", "",
+        ("Factory revision: "
+         f"`{report['factory_revision']['start']}` at start; "
+         f"`{report['factory_revision']['closeout']}` at closeout; "
+         f"stable: {'yes' if report['factory_revision']['stable'] else 'no'}."), "",
         "| KPI | Result |", "|---|---|",
         f"| Human touches | {k['human_touches']['canonical_bells']} canonical bells; relay {k['human_touches']['relay']} |",
         f"| Autonomy | {autonomy_text} |",
