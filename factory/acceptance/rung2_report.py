@@ -853,6 +853,11 @@ def build(evidence, process, telemetry, touches):
             if row.get("repo") != repository:
                 continue
             story = row.get("story")
+            if ("story" in row and
+                    (not isinstance(story, int) or isinstance(story, bool))):
+                integrity.append(
+                    "every process Story identity must be an integer")
+                continue
             if (isinstance(story, int) and not isinstance(story, bool) and
                     story not in numbers):
                 continue
@@ -860,11 +865,6 @@ def build(evidence, process, telemetry, touches):
                 if story in numbers:
                     integrity.append(
                         "every process record needs a nonempty string event name")
-                continue
-            if ("story" in row and
-                    (not isinstance(story, int) or isinstance(story, bool))):
-                integrity.append(
-                    "every process Story identity must be an integer")
                 continue
             valid_process.append(row)
         process = valid_process

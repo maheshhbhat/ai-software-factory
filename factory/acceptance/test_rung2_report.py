@@ -251,6 +251,18 @@ class Rung2ReportTests(unittest.TestCase):
         self.assert_order_independent_inconclusive(
             values, "nonempty string event name")
 
+    def test_malformed_process_story_precedes_event_scope_check(self):
+        for story in ([], "20"):
+            with self.subTest(story=story):
+                values = list(fixture())
+                values[1].append({
+                    "event": [], "story": story,
+                    "repo": values[0]["repository"],
+                    "trace_id": "trace-20-0",
+                    "event_id": "malformed-story-and-event"})
+                self.assert_order_independent_inconclusive(
+                    values, "process Story identity must be an integer")
+
     def test_malformed_foreign_process_event_is_out_of_scope(self):
         values = list(fixture())
         expected = report.build(*values)
