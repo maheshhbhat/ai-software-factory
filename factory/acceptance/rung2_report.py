@@ -110,7 +110,10 @@ def deterministic_copies(rows, key, findings, description):
 
 
 def evidence_unavailable(evidence, *, kind, story, identity):
-    matches = [row for row in evidence.get("evidence_unavailable", [])
+    records = evidence.get("evidence_unavailable", [])
+    if not isinstance(records, list):
+        return None
+    matches = [row for row in records
                if isinstance(row, dict) and row.get("kind") == kind
                and row.get("story") == story and row.get("identity") == identity
                and row.get("reason")]
@@ -816,9 +819,44 @@ def review_ledger(evidence, process, numbers, attempts):
 
 
 def build(evidence, process, telemetry, touches):
+    integrity = []
+    unavailable_records = evidence.get("evidence_unavailable", [])
+    if not isinstance(unavailable_records, list):
+        integrity.append("evidence_unavailable must be a list of named records")
+        evidence = {**evidence, "evidence_unavailable": []}
+    else:
+        valid_unavailable = [
+            row for row in unavailable_records
+            if (isinstance(row, dict) and valid_event_id(row.get("kind")) and
+                isinstance(row.get("story"), int) and
+                not isinstance(row.get("story"), bool) and
+                valid_event_id(row.get("identity")) and
+                valid_event_id(row.get("reason")))]
+        if len(valid_unavailable) != len(unavailable_records):
+            integrity.append(
+                "evidence_unavailable must contain named Story, identity, and "
+                "reason records")
+        evidence = {**evidence, "evidence_unavailable": valid_unavailable}
+    if not isinstance(process, list):
+        integrity.append("process evidence must be a list of event records")
+        process = []
+    else:
+        valid_process = []
+        for row in process:
+            if not isinstance(row, dict) or not valid_event_id(row.get("event")):
+                integrity.append(
+                    "every process record needs a nonempty string event name")
+                continue
+            if ("story" in row and
+                    (not isinstance(row.get("story"), int) or
+                     isinstance(row.get("story"), bool))):
+                integrity.append(
+                    "every process Story identity must be an integer")
+                continue
+            valid_process.append(row)
+        process = valid_process
     stories = evidence.get("stories") or []
     numbers = {row.get("number") for row in stories if isinstance(row.get("number"), int)}
-    integrity = []
     if not numbers or len(numbers) != len(stories):
         integrity.append("every measured Story needs one distinct integer number")
     if any(not row.get("merged") for row in stories):
@@ -935,7 +973,7 @@ def build(evidence, process, telemetry, touches):
                            and escaped["count"] <= thresholds["escaped_defects_maximum"],
         "measurement_integrity": not integrity,
     }
-    evidence_complete = not ledger_findings and not review_findings
+    evidence_complete = not integrity
     verdict = ("INCONCLUSIVE" if not evidence_complete else
                "PASS" if all(threshold_results.values()) else "FAIL")
     if not evidence_complete:

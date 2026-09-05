@@ -243,6 +243,28 @@ class Rung2ReportTests(unittest.TestCase):
                     "result": "LAUNCHED", **mutation})
                 self.assert_order_independent_inconclusive(values, finding)
 
+    def test_malformed_process_event_name_fails_deterministically(self):
+        values = list(fixture())
+        values[1].append({
+            "event": [], "story": 20, "repo": values[0]["repository"],
+            "trace_id": "trace-20-0", "event_id": "malformed-event-name"})
+        self.assert_order_independent_inconclusive(
+            values, "nonempty string event name")
+
+    def test_malformed_evidence_unavailable_container_fails_closed(self):
+        for malformed in (None, {}, [None], [{"kind": "attempt-failover"}]):
+            with self.subTest(malformed=malformed):
+                values = list(fixture())
+                values[0]["evidence_unavailable"] = malformed
+                result = report.build(*values)
+                reversed_result = report.build(
+                    values[0], list(reversed(values[1])), values[2], values[3])
+                self.assertEqual(result, reversed_result)
+                self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+                self.assertTrue(any(
+                    "evidence_unavailable must" in finding
+                    for finding in result["measurement_integrity"]["findings"]))
+
     def test_claim_id_trace_exception_applies_only_to_legacy_claim(self):
         values = list(fixture())
         values[1].append({
@@ -1633,7 +1655,7 @@ class Rung2ReportTests(unittest.TestCase):
 
         values[3].pop()
         result = report.build(*values)
-        self.assertEqual("FAIL", result["rung_verdict"])
+        self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
         self.assertFalse(result["threshold_results"]["measurement_integrity"])
 
     def test_governance_does_not_reduce_autonomy_but_recovery_does(self):
