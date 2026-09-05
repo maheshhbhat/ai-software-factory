@@ -39,9 +39,52 @@ def fixture():
     process = []
     for story, count in attempts.items():
         for index in range(count):
+            trace = f"trace-{story}-{index}"
             row = {"event": "story.claimed", "story": story,
-                   "event_id": f"{story}-{index}"}
+                   "repo": evidence["repository"],
+                   "event_id": f"{story}-{index}", "trace_id": trace}
             process.extend([row, dict(row)])
+            process.extend([
+                {"event": "worker.launch.start", "story": story,
+                 "repo": evidence["repository"],
+                 "event_id": f"launch-start-{story}-{index}",
+                 "trace_id": trace, "span_id": f"span-{story}-{index}",
+                 "worker": "factory-worker"},
+                {"event": "worker.launch.end", "story": story,
+                 "repo": evidence["repository"],
+                 "event_id": f"launch-end-{story}-{index}",
+                 "trace_id": trace, "span_id": f"span-{story}-{index}",
+                 "worker": "factory-worker", "result": "LAUNCHED", "exit": 0},
+                {"event": "worker.failover", "story": story,
+                 "repo": evidence["repository"],
+                 "event_id": f"failover-{story}-{index}", "trace_id": trace,
+                 "worker": "factory-worker", "decision": "NOT_NEEDED",
+                 "result": "LAUNCHED"}])
+            process.append({"event": "worker.outcome", "story": story,
+                            "repo": evidence["repository"],
+                            "event_id": f"outcome-{story}-{index}",
+                            "trace_id": trace, "worker": "factory-worker",
+                            "result": "LAUNCHED", "exit": 0})
+    for story in evidence["stories"]:
+        pr, head = 100 + story["number"], f"{story['number']:040x}"
+        story["pull_request"] = pr
+        story["head"] = head
+        for outcome in process:
+            if (outcome.get("event") == "worker.outcome" and
+                    outcome.get("story") == story["number"]):
+                outcome["detail"] = json.dumps(
+                    {"pull_request": pr, "head": head})
+                process.append({"event": "delivery.pull-request.written",
+                                "story": story["number"],
+                                "repo": evidence["repository"],
+                                "trace_id": outcome["trace_id"],
+                                "pull_request": pr, "head": head,
+                                "event_id": f"delivery-{outcome['trace_id']}"})
+        process.append({"event": "review.outcome.published",
+                        "story": story["number"], "repo": evidence["repository"],
+                        "pull_request": pr,
+                        "head": head, "verdict": "approval",
+                        "event_id": f"review-{pr}-{head}"})
     telemetry = [
         {"metric": "engine.usage", "story": 20, "engine": "claude",
          "usage_reported": True, "usage": {"total_cost_usd": 4.0}},
@@ -58,7 +101,37 @@ def fixture():
     return evidence, process, telemetry, touches
 
 
+def remove_delivery_for_trace(values, trace):
+    values[1] = [
+        row for row in values[1]
+        if not (row.get("event") == "delivery.pull-request.written" and
+                row.get("trace_id") == trace)]
+
+
+def remove_failovers_for_trace(values, trace):
+    values[1] = [
+        row for row in values[1]
+        if not (row.get("event") == "worker.failover" and
+                row.get("trace_id") == trace)]
+
+
+def add_failover_unavailable(values, trace, start_id, story=20):
+    values[0].setdefault("evidence_unavailable", []).append({
+        "kind": "attempt-failover", "story": story,
+        "identity": f"{trace}:{start_id}",
+        "reason": "legacy routing evidence unavailable"})
+
+
 class Rung2ReportTests(unittest.TestCase):
+    def assert_order_independent_inconclusive(self, values, finding_text):
+        result = report.build(*values)
+        reversed_result = report.build(
+            values[0], list(reversed(values[1])), values[2], values[3])
+        self.assertEqual(result, reversed_result)
+        self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+        self.assertTrue(any(finding_text in finding for finding in result[
+            "measurement_integrity"]["findings"]))
+
     def test_reconstructs_failed_rung_without_hiding_recovery_or_cost_gap(self):
         result = report.build(*fixture())
         self.assertTrue(result["measurement_integrity"]["passed"])
@@ -79,6 +152,1522 @@ class Rung2ReportTests(unittest.TestCase):
         self.assertIn("acceptance decisions (1) and touch receipts (0) differ",
                       result["measurement_integrity"]["findings"])
 
+    def test_missing_terminal_worker_outcome_is_inconclusive(self):
+        values = list(fixture())
+        values[1] = [row for row in values[1]
+                     if not (row.get("event") == "worker.outcome" and
+                             row.get("trace_id") == "trace-20-0")]
+        result = report.build(*values)
+        self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+        self.assertEqual("unavailable", result["kpis"]["autonomy"]["status"])
+        self.assertEqual("unavailable",
+                         result["kpis"]["worker_attempts_retry_rate"]["status"])
+
+    def test_launched_outcome_without_launch_evidence_is_inconclusive(self):
+        values = list(fixture())
+        trace = "trace-20-0"
+        values[1] = [row for row in values[1]
+                     if not (row.get("trace_id") == trace and
+                             row.get("event") in
+                             ("worker.launch.start", "worker.launch.end",
+                              "worker.failover"))]
+        result = report.build(*values)
+        self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+        values[0]["evidence_unavailable"] = [{
+            "kind": "attempt-launches", "story": 20, "identity": trace,
+            "reason": "legacy launch evidence unavailable"}]
+        result = report.build(*values)
+        self.assertNotEqual("INCONCLUSIVE", result["rung_verdict"])
+        ledger = next(row for row in result["attempt_ledger"]
+                      if row["trace_id"] == trace)
+        self.assertEqual("legacy launch evidence unavailable",
+                         ledger["launch_evidence_unavailable"]["reason"])
+
+    def test_missing_attempt_ledger_is_inconclusive(self):
+        values = list(fixture())
+        values[1] = [row for row in values[1] if row.get("story") != 20]
+        result = report.build(*values)
+        self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+        self.assertIn("Story 20 has no durable attempt claim evidence",
+                      result["measurement_integrity"]["findings"])
+
+    def test_worker_attempt_trace_without_claim_is_inconclusive(self):
+        values = list(fixture())
+        values[1].extend([
+            {"event": "worker.launch.start", "story": 20,
+             "repo": values[0]["repository"], "trace_id": "orphan-trace",
+             "span_id": "orphan-span", "worker": "factory-worker",
+             "event_id": "orphan-start"},
+            {"event": "worker.launch.end", "story": 20,
+             "repo": values[0]["repository"], "trace_id": "orphan-trace",
+             "span_id": "orphan-span", "worker": "factory-worker",
+             "event_id": "orphan-end", "result": "LAUNCHED", "exit": 0},
+            {"event": "worker.outcome", "story": 20,
+             "repo": values[0]["repository"], "trace_id": "orphan-trace",
+             "worker": "factory-worker", "event_id": "orphan-outcome",
+             "result": "LAUNCHED", "exit": 0}])
+        result = report.build(*values)
+        self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+        self.assertTrue(any("has no matching durable claim" in finding
+                            for finding in
+                            result["measurement_integrity"]["findings"]))
+
+    def test_failover_trace_without_claim_is_inconclusive(self):
+        values = list(fixture())
+        values[1].append({
+            "event": "worker.failover", "story": 20,
+            "repo": values[0]["repository"], "trace_id": "orphan-failover",
+            "event_id": "orphan-failover-event", "worker": "factory-worker",
+            "decision": "EXHAUSTED", "result": "FAILED"})
+        result = report.build(*values)
+        self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+        self.assertTrue(any("orphan-failover" in finding and
+                            "no matching durable claim" in finding
+                            for finding in
+                            result["measurement_integrity"]["findings"]))
+
+    def test_malformed_failover_record_fails_deterministically(self):
+        for mutation, finding in (
+                ({"event_id": []}, "durable nonempty string event ID"),
+                ({"decision": "GARBAGE"}, "inconsistent decision and result"),
+                ({"decision": []}, "inconsistent decision and result"),
+                ({"result": {}}, "inconsistent decision and result"),
+                ({"worker": []}, "nonempty string worker identity")):
+            with self.subTest(mutation=mutation):
+                values = list(fixture())
+                values[1].append({
+                    "event": "worker.failover", "story": 20,
+                    "repo": values[0]["repository"],
+                    "trace_id": "trace-20-0", "event_id": "failover-event",
+                    "worker": "factory-worker", "decision": "NOT_NEEDED",
+                    "result": "LAUNCHED", **mutation})
+                self.assert_order_independent_inconclusive(values, finding)
+
+    def test_malformed_process_event_name_fails_deterministically(self):
+        values = list(fixture())
+        values[1].append({
+            "event": [], "story": 20, "repo": values[0]["repository"],
+            "trace_id": "trace-20-0", "event_id": "malformed-event-name"})
+        self.assert_order_independent_inconclusive(
+            values, "nonempty string event name")
+
+    def test_malformed_process_story_precedes_event_scope_check(self):
+        for story in ([], "20"):
+            with self.subTest(story=story):
+                values = list(fixture())
+                values[1].append({
+                    "event": [], "story": story,
+                    "repo": values[0]["repository"],
+                    "trace_id": "trace-20-0",
+                    "event_id": "malformed-story-and-event"})
+                self.assert_order_independent_inconclusive(
+                    values, "process Story identity must be an integer")
+
+    def test_malformed_foreign_process_event_is_out_of_scope(self):
+        values = list(fixture())
+        expected = report.build(*values)
+        values[1].append({
+            "event": [], "story": 999, "repo": "other/product",
+            "trace_id": [], "event_id": "foreign-malformed-event"})
+        result = report.build(*values)
+        reversed_result = report.build(
+            values[0], list(reversed(values[1])), values[2], values[3])
+        self.assertEqual(expected, result)
+        self.assertEqual(expected, reversed_result)
+
+    def test_malformed_evidence_unavailable_container_fails_closed(self):
+        for malformed in (None, {}, [None], [{"kind": "attempt-failover"}]):
+            with self.subTest(malformed=malformed):
+                values = list(fixture())
+                values[0]["evidence_unavailable"] = malformed
+                result = report.build(*values)
+                reversed_result = report.build(
+                    values[0], list(reversed(values[1])), values[2], values[3])
+                self.assertEqual(result, reversed_result)
+                self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+                self.assertTrue(any(
+                    "evidence_unavailable must" in finding
+                    for finding in result["measurement_integrity"]["findings"]))
+
+    def test_claim_id_trace_exception_applies_only_to_legacy_claim(self):
+        values = list(fixture())
+        values[1].append({
+            "event": "worker.outcome", "story": 20,
+            "repo": values[0]["repository"], "trace_id": [],
+            "claim_event_id": "20-0", "event_id": "malformed-extra-outcome",
+            "worker": "factory-worker", "result": "LAUNCHED", "exit": 0})
+        self.assert_order_independent_inconclusive(
+            values, "nonempty string attempt trace ID")
+
+    def test_failover_worker_must_match_claim_launch(self):
+        values = list(fixture())
+        values[1].append({
+            "event": "worker.failover", "story": 20,
+            "repo": values[0]["repository"], "trace_id": "trace-20-0",
+            "event_id": "mismatched-failover-worker", "worker": "other",
+            "decision": "NOT_NEEDED", "result": "LAUNCHED"})
+        self.assert_order_independent_inconclusive(
+            values, "needs exactly one matching worker launch")
+
+    def test_every_launch_requires_a_failover_decision_or_unavailable_record(self):
+        values = list(fixture())
+        trace = "trace-20-0"
+        values[1] = [
+            row for row in values[1]
+            if not (row.get("event") == "worker.failover"
+                    and row.get("trace_id") == trace)]
+        self.assert_order_independent_inconclusive(
+            values, "exactly one failover decision or evidence-unavailable record")
+        values[0]["evidence_unavailable"] = [{
+            "kind": "attempt-failover", "story": 20,
+            "identity": f"{trace}:launch-start-20-0",
+            "reason": "legacy routing evidence unavailable"}]
+        result = report.build(*values)
+        self.assertNotEqual("INCONCLUSIVE", result["rung_verdict"])
+        launch = next(
+            row for row in result["attempt_ledger"]
+            if row["trace_id"] == trace)["launch_ledger"][0]
+        self.assertEqual(
+            "legacy routing evidence unavailable",
+            launch["failover_evidence_unavailable"]["reason"])
+
+    def test_failover_result_must_match_worker_launch_end(self):
+        values = list(fixture())
+        trace = "trace-20-0"
+        launch_end = next(
+            row for row in values[1]
+            if row.get("event") == "worker.launch.end"
+            and row.get("trace_id") == trace)
+        launch_end.update({
+            "result": "AMBIGUOUS", "exit": None,
+            "detail": "worker acknowledgement was unverifiable"})
+        values[1].extend([
+            {"event": "worker.failover", "story": 20,
+             "repo": values[0]["repository"], "trace_id": trace,
+             "event_id": "unsafe-fallback", "worker": "factory-worker",
+             "decision": "FELL_BACK", "result": "FAILED"},
+            {"event": "worker.launch.start", "story": 20,
+             "repo": values[0]["repository"], "trace_id": trace,
+             "event_id": "fallback-start", "span_id": "fallback-span",
+             "worker": "fallback-worker"},
+            {"event": "worker.launch.end", "story": 20,
+             "repo": values[0]["repository"], "trace_id": trace,
+             "event_id": "fallback-end", "span_id": "fallback-span",
+             "worker": "fallback-worker", "result": "LAUNCHED", "exit": 0},
+            {"event": "worker.failover", "story": 20,
+             "repo": values[0]["repository"], "trace_id": trace,
+             "event_id": "fallback-accepted", "worker": "fallback-worker",
+             "decision": "NOT_NEEDED", "result": "LAUNCHED"}])
+        outcome = next(
+            row for row in values[1]
+            if row.get("event") == "worker.outcome"
+            and row.get("trace_id") == trace)
+        outcome["worker"] = "fallback-worker"
+        self.assert_order_independent_inconclusive(
+            values, "must match exactly one terminal launch result")
+
+    def test_fell_back_decision_requires_launch_of_named_next_worker(self):
+        values = list(fixture())
+        trace = "trace-20-0"
+        launch_end = next(
+            row for row in values[1]
+            if row.get("event") == "worker.launch.end"
+            and row.get("trace_id") == trace)
+        launch_end.update({
+            "result": "FAILED", "exit": 1, "detail": "definite failure"})
+        failover = next(
+            row for row in values[1]
+            if row.get("event") == "worker.failover"
+            and row.get("trace_id") == trace)
+        failover.update({
+            "decision": "FELL_BACK", "result": "FAILED",
+            "next": "missing-worker"})
+        values[1].extend([
+            {"event": "worker.launch.start", "story": 20,
+             "repo": values[0]["repository"], "trace_id": trace,
+             "event_id": "fallback-start", "span_id": "fallback-span",
+             "worker": "fallback-worker"},
+            {"event": "worker.launch.end", "story": 20,
+             "repo": values[0]["repository"], "trace_id": trace,
+             "event_id": "fallback-end", "span_id": "fallback-span",
+             "worker": "fallback-worker", "result": "LAUNCHED", "exit": 0},
+            {"event": "worker.failover", "story": 20,
+             "repo": values[0]["repository"], "trace_id": trace,
+             "event_id": "fallback-accepted", "worker": "fallback-worker",
+             "decision": "NOT_NEEDED", "result": "LAUNCHED"}])
+        outcome = next(
+            row for row in values[1]
+            if row.get("event") == "worker.outcome"
+            and row.get("trace_id") == trace)
+        outcome["worker"] = "fallback-worker"
+        self.assert_order_independent_inconclusive(
+            values, "needs exactly one launch of its nonempty next-worker identity")
+
+    def test_failover_route_must_be_one_acyclic_terminal_chain(self):
+        values = list(fixture())
+        trace = "trace-20-0"
+        start = next(
+            row for row in values[1]
+            if row.get("event") == "worker.launch.start"
+            and row.get("trace_id") == trace)
+        end = next(
+            row for row in values[1]
+            if row.get("event") == "worker.launch.end"
+            and row.get("trace_id") == trace)
+        failover = next(
+            row for row in values[1]
+            if row.get("event") == "worker.failover"
+            and row.get("trace_id") == trace)
+        start["worker"] = "worker-a"
+        end.update({
+            "worker": "worker-a", "result": "FAILED", "exit": 1,
+            "detail": "worker A failed definitely"})
+        failover.update({
+            "worker": "worker-a", "decision": "FELL_BACK",
+            "result": "FAILED", "next": "worker-b"})
+        values[1].extend([
+            {"event": "worker.launch.start", "story": 20,
+             "repo": values[0]["repository"], "trace_id": trace,
+             "event_id": "cycle-start-b", "span_id": "cycle-span-b",
+             "worker": "worker-b"},
+            {"event": "worker.launch.end", "story": 20,
+             "repo": values[0]["repository"], "trace_id": trace,
+             "event_id": "cycle-end-b", "span_id": "cycle-span-b",
+             "worker": "worker-b", "result": "FAILED", "exit": 1,
+             "detail": "worker B failed definitely"},
+            {"event": "worker.failover", "story": 20,
+             "repo": values[0]["repository"], "trace_id": trace,
+             "event_id": "cycle-route-b", "worker": "worker-b",
+             "decision": "FELL_BACK", "result": "FAILED",
+             "next": "worker-a"}])
+        outcome = next(
+            row for row in values[1]
+            if row.get("event") == "worker.outcome"
+            and row.get("trace_id") == trace)
+        outcome.update({
+            "worker": None, "result": "NO_WORKER_LAUNCHED", "exit": None,
+            "detail": "every eligible worker failed definitely"})
+        remove_delivery_for_trace(values, trace)
+        self.assert_order_independent_inconclusive(
+            values, "needs one acyclic failover chain")
+
+    def test_unhashable_fallback_target_fails_closed(self):
+        values = list(fixture())
+        trace = "trace-20-0"
+        launch_end = next(
+            row for row in values[1]
+            if row.get("event") == "worker.launch.end"
+            and row.get("trace_id") == trace)
+        launch_end.update({
+            "result": "FAILED", "exit": 1, "detail": "definite failure"})
+        failover = next(
+            row for row in values[1]
+            if row.get("event") == "worker.failover"
+            and row.get("trace_id") == trace)
+        failover.update({
+            "decision": "FELL_BACK", "result": "FAILED", "next": []})
+        outcome = next(
+            row for row in values[1]
+            if row.get("event") == "worker.outcome"
+            and row.get("trace_id") == trace)
+        outcome.update({
+            "worker": None, "result": "NO_WORKER_LAUNCHED", "exit": None,
+            "detail": "every eligible worker failed definitely"})
+        remove_delivery_for_trace(values, trace)
+        self.assert_order_independent_inconclusive(
+            values, "nonempty next-worker identity")
+
+    def test_terminal_failover_cannot_name_a_next_worker(self):
+        values = list(fixture())
+        failover = next(
+            row for row in values[1]
+            if row.get("event") == "worker.failover")
+        failover["next"] = "ghost-worker"
+        self.assert_order_independent_inconclusive(
+            values, "cannot name a next worker")
+
+    def test_conflicting_failover_event_payloads_fail_deterministically(self):
+        values = list(fixture())
+        common = {
+            "event": "worker.failover", "story": 20,
+            "repo": values[0]["repository"], "trace_id": "trace-20-0",
+            "event_id": "reused-failover-event", "worker": "factory-worker"}
+        values[1].extend([
+            {**common, "decision": "NOT_NEEDED", "result": "LAUNCHED"},
+            {**common, "decision": "EXHAUSTED", "result": "FAILED"}])
+        self.assert_order_independent_inconclusive(
+            values, "identifies conflicting producer payloads")
+
+    def test_identical_failover_event_payload_may_repeat_across_traces(self):
+        values = list(fixture())
+        for trace in ("trace-20-0", "trace-20-1"):
+            failover = next(
+                row for row in values[1]
+                if row.get("event") == "worker.failover"
+                and row.get("trace_id") == trace)
+            failover["event_id"] = "repeated-identical-failover"
+        first = report.build(*values)
+        second = report.build(
+            values[0], list(reversed(values[1])), values[2], values[3])
+        self.assertEqual(first, second)
+        self.assertNotEqual("INCONCLUSIVE", first["rung_verdict"])
+
+    def test_delivery_trace_without_claim_is_inconclusive(self):
+        values = list(fixture())
+        values[1].extend([
+            {"event": "delivery.pull-request.written", "story": 20,
+             "repo": values[0]["repository"], "trace_id": "orphan-delivery",
+             "pull_request": 999, "head": "f" * 40,
+             "event_id": "orphan-delivery-event"},
+            {"event": "review.outcome.published", "story": 20,
+             "repo": values[0]["repository"], "pull_request": 999,
+             "head": "f" * 40, "verdict": "approval",
+             "event_id": "orphan-delivery-review"}])
+        result = report.build(*values)
+        self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+        self.assertTrue(any("orphan-delivery" in finding and
+                            "no matching durable claim" in finding
+                            for finding in
+                            result["measurement_integrity"]["findings"]))
+
+    def test_explicit_terminal_evidence_unavailable_completes_ledger(self):
+        values = list(fixture())
+        remove_delivery_for_trace(values, "trace-20-0")
+        values[1] = [row for row in values[1]
+                     if not (row.get("event") == "worker.outcome" and
+                             row.get("trace_id") == "trace-20-0")]
+        values[0]["evidence_unavailable"] = [{
+            "kind": "attempt-terminal-outcome", "story": 20,
+            "identity": "trace-20-0", "reason": "legacy log unavailable"}]
+        result = report.build(*values)
+        self.assertNotEqual("INCONCLUSIVE", result["rung_verdict"])
+
+    def test_overlapping_fragments_deduplicate_terminal_outcome_by_trace_and_event(self):
+        values = list(fixture())
+        outcome = next(row for row in values[1]
+                       if row.get("event") == "worker.outcome")
+        values[1].append(dict(outcome))
+        result = report.build(*values)
+        self.assertNotEqual("INCONCLUSIVE", result["rung_verdict"])
+        self.assertEqual(11, len(result["attempt_ledger"]))
+
+    def test_conflicting_terminal_copies_fail_deterministically(self):
+        values = list(fixture())
+        outcome = next(row for row in values[1]
+                       if row.get("event") == "worker.outcome")
+        conflict = dict(outcome)
+        conflict.update({"result": "FAILED", "exit": 1,
+                         "recovery_ref": "durable-recovery"})
+        forward = list(values[1]) + [conflict]
+        reverse = list(reversed(forward))
+        first = report.build(values[0], forward, values[2], values[3])
+        second = report.build(values[0], reverse, values[2], values[3])
+        self.assertEqual(first, second)
+        self.assertEqual("INCONCLUSIVE", first["rung_verdict"])
+        self.assertTrue(any("conflicting durable copies" in finding
+                            for finding in
+                            first["measurement_integrity"]["findings"]))
+
+    def test_terminal_outcome_requires_recognized_consistent_result(self):
+        for mutation in ({"result": ""},
+                         {"result": []},
+                         {"result": "UNKNOWN"},
+                         {"result": "LAUNCHED", "exit": 1},
+                         {"result": "LAUNCHED", "exit": False},
+                         {"result": "FAILED", "exit": "1"},
+                         {"result": "AMBIGUOUS", "exit": 1},
+                         {"result": "TERMINAL_FAILURE", "exit": None}):
+            with self.subTest(mutation=mutation):
+                values = list(fixture())
+                outcome = next(row for row in values[1]
+                               if row.get("event") == "worker.outcome")
+                outcome.update(mutation)
+                result = report.build(*values)
+                self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+                self.assertTrue(any(
+                    "recognized result with a consistent worker and exit status"
+                    in finding for finding in
+                    result["measurement_integrity"]["findings"]))
+
+    def test_terminal_outcome_requires_string_event_id(self):
+        values = list(fixture())
+        outcome = next(row for row in values[1]
+                       if row.get("event") == "worker.outcome")
+        outcome["event_id"] = 123
+        result = report.build(*values)
+        self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+        self.assertTrue(any("nonempty string event ID" in finding
+                            for finding in
+                            result["measurement_integrity"]["findings"]))
+
+    def test_failed_terminal_outcome_requires_nonzero_integer_exit(self):
+        values = list(fixture())
+        outcome = next(row for row in values[1]
+                       if row.get("event") == "worker.outcome")
+        outcome.update({"result": "FAILED", "exit": None,
+                        "diagnostic_ref": "durable failure"})
+        result = report.build(*values)
+        self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+        self.assertTrue(any("recognized result with a consistent worker" in finding
+                            for finding in
+                            result["measurement_integrity"]["findings"]))
+
+    def test_attempt_trace_requires_nonempty_string_identity(self):
+        for invalid in (123, "   "):
+            with self.subTest(invalid=invalid):
+                values = list(fixture())
+                trace = "trace-20-0"
+                for row in values[1]:
+                    if row.get("trace_id") == trace:
+                        row["trace_id"] = invalid
+                result = report.build(*values)
+                self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+                self.assertTrue(any("nonempty string attempt trace ID" in finding
+                                    for finding in result[
+                                        "measurement_integrity"]["findings"]))
+
+    def test_unhashable_claim_event_id_fails_closed(self):
+        values = list(fixture())
+        claim = next(row for row in values[1]
+                     if row.get("event") == "story.claimed")
+        claim["event_id"] = []
+        result = report.build(*values)
+        reversed_result = report.build(
+            values[0], list(reversed(values[1])), values[2], values[3])
+        self.assertEqual(result, reversed_result)
+        self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+        self.assertTrue(any("durable nonempty string event ID" in finding
+                            for finding in result[
+                                "measurement_integrity"]["findings"]))
+
+    def test_unhashable_claim_trace_id_fails_closed(self):
+        values = list(fixture())
+        claim = next(row for row in values[1]
+                     if row.get("event") == "story.claimed")
+        claim["trace_id"] = []
+        self.assert_order_independent_inconclusive(
+            values, "nonempty string attempt trace ID")
+
+    def test_unhashable_terminal_outcome_event_id_fails_closed(self):
+        values = list(fixture())
+        outcome = next(row for row in values[1]
+                       if row.get("event") == "worker.outcome")
+        outcome["event_id"] = []
+        self.assert_order_independent_inconclusive(
+            values, "terminal worker outcome for claim")
+
+    def test_unhashable_launch_event_id_fails_closed(self):
+        values = list(fixture())
+        launch = next(row for row in values[1]
+                      if row.get("event") == "worker.launch.start")
+        launch["event_id"] = []
+        self.assert_order_independent_inconclusive(
+            values, "needs a durable string event ID")
+
+    def test_orphan_attempt_event_requires_valid_trace_identity(self):
+        for invalid in (None, 123, "   "):
+            with self.subTest(invalid=invalid):
+                values = list(fixture())
+                values[1].append({
+                    "event": "worker.failover", "story": 20,
+                    "repo": values[0]["repository"], "trace_id": invalid,
+                    "event_id": "uncorrelated-failover", "worker": "worker-x",
+                    "decision": "EXHAUSTED", "result": "FAILED"})
+                result = report.build(*values)
+                self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+                self.assertTrue(any("worker.failover" in finding and
+                                    "nonempty string attempt trace ID" in finding
+                                    for finding in result[
+                                        "measurement_integrity"]["findings"]))
+
+    def test_no_eligible_worker_uses_terminal_detail_as_diagnostic(self):
+        values = list(fixture())
+        trace = "trace-20-0"
+        outcome = next(row for row in values[1]
+                       if row.get("event") == "worker.outcome" and
+                       row.get("trace_id") == trace)
+        outcome.update({"result": "NO_ELIGIBLE_WORKER", "worker": None,
+                        "exit": None,
+                        "detail": "no configured worker is capable and healthy"})
+        remove_delivery_for_trace(values, trace)
+        values[1] = [row for row in values[1]
+                     if not (row.get("trace_id") == trace and
+                             row.get("event") in
+                             ("worker.launch.start", "worker.launch.end",
+                              "worker.failover"))]
+        result = report.build(*values)
+        self.assertNotEqual("INCONCLUSIVE", result["rung_verdict"])
+        ledger = next(row for row in result["attempt_ledger"]
+                      if row["trace_id"] == trace)
+        self.assertEqual("no configured worker is capable and healthy",
+                         ledger["diagnostic"])
+
+    def test_exhausted_worker_outcome_requires_launch_evidence(self):
+        values = list(fixture())
+        trace = "trace-20-0"
+        outcome = next(row for row in values[1]
+                       if row.get("event") == "worker.outcome" and
+                       row.get("trace_id") == trace)
+        outcome.update({"result": "NO_WORKER_LAUNCHED", "worker": None,
+                        "exit": None, "diagnostic_ref": "worker-exhaustion"})
+        remove_delivery_for_trace(values, trace)
+        values[1] = [row for row in values[1]
+                     if not (row.get("trace_id") == trace and
+                             row.get("event") in
+                             ("worker.launch.start", "worker.launch.end",
+                              "worker.failover"))]
+        result = report.build(*values)
+        self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+        self.assertTrue(any("needs durable launch evidence" in finding
+                            for finding in
+                            result["measurement_integrity"]["findings"]))
+
+        values[0]["evidence_unavailable"] = [{
+            "kind": "attempt-launches", "story": 20, "identity": trace,
+            "reason": "legacy launch records unavailable"}]
+        result = report.build(*values)
+        self.assertNotEqual("INCONCLUSIVE", result["rung_verdict"])
+
+    def test_attempt_ledger_is_independent_of_fragment_order(self):
+        values = list(fixture())
+        first = report.build(*values)
+        reversed_process = list(reversed(values[1]))
+        second = report.build(values[0], reversed_process, values[2], values[3])
+        self.assertEqual(first, second)
+
+    def test_conflicting_claim_copies_fail_deterministically(self):
+        values = list(fixture())
+        claim = next(row for row in values[1]
+                     if row.get("event") == "story.claimed")
+        conflict = dict(claim)
+        conflict["trace_id"] = "conflicting-trace"
+        forward = list(values[1]) + [conflict]
+        reverse = list(reversed(forward))
+        first = report.build(values[0], forward, values[2], values[3])
+        second = report.build(values[0], reverse, values[2], values[3])
+        self.assertEqual(first, second)
+        self.assertEqual("INCONCLUSIVE", first["rung_verdict"])
+        self.assertTrue(any("conflicting trace identities" in finding
+                            for finding in
+                            first["measurement_integrity"]["findings"]))
+
+    def test_same_trace_claim_payload_conflict_fails_deterministically(self):
+        values = list(fixture())
+        claim = next(row for row in values[1]
+                     if row.get("event") == "story.claimed")
+        conflict = dict(claim)
+        conflict["attempt"] = 99
+        values[1].append(conflict)
+        self.assert_order_independent_inconclusive(
+            values, "has conflicting durable copies")
+
+    def test_claim_event_id_must_be_nonempty_string(self):
+        for invalid in ("", 7):
+            with self.subTest(invalid=invalid):
+                values = list(fixture())
+                for row in values[1]:
+                    if (row.get("event") == "story.claimed" and
+                            row.get("trace_id") == "trace-20-0"):
+                        row["event_id"] = invalid
+                result = report.build(*values)
+                self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+                self.assertTrue(any("nonempty string event ID" in finding
+                                    for finding in
+                                    result["measurement_integrity"]["findings"]))
+
+    def test_one_attempt_trace_cannot_have_multiple_claim_ids(self):
+        values = list(fixture())
+        claim = next(row for row in values[1]
+                     if row.get("event") == "story.claimed")
+        duplicate = dict(claim)
+        duplicate["event_id"] = "different-claim-id"
+        values[1].append(duplicate)
+        result = report.build(*values)
+        self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+        self.assertTrue(any("has multiple claim IDs" in finding
+                            for finding in
+                            result["measurement_integrity"]["findings"]))
+        self.assertEqual(
+            1, sum(row["trace_id"] == claim["trace_id"]
+                   for row in result["attempt_ledger"]))
+
+    def test_produced_pr_without_exact_head_review_is_inconclusive(self):
+        values = list(fixture())
+        values[1] = [row for row in values[1]
+                     if not (row.get("event") == "review.outcome.published" and
+                             row.get("story") == 20)]
+        result = report.build(*values)
+        self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+        self.assertFalse(result["qualification_series"]["eligible"])
+        self.assertEqual(0, result["qualification_series"]["pass_samples"])
+        self.assertEqual(0, result["qualification_series"]["fail_samples"])
+        self.assertIn("| Attempts | unavailable |", report.render(result))
+
+    def test_mutable_head_name_is_not_exact_head_evidence(self):
+        values = list(fixture())
+        story = values[0]["stories"][0]
+        old_head = story["head"]
+        story["head"] = "main"
+        for row in values[1]:
+            if row.get("pull_request") == story["pull_request"] and row.get("head") == old_head:
+                row["head"] = "main"
+        result = report.build(*values)
+        self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+        self.assertTrue(any("needs a full commit SHA" in finding for finding in
+                            result["measurement_integrity"]["findings"]))
+
+    def test_null_object_id_is_not_exact_head_evidence(self):
+        values = list(fixture())
+        story = values[0]["stories"][0]
+        old_head = story["head"]
+        story["head"] = "0" * 40
+        for row in values[1]:
+            if row.get("pull_request") == story["pull_request"] and row.get("head") == old_head:
+                row["head"] = "0" * 40
+        result = report.build(*values)
+        self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+
+    def test_commit_head_must_be_a_string(self):
+        values = list(fixture())
+        story = values[0]["stories"][0]
+        old_head = story["head"]
+        numeric_head = int("1" * 40)
+        story["head"] = numeric_head
+        for row in values[1]:
+            if row.get("story") != story["number"]:
+                continue
+            if row.get("head") == old_head:
+                row["head"] = numeric_head
+            if row.get("event") == "worker.outcome":
+                row["detail"] = json.dumps({
+                    "pull_request": story["pull_request"],
+                    "head": numeric_head})
+        result = report.build(*values)
+        self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+        self.assertTrue(any("full commit SHA" in finding for finding in
+                            result["measurement_integrity"]["findings"]))
+
+    def test_pull_request_identity_must_be_positive_integer(self):
+        for invalid in ("not-a-pr", -1, True):
+            with self.subTest(invalid=invalid):
+                values = list(fixture())
+                story = values[0]["stories"][0]
+                old_pr = story["pull_request"]
+                story["pull_request"] = invalid
+                for row in values[1]:
+                    if row.get("pull_request") == old_pr:
+                        row["pull_request"] = invalid
+                result = report.build(*values)
+                self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+                self.assertTrue(any("positive integer PR number" in finding
+                                    for finding in
+                                    result["measurement_integrity"]["findings"]))
+
+    def test_falsy_declared_pr_is_rejected_even_with_valid_process_evidence(self):
+        for invalid in (0, False):
+            with self.subTest(invalid=invalid):
+                values = list(fixture())
+                values[0]["stories"][0]["pull_request"] = invalid
+                result = report.build(*values)
+                self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+                self.assertTrue(any("declares an invalid pull-request" in finding
+                                    for finding in
+                                    result["measurement_integrity"]["findings"]))
+
+    def test_unhashable_declared_delivery_identity_is_inconclusive(self):
+        for field, invalid in (("pull_request", []), ("head", {})):
+            with self.subTest(field=field):
+                values = list(fixture())
+                values[0]["stories"][0][field] = invalid
+                result = report.build(*values)
+                self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+                self.assertTrue(any("declares an invalid" in finding
+                                    for finding in result[
+                                        "measurement_integrity"]["findings"]))
+
+    def test_foreign_repository_cannot_supply_delivery_or_review_evidence(self):
+        values = list(fixture())
+        for row in values[1]:
+            if (row.get("story") == 20 and row.get("event") in
+                    ("delivery.pull-request.written", "review.outcome.published")):
+                row["repo"] = "other/product"
+        result = report.build(*values)
+        self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+        self.assertTrue(any("production event" in finding for finding in
+                            result["measurement_integrity"]["findings"]))
+
+    def test_foreign_repository_cannot_supply_attempt_evidence(self):
+        values = list(fixture())
+        for row in values[1]:
+            if (row.get("story") == 20 and row.get("event") in
+                    ("story.claimed", "worker.launch.start",
+                     "worker.launch.end", "worker.outcome")):
+                row["repo"] = "other/product"
+        result = report.build(*values)
+        self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+        self.assertIn("Story 20 has no durable attempt claim evidence",
+                      result["measurement_integrity"]["findings"])
+        self.assertFalse(any(row["story"] == 20
+                             for row in result["attempt_ledger"]))
+
+    def test_missing_repository_cannot_scope_legacy_evidence(self):
+        values = list(fixture())
+        values[0].pop("repository")
+        for row in values[1]:
+            row.pop("repo", None)
+        result = report.build(*values)
+        self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+        self.assertEqual([], result["attempt_ledger"])
+        self.assertEqual([], result["review_ledger"])
+        self.assertIn(
+            "qualification evidence needs a valid measured owner/name repository",
+            result["measurement_integrity"]["findings"])
+
+    def test_declared_delivery_identity_must_belong_to_same_story(self):
+        values = list(fixture())
+        story_20, story_21 = values[0]["stories"][:2]
+        story_20["pull_request"] = story_21["pull_request"]
+        story_20["head"] = story_21["head"]
+        result = report.build(*values)
+        self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+        self.assertTrue(any("production event" in finding for finding in
+                            result["measurement_integrity"]["findings"]))
+        declared = next(row for row in result["review_ledger"]
+                        if row["story"] == 20 and
+                        row["pull_request"] == story_21["pull_request"])
+        self.assertIsNone(declared["review_outcome"])
+
+    def test_merged_story_requires_durable_delivered_head(self):
+        values = list(fixture())
+        story = values[0]["stories"][0]
+        story.pop("pull_request")
+        story.pop("head")
+        values[1] = [row for row in values[1]
+                     if not (row.get("story") == story["number"] and
+                             row.get("event") in
+                             ("delivery.pull-request.written",
+                              "review.outcome.published"))]
+        for row in values[1]:
+            if row.get("story") == story["number"] and row.get("event") == "worker.outcome":
+                row.update({"result": "FAILED", "exit": 1,
+                            "diagnostic_ref": "durable-diagnostic"})
+        result = report.build(*values)
+        self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+        self.assertIn("merged Story 20 lacks a durable PR/head production event",
+                      result["measurement_integrity"]["findings"])
+
+    def test_declared_pr_without_production_head_is_inconclusive(self):
+        values = list(fixture())
+        values[1] = [row for row in values[1]
+                     if not (row.get("event") == "delivery.pull-request.written"
+                             and row.get("story") == 20)]
+        result = report.build(*values)
+        self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+        self.assertTrue(any("production event" in finding for finding in
+                            result["measurement_integrity"]["findings"]))
+
+    def test_failed_attempt_requires_durable_diagnostic_or_unavailable_record(self):
+        values = list(fixture())
+        outcome = next(row for row in values[1]
+                       if row.get("event") == "worker.outcome")
+        outcome.update({"result": "FAILED", "exit": 1})
+        trace = outcome["trace_id"]
+        values[1] = [row for row in values[1]
+                     if not (row.get("trace_id") == trace and row.get("event") in
+                             ("worker.launch.start", "worker.launch.end",
+                              "worker.failover"))]
+        remove_delivery_for_trace(values, trace)
+        values[0]["evidence_unavailable"] = [{
+            "kind": "attempt-launches", "story": outcome["story"],
+            "identity": trace, "reason": "legacy launch log missing"}]
+        result = report.build(*values)
+        self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+        values[0]["evidence_unavailable"].append({
+            "kind": "attempt-diagnostics", "story": outcome["story"],
+            "identity": outcome["trace_id"], "reason": "legacy log missing"})
+        result = report.build(*values)
+        self.assertNotEqual("INCONCLUSIVE", result["rung_verdict"])
+        ledger = next(row for row in result["attempt_ledger"]
+                      if row["trace_id"] == outcome["trace_id"])
+        self.assertEqual("legacy log missing",
+                         ledger["diagnostic_evidence_unavailable"]["reason"])
+
+    def test_failed_worker_outcome_requires_launch_evidence(self):
+        values = list(fixture())
+        outcome = next(row for row in values[1]
+                       if row.get("event") == "worker.outcome")
+        outcome.update({"result": "FAILED", "exit": 1,
+                        "recovery_ref": "durable-recovery"})
+        trace = outcome["trace_id"]
+        remove_delivery_for_trace(values, trace)
+        values[1] = [
+            row for row in values[1]
+            if not (row.get("trace_id") == trace and row.get("event") in
+                    ("worker.launch.start", "worker.launch.end",
+                     "worker.failover"))]
+        result = report.build(*values)
+        self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+        self.assertTrue(any("durable launch evidence" in finding
+                            for finding in
+                            result["measurement_integrity"]["findings"]))
+        values[0]["evidence_unavailable"] = [{
+            "kind": "attempt-launches", "story": outcome["story"],
+            "identity": trace, "reason": "legacy launch evidence unavailable"}]
+        result = report.build(*values)
+        self.assertNotEqual("INCONCLUSIVE", result["rung_verdict"])
+
+    def test_failed_attempt_accepts_matching_durable_launch_diagnostic(self):
+        values = list(fixture())
+        outcome = next(row for row in values[1]
+                       if row.get("event") == "worker.outcome")
+        outcome.update({"result": "FAILED", "exit": 1,
+                        "detail": "generic summary is not evidence"})
+        launch_end = next(
+            row for row in values[1]
+            if row.get("event") == "worker.launch.end" and
+            row.get("trace_id") == outcome["trace_id"])
+        launch_end.update({"event_id": "launch-failure-20", "result": "FAILED",
+                           "exit": 1, "stderr": "durable diagnostic"})
+        remove_failovers_for_trace(values, outcome["trace_id"])
+        add_failover_unavailable(
+            values, outcome["trace_id"], "launch-start-20-0")
+        remove_delivery_for_trace(values, outcome["trace_id"])
+        result = report.build(*values)
+        self.assertNotEqual("INCONCLUSIVE", result["rung_verdict"])
+        ledger = next(row for row in result["attempt_ledger"]
+                      if row["trace_id"] == outcome["trace_id"])
+        self.assertEqual("launch-failure-20",
+                         ledger["diagnostic"][0]["event_id"])
+
+    def test_failed_launch_end_requires_matching_durable_start(self):
+        values = list(fixture())
+        outcome = next(row for row in values[1]
+                       if row.get("event") == "worker.outcome")
+        outcome.update({"result": "FAILED", "exit": 1})
+        trace = outcome["trace_id"]
+        values[1] = [
+            row for row in values[1]
+            if not (row.get("event") == "worker.launch.start" and
+                    row.get("trace_id") == trace)]
+        launch_end = next(
+            row for row in values[1]
+            if row.get("event") == "worker.launch.end" and
+            row.get("trace_id") == trace)
+        launch_end.update({"result": "FAILED", "exit": 1,
+                           "stderr": "durable diagnostic"})
+        result = report.build(*values)
+        self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+        self.assertTrue(any("matching durable launch start" in finding
+                            for finding in
+                            result["measurement_integrity"]["findings"]))
+
+    def test_every_failed_launch_requires_its_own_diagnostic(self):
+        values = list(fixture())
+        outcome = next(row for row in values[1]
+                       if row.get("event") == "worker.outcome")
+        outcome.update({"result": "FAILED", "exit": 1})
+        trace = outcome["trace_id"]
+        original_end = next(
+            row for row in values[1]
+            if row.get("event") == "worker.launch.end" and
+            row.get("trace_id") == trace)
+        original_end.update({"result": "FAILED", "exit": 1,
+                             "stderr": "original worker failed"})
+        remove_failovers_for_trace(values, trace)
+        add_failover_unavailable(values, trace, "launch-start-20-0")
+        remove_delivery_for_trace(values, trace)
+        for index in (1, 2):
+            values[1].append({
+                "event": "worker.launch.start", "story": outcome["story"],
+                "repo": values[0]["repository"],
+                "trace_id": outcome["trace_id"], "event_id": f"start-{index}",
+                "span_id": f"span-{index}", "worker": f"worker-{index}"})
+            add_failover_unavailable(values, trace, f"start-{index}")
+        values[1].append({
+            "event": "worker.launch.end", "story": outcome["story"],
+            "repo": values[0]["repository"],
+            "trace_id": outcome["trace_id"], "event_id": "end-1",
+            "span_id": "span-1", "worker": "worker-1",
+            "result": "FAILED", "exit": 1, "stderr": "failed"})
+        result = report.build(*values)
+        self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+        values[0]["evidence_unavailable"].append({
+            "kind": "attempt-launch-diagnostics", "story": outcome["story"],
+            "identity": f"{outcome['trace_id']}:start-2",
+            "reason": "second launch log unavailable"})
+        result = report.build(*values)
+        self.assertNotEqual("INCONCLUSIVE", result["rung_verdict"])
+        ledger = next(row for row in result["attempt_ledger"]
+                      if row["trace_id"] == outcome["trace_id"])
+        unavailable = next(row for row in ledger["launch_ledger"]
+                           if row["start"]["event_id"] == "start-2")
+        self.assertEqual("second launch log unavailable",
+                         unavailable["evidence_unavailable"]["reason"])
+
+    def test_failed_launch_diagnostics_match_worker_with_shared_span(self):
+        values = list(fixture())
+        outcome = next(row for row in values[1]
+                       if row.get("event") == "worker.outcome")
+        outcome.update({"result": "FAILED", "exit": 1})
+        trace = outcome["trace_id"]
+        original_end = next(
+            row for row in values[1]
+            if row.get("event") == "worker.launch.end" and
+            row.get("trace_id") == trace)
+        original_end.update({"result": "FAILED", "exit": 1,
+                             "stderr": "original worker failed"})
+        remove_failovers_for_trace(values, trace)
+        add_failover_unavailable(values, trace, "launch-start-20-0")
+        remove_delivery_for_trace(values, trace)
+        for worker in ("claude", "codex"):
+            values[1].append({
+                "event": "worker.launch.start", "story": outcome["story"],
+                "repo": values[0]["repository"],
+                "trace_id": outcome["trace_id"], "span_id": "shared-span",
+                "worker": worker, "event_id": f"start-{worker}"})
+            add_failover_unavailable(values, trace, f"start-{worker}")
+        values[1].append({
+            "event": "worker.launch.end", "story": outcome["story"],
+            "repo": values[0]["repository"],
+            "trace_id": outcome["trace_id"], "span_id": "shared-span",
+            "worker": "claude", "event_id": "end-claude",
+            "result": "FAILED", "exit": 1, "stderr": "failed"})
+        result = report.build(*values)
+        self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+        values[1].append({
+            "event": "worker.launch.end", "story": outcome["story"],
+            "repo": values[0]["repository"],
+            "trace_id": outcome["trace_id"], "span_id": "shared-span",
+            "worker": "codex", "event_id": "end-codex",
+            "result": "FAILED", "exit": 1, "stderr": "failed"})
+        result = report.build(*values)
+        self.assertNotEqual("INCONCLUSIVE", result["rung_verdict"])
+
+    def test_failed_launch_is_reconciled_when_fallback_succeeds(self):
+        values = list(fixture())
+        outcome = next(row for row in values[1]
+                       if row.get("event") == "worker.outcome")
+        for worker in ("claude",):
+            values[1].append({
+                "event": "worker.launch.start", "story": outcome["story"],
+                "repo": values[0]["repository"],
+                "trace_id": outcome["trace_id"], "span_id": "shared-span",
+                "worker": worker, "event_id": f"start-{worker}"})
+        result = report.build(*values)
+        self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+        values[1].append({
+            "event": "worker.launch.end", "story": outcome["story"],
+            "repo": values[0]["repository"],
+            "trace_id": outcome["trace_id"], "span_id": "shared-span",
+            "worker": "claude", "event_id": "end-claude", "exit": 1,
+            "result": "FAILED", "stderr": "failed before fallback"})
+        values[1].append({
+            "event": "worker.failover", "story": outcome["story"],
+            "repo": values[0]["repository"], "trace_id": outcome["trace_id"],
+            "worker": "claude", "event_id": "failover-claude",
+            "decision": "FELL_BACK", "result": "FAILED",
+            "next": "factory-worker"})
+        result = report.build(*values)
+        self.assertNotEqual("INCONCLUSIVE", result["rung_verdict"])
+
+    def test_missing_executable_launch_failure_allows_successful_fallback(self):
+        values = list(fixture())
+        outcome = next(row for row in values[1]
+                       if row.get("event") == "worker.outcome")
+        values[1].extend([
+            {"event": "worker.launch.start", "story": outcome["story"],
+             "repo": values[0]["repository"],
+             "trace_id": outcome["trace_id"], "span_id": "missing-span",
+             "worker": "missing-worker", "event_id": "missing-start"},
+            {"event": "worker.launch.end", "story": outcome["story"],
+             "repo": values[0]["repository"],
+             "trace_id": outcome["trace_id"], "span_id": "missing-span",
+             "worker": "missing-worker", "event_id": "missing-end",
+             "result": "FAILED", "exit": None,
+             "detail": ("not launchable: [Errno 2] No such file or directory: "
+                        "'/missing/worker'")},
+            {"event": "worker.failover", "story": outcome["story"],
+             "repo": values[0]["repository"], "trace_id": outcome["trace_id"],
+             "event_id": "missing-failover", "worker": "missing-worker",
+             "decision": "FELL_BACK", "result": "FAILED",
+             "next": "factory-worker"}])
+        result = report.build(*values)
+        reversed_result = report.build(
+            values[0], list(reversed(values[1])), values[2], values[3])
+        self.assertEqual(result, reversed_result)
+        self.assertNotEqual("INCONCLUSIVE", result["rung_verdict"])
+
+    def test_attempt_rejects_multiple_successful_worker_launches(self):
+        values = list(fixture())
+        outcome = next(row for row in values[1]
+                       if row.get("event") == "worker.outcome")
+        values[1].extend([
+            {"event": "worker.launch.start", "story": outcome["story"],
+             "repo": values[0]["repository"], "trace_id": outcome["trace_id"],
+             "span_id": "second-success-span", "worker": "second-worker",
+             "event_id": "second-success-start"},
+            {"event": "worker.launch.end", "story": outcome["story"],
+             "repo": values[0]["repository"], "trace_id": outcome["trace_id"],
+             "span_id": "second-success-span", "worker": "second-worker",
+             "event_id": "second-success-end", "result": "LAUNCHED",
+             "exit": 0}])
+        result = report.build(*values)
+        self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+        self.assertTrue(any("exactly one successful worker-specific launch overall"
+                            in finding for finding in
+                            result["measurement_integrity"]["findings"]))
+
+    def test_failed_outcome_rejects_contradictory_successful_launch(self):
+        values = list(fixture())
+        outcome = next(row for row in values[1]
+                       if row.get("event") == "worker.outcome")
+        outcome.update({"result": "FAILED", "exit": 1,
+                        "diagnostic_ref": "durable failure"})
+        result = report.build(*values)
+        reversed_result = report.build(
+            values[0], list(reversed(values[1])), values[2], values[3])
+        self.assertEqual(result, reversed_result)
+        self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+        self.assertTrue(any("cannot contain a successful worker launch" in finding
+                            for finding in result[
+                                "measurement_integrity"]["findings"]))
+
+    def test_launched_outcome_requires_successful_matching_launch_end(self):
+        values = list(fixture())
+        outcome = next(row for row in values[1]
+                       if row.get("event") == "worker.outcome")
+        trace = outcome["trace_id"]
+        for row in values[1]:
+            if row.get("event") == "worker.launch.end" and row.get("trace_id") == trace:
+                row.update({"result": "FAILED", "exit": 1,
+                            "detail": "worker rejected assignment"})
+        result = report.build(*values)
+        self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+        self.assertTrue(any("successful worker-specific launch" in finding
+                            for finding in result["measurement_integrity"]["findings"]))
+
+    def test_successful_launch_end_requires_matching_start(self):
+        values = list(fixture())
+        trace = "trace-20-0"
+        values[1] = [row for row in values[1]
+                     if not (row.get("event") == "worker.launch.start" and
+                             row.get("trace_id") == trace)]
+        result = report.build(*values)
+        self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+        self.assertTrue(any("successful worker-specific launch" in finding
+                            for finding in result["measurement_integrity"]["findings"]))
+
+    def test_failed_fallback_launch_end_requires_diagnostic_content(self):
+        values = list(fixture())
+        outcome = next(row for row in values[1]
+                       if row.get("event") == "worker.outcome")
+        values[1].extend([
+            {"event": "worker.launch.start", "story": outcome["story"],
+             "repo": values[0]["repository"],
+             "trace_id": outcome["trace_id"], "span_id": "fallback-span",
+             "worker": "failed-worker", "event_id": "fallback-start"},
+            {"event": "worker.launch.end", "story": outcome["story"],
+             "repo": values[0]["repository"],
+             "trace_id": outcome["trace_id"], "span_id": "fallback-span",
+             "worker": "failed-worker", "event_id": "fallback-end",
+             "result": "FAILED", "exit": 1},
+            {"event": "worker.failover", "story": outcome["story"],
+             "repo": values[0]["repository"], "trace_id": outcome["trace_id"],
+             "worker": "failed-worker", "event_id": "fallback-routing",
+             "decision": "FELL_BACK", "result": "FAILED",
+             "next": "factory-worker"}])
+        result = report.build(*values)
+        self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+        launch_end = next(
+            row for row in values[1]
+            if row.get("event_id") == "fallback-end")
+        launch_end["stderr"] = "worker rejected assignment"
+        result = report.build(*values)
+        self.assertNotEqual("INCONCLUSIVE", result["rung_verdict"])
+
+    def test_launch_records_require_worker_identity(self):
+        values = list(fixture())
+        outcome = next(row for row in values[1]
+                       if row.get("event") == "worker.outcome")
+        values[1].extend([
+            {"event": "worker.launch.start", "story": outcome["story"],
+             "repo": values[0]["repository"],
+             "trace_id": outcome["trace_id"], "span_id": "shared-span",
+             "event_id": "anonymous-start"},
+            {"event": "worker.launch.end", "story": outcome["story"],
+             "repo": values[0]["repository"],
+             "trace_id": outcome["trace_id"], "span_id": "shared-span",
+             "event_id": "anonymous-end", "exit": 0, "result": "LAUNCHED"}])
+        result = report.build(*values)
+        self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+        self.assertTrue(any("needs a worker identity" in finding for finding in
+                            result["measurement_integrity"]["findings"]))
+
+    def test_nested_launch_ledger_is_independent_of_fragment_order(self):
+        values = list(fixture())
+        outcome = next(row for row in values[1]
+                       if row.get("event") == "worker.outcome")
+        outcome.update({"result": "FAILED", "exit": 1})
+        for index in (2, 1):
+            values[1].extend([
+                {"event": "worker.launch.start", "story": outcome["story"],
+                 "repo": values[0]["repository"],
+                 "trace_id": outcome["trace_id"], "span_id": f"span-{index}",
+                 "worker": f"worker-{index}", "event_id": f"start-{index}"},
+                {"event": "worker.launch.end", "story": outcome["story"],
+                 "repo": values[0]["repository"],
+                 "trace_id": outcome["trace_id"], "span_id": f"span-{index}",
+                 "worker": f"worker-{index}", "event_id": f"end-{index}",
+                 "exit": 1, "stderr": "failed"}])
+        first = report.build(*values)
+        second = report.build(values[0], list(reversed(values[1])),
+                              values[2], values[3])
+        self.assertEqual(first, second)
+
+    def test_conflicting_launch_copies_fail_deterministically(self):
+        values = list(fixture())
+        start = next(row for row in values[1]
+                     if row.get("event") == "worker.launch.start")
+        conflict = dict(start)
+        conflict["worker"] = "conflicting-worker"
+        forward = list(values[1]) + [conflict]
+        reverse = list(reversed(forward))
+        first = report.build(values[0], forward, values[2], values[3])
+        second = report.build(values[0], reverse, values[2], values[3])
+        self.assertEqual(first, second)
+        self.assertEqual("INCONCLUSIVE", first["rung_verdict"])
+        self.assertTrue(any("worker launch start" in finding and
+                            "conflicting durable copies" in finding
+                            for finding in
+                            first["measurement_integrity"]["findings"]))
+
+    def test_ambiguous_launch_accepts_matching_durable_diagnostic(self):
+        values = list(fixture())
+        outcome = next(row for row in values[1]
+                       if row.get("event") == "worker.outcome")
+        outcome.update({"result": "AMBIGUOUS", "exit": None})
+        launch_end = next(
+            row for row in values[1]
+            if row.get("event") == "worker.launch.end" and
+            row.get("trace_id") == outcome["trace_id"])
+        launch_end.update({"event_id": "timeout-diagnostic", "exit": None,
+                           "result": "AMBIGUOUS",
+                           "stderr": "timed out with partial output"})
+        failover = next(
+            row for row in values[1]
+            if row.get("event") == "worker.failover"
+            and row.get("trace_id") == outcome["trace_id"])
+        failover.update({"decision": "SUPPRESSED", "result": "AMBIGUOUS"})
+        remove_delivery_for_trace(values, outcome["trace_id"])
+        result = report.build(*values)
+        self.assertNotEqual("INCONCLUSIVE", result["rung_verdict"])
+
+    def test_launch_end_requires_recognized_consistent_result(self):
+        values = list(fixture())
+        launch_end = next(row for row in values[1]
+                          if row.get("event") == "worker.launch.end")
+        launch_end.update({"result": "GARBAGE", "exit": 0,
+                           "detail": "looks diagnostic"})
+        result = report.build(*values)
+        self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+        self.assertTrue(any("worker launch end" in finding and
+                            "recognized result" in finding
+                            for finding in
+                            result["measurement_integrity"]["findings"]))
+
+    def test_failed_launch_end_requires_nonzero_exit(self):
+        values = list(fixture())
+        launch_end = next(row for row in values[1]
+                          if row.get("event") == "worker.launch.end")
+        launch_end.update({"result": "FAILED", "exit": None,
+                           "detail": "unstructured exception claim"})
+        result = report.build(*values)
+        self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+        self.assertTrue(any("worker launch end" in finding and
+                            "consistent worker and exit status" in finding
+                            for finding in
+                            result["measurement_integrity"]["findings"]))
+
+    def test_malformed_launch_end_is_validated_before_filtering(self):
+        values = list(fixture())
+        launch_end = next(row for row in values[1]
+                          if row.get("event") == "worker.launch.end")
+        malformed = dict(launch_end)
+        malformed["event_id"] = "malformed-launch-end"
+        malformed.pop("result")
+        malformed.pop("exit")
+        values[1].append(malformed)
+        result = report.build(*values)
+        self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+        self.assertTrue(any("malformed-launch-end" in finding and
+                            "recognized result" in finding
+                            for finding in
+                            result["measurement_integrity"]["findings"]))
+
+    def test_launch_span_requires_nonempty_string_identity(self):
+        for invalid in (123, "   "):
+            with self.subTest(invalid=invalid):
+                values = list(fixture())
+                trace = "trace-20-0"
+                for row in values[1]:
+                    if (row.get("trace_id") == trace and row.get("event") in
+                            ("worker.launch.start", "worker.launch.end")):
+                        row["span_id"] = invalid
+                result = report.build(*values)
+                self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+                self.assertTrue(any("nonempty string span ID" in finding
+                                    for finding in result[
+                                        "measurement_integrity"]["findings"]))
+
+    def test_reused_pr_requires_review_of_each_successful_delivered_head(self):
+        values = list(fixture())
+        outcome = next(row for row in values[1]
+                       if row.get("event") == "worker.outcome" and
+                       row.get("story") == 20)
+        final_head = "f" * 40
+        outcome["detail"] = json.dumps(
+            {"pull_request": 120, "head": final_head})
+        values[1] = [row for row in values[1]
+                     if not (row.get("event") == "delivery.pull-request.written"
+                             and row.get("trace_id") == outcome["trace_id"])]
+        result = report.build(*values)
+        self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+        values[1].extend([
+            {"event": "delivery.pull-request.written", "story": 20,
+             "repo": values[0]["repository"],
+             "trace_id": outcome["trace_id"], "pull_request": 120,
+             "head": final_head, "event_id": "delivery-final-head"},
+            {"event": "review.outcome.published", "story": 20,
+             "repo": values[0]["repository"],
+             "pull_request": 120, "head": final_head, "verdict": "findings",
+             "event_id": "review-final-head"}])
+        result = report.build(*values)
+        self.assertNotEqual("INCONCLUSIVE", result["rung_verdict"])
+
+    def test_successful_outcome_identity_must_match_production_event(self):
+        values = list(fixture())
+        outcome = next(row for row in values[1]
+                       if row.get("event") == "worker.outcome")
+        outcome["detail"] = json.dumps({
+            "pull_request": 999, "head": "f" * 40})
+        result = report.build(*values)
+        self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+        self.assertTrue(any(
+            "conflicting terminal and production PR/head identities" in finding
+            for finding in result["measurement_integrity"]["findings"]))
+
+    def test_malformed_terminal_delivery_identity_fails_closed(self):
+        values = list(fixture())
+        outcome = next(row for row in values[1]
+                       if row.get("event") == "worker.outcome")
+        outcome["detail"] = json.dumps({
+            "pull_request": [], "head": {"not": "a commit"}})
+        self.assert_order_independent_inconclusive(
+            values, "malformed terminal PR/head identity")
+
+    def test_production_event_without_durable_id_is_inconclusive(self):
+        values = list(fixture())
+        production = next(row for row in values[1]
+                          if row.get("event") == "delivery.pull-request.written")
+        production.pop("event_id")
+        result = report.build(*values)
+        self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+
+    def test_production_event_requires_string_event_id(self):
+        for invalid in ("   ", 123):
+            with self.subTest(invalid=invalid):
+                values = list(fixture())
+                production = next(
+                    row for row in values[1]
+                    if row.get("event") == "delivery.pull-request.written")
+                production["event_id"] = invalid
+                result = report.build(*values)
+                self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+                self.assertTrue(any("production event" in finding and
+                                    "nonempty string event ID" in finding
+                                    for finding in result[
+                                        "measurement_integrity"]["findings"]))
+
+    def test_failed_attempt_cannot_produce_delivery(self):
+        values = list(fixture())
+        outcome = next(row for row in values[1]
+                       if row.get("event") == "worker.outcome")
+        outcome.update({"result": "FAILED", "exit": 1,
+                        "diagnostic_ref": "durable failure"})
+        launch_end = next(
+            row for row in values[1]
+            if row.get("event") == "worker.launch.end" and
+            row.get("trace_id") == outcome["trace_id"])
+        launch_end.update({"result": "FAILED", "exit": 1,
+                           "stderr": "durable failure"})
+        result = report.build(*values)
+        reversed_result = report.build(
+            values[0], list(reversed(values[1])), values[2], values[3])
+        self.assertEqual(result, reversed_result)
+        self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+        self.assertTrue(any("needs a matching successful attempt outcome" in finding
+                            for finding in result[
+                                "measurement_integrity"]["findings"]))
+
+    def test_malformed_exact_head_review_verdict_fails_closed(self):
+        values = list(fixture())
+        production = next(
+            row for row in values[1]
+            if row.get("event") == "delivery.pull-request.written")
+        values[1].append({
+            "event": "review.outcome.published",
+            "story": production["story"], "repo": values[0]["repository"],
+            "pull_request": production["pull_request"],
+            "head": production["head"], "verdict": "unknown",
+            "event_id": "malformed-review-verdict"})
+        self.assert_order_independent_inconclusive(
+            values, "contains an unrecognized verdict")
+
+    def test_production_event_id_cannot_be_reused_across_attempts(self):
+        values = list(fixture())
+        productions = [
+            row for row in values[1]
+            if row.get("event") == "delivery.pull-request.written" and
+            row.get("story") == 20]
+        self.assertGreaterEqual(len(productions), 2)
+        productions[1]["event_id"] = productions[0]["event_id"]
+        self.assert_order_independent_inconclusive(
+            values, "is reused across multiple attempt or delivery identities")
+
+    def test_conflicting_production_event_copies_fail_deterministically(self):
+        values = list(fixture())
+        production = next(
+            row for row in values[1]
+            if row.get("event") == "delivery.pull-request.written")
+        conflict = dict(production)
+        conflict["production_evidence_missing"] = True
+        values[1].append(conflict)
+        self.assert_order_independent_inconclusive(
+            values, "PR/head production event")
+
+    def test_terminal_event_id_cannot_be_reused_across_attempts(self):
+        values = list(fixture())
+        outcomes = [row for row in values[1]
+                    if row.get("event") == "worker.outcome"]
+        self.assertGreaterEqual(len(outcomes), 2)
+        outcomes[1]["event_id"] = outcomes[0]["event_id"]
+        outcomes[1]["elapsed_ms"] = 99
+        self.assert_order_independent_inconclusive(
+            values, "identifies conflicting producer payloads")
+
+    def test_identical_terminal_payload_id_may_repeat_across_traces(self):
+        values = list(fixture())
+        outcomes = [row for row in values[1]
+                    if row.get("event") == "worker.outcome" and
+                    row.get("story") == 20][:2]
+        self.assertEqual(2, len(outcomes))
+        for outcome in outcomes:
+            trace = outcome["trace_id"]
+            outcome.update({
+                "event_id": "producer-repeated-outcome",
+                "worker": None, "result": "NO_ELIGIBLE_WORKER", "exit": None,
+                "detail": "no configured worker is both capable and healthy"})
+            values[1] = [
+                row for row in values[1]
+                if not (row.get("trace_id") == trace and row.get("event") in
+                        ("worker.launch.start", "worker.launch.end",
+                         "worker.failover",
+                         "delivery.pull-request.written"))]
+        result = report.build(*values)
+        reversed_result = report.build(
+            values[0], list(reversed(values[1])), values[2], values[3])
+        self.assertEqual(result, reversed_result)
+        self.assertNotEqual("INCONCLUSIVE", result["rung_verdict"])
+
+    def test_pr_only_declaration_uses_durable_process_head(self):
+        values = list(fixture())
+        values[0]["stories"][0].pop("head")
+        result = report.build(*values)
+        self.assertNotEqual("INCONCLUSIVE", result["rung_verdict"])
+
+    def test_mixed_legacy_and_durable_production_duplicates_are_order_independent(self):
+        values = list(fixture())
+        production = next(row for row in values[1]
+                          if row.get("event") == "delivery.pull-request.written")
+        legacy = dict(production)
+        legacy.pop("event_id")
+        forward = list(values[1]) + [legacy]
+        reverse = [legacy] + list(values[1])
+        first = report.build(values[0], forward, values[2], values[3])
+        second = report.build(values[0], reverse, values[2], values[3])
+        self.assertEqual(first, second)
+        self.assertNotEqual("INCONCLUSIVE", first["rung_verdict"])
+
+    def test_mixed_legacy_and_durable_review_duplicates_are_order_independent(self):
+        values = list(fixture())
+        reviewed = next(row for row in values[1]
+                        if row.get("event") == "review.outcome.published")
+        legacy = dict(reviewed)
+        legacy.pop("event_id")
+        forward = list(values[1]) + [legacy]
+        reverse = [legacy] + list(values[1])
+        first = report.build(values[0], forward, values[2], values[3])
+        second = report.build(values[0], reverse, values[2], values[3])
+        self.assertEqual(first, second)
+        self.assertNotEqual("INCONCLUSIVE", first["rung_verdict"])
+
+    def test_conflicting_review_copies_fail_deterministically(self):
+        values = list(fixture())
+        reviewed = next(row for row in values[1]
+                        if row.get("event") == "review.outcome.published")
+        conflict = dict(reviewed)
+        conflict["reviewer"] = "conflicting-reviewer"
+        forward = list(values[1]) + [conflict]
+        reverse = list(reversed(forward))
+        first = report.build(values[0], forward, values[2], values[3])
+        second = report.build(values[0], reverse, values[2], values[3])
+        self.assertEqual(first, second)
+        self.assertEqual("INCONCLUSIVE", first["rung_verdict"])
+        self.assertTrue(any("scoped review event" in finding and
+                            "conflicting durable copies" in finding
+                            for finding in
+                            first["measurement_integrity"]["findings"]))
+
+    def test_review_copy_conflict_is_detected_before_head_filtering(self):
+        values = list(fixture())
+        reviewed = next(row for row in values[1]
+                        if row.get("event") == "review.outcome.published")
+        conflict = dict(reviewed)
+        conflict["head"] = "f" * 40
+        forward = list(values[1]) + [conflict]
+        reverse = list(reversed(forward))
+        first = report.build(values[0], forward, values[2], values[3])
+        second = report.build(values[0], reverse, values[2], values[3])
+        self.assertEqual(first, second)
+        self.assertEqual("INCONCLUSIVE", first["rung_verdict"])
+        self.assertTrue(any("scoped review event" in finding and
+                            "conflicting durable copies" in finding
+                            for finding in
+                            first["measurement_integrity"]["findings"]))
+
+    def test_exact_head_review_requires_string_event_id(self):
+        values = list(fixture())
+        reviewed = next(row for row in values[1]
+                        if row.get("event") == "review.outcome.published")
+        reviewed["event_id"] = 123
+        result = report.build(*values)
+        self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+        self.assertTrue(any("exact-head review outcome" in finding and
+                            "nonempty string event ID" in finding
+                            for finding in
+                            result["measurement_integrity"]["findings"]))
+
+    def test_non_object_delivery_detail_yields_inconclusive(self):
+        values = list(fixture())
+        outcome = next(row for row in values[1]
+                       if row.get("event") == "worker.outcome")
+        outcome["detail"] = "[]"
+        values[1] = [row for row in values[1]
+                     if not (row.get("event") == "delivery.pull-request.written"
+                             and row.get("trace_id") == outcome["trace_id"])]
+        result = report.build(*values)
+        self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+
     def test_thresholds_can_pass_but_integrity_is_independent(self):
         values = list(fixture())
         for story in values[0]["stories"]: story["human_recovery"] = False
@@ -90,7 +1679,7 @@ class Rung2ReportTests(unittest.TestCase):
 
         values[3].pop()
         result = report.build(*values)
-        self.assertEqual("FAIL", result["rung_verdict"])
+        self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
         self.assertFalse(result["threshold_results"]["measurement_integrity"])
 
     def test_governance_does_not_reduce_autonomy_but_recovery_does(self):
