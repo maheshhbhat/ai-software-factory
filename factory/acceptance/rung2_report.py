@@ -128,6 +128,11 @@ def attempt_ledger(evidence, process, numbers):
         if (row.get("event") == "story.claimed" and
                 row.get("story") in numbers and
                 row.get("repo") == repository):
+            if not valid_event_id(row.get("event_id")):
+                findings.append(
+                    f"claim {row.get('event_id')!r} for Story "
+                    f"{row.get('story')} needs a durable nonempty string event ID")
+                continue
             claim_groups.setdefault(
                 (row.get("story"), row.get("event_id")), []).append(row)
     selected_claims = []
@@ -322,12 +327,12 @@ def attempt_ledger(evidence, process, numbers):
                 findings.append(
                     f"worker launch {start_id!r} for claim {claim_id!r} needs "
                     "exactly one terminal diagnostic or evidence-unavailable record")
+        all_successful_launches = [
+            row for row in launch_ledger
+            if row.get("terminal_diagnostic")
+            and row["terminal_diagnostic"].get("result") == "LAUNCHED"
+            and row["terminal_diagnostic"].get("exit") == 0]
         if outcome and outcome.get("result") == "LAUNCHED":
-            all_successful_launches = [
-                row for row in launch_ledger
-                if row.get("terminal_diagnostic")
-                and row["terminal_diagnostic"].get("result") == "LAUNCHED"
-                and row["terminal_diagnostic"].get("exit") == 0]
             matching_successful_launches = [
                 row for row in all_successful_launches
                 if row["start"].get("worker") == outcome.get("worker")]
@@ -342,6 +347,10 @@ def attempt_ledger(evidence, process, numbers):
                 findings.append(
                     f"successful claim {claim_id!r} for Story {story} needs its "
                     "single successful launch to match the terminal worker")
+        elif outcome and all_successful_launches:
+            findings.append(
+                f"non-successful claim {claim_id!r} for Story {story} cannot "
+                "contain a successful worker launch")
         elif (outcome and
               (outcome.get("worker") or
                outcome.get("result") == "NO_WORKER_LAUNCHED") and
@@ -395,6 +404,11 @@ def delivered_identity(outcome):
 def review_ledger(evidence, process, numbers, attempts):
     findings = []
     repository = evidence.get("repository")
+    delivery_capable_attempts = {
+        (attempt.get("story"), attempt.get("trace_id"))
+        for attempt in attempts
+        if valid_terminal_worker_outcome(attempt.get("terminal_outcome") or {})
+        and attempt["terminal_outcome"].get("result") == "LAUNCHED"}
     scoped_reviews = [
         row for row in process
         if row.get("event") == REVIEW_OUTCOME_EVENT
@@ -426,6 +440,12 @@ def review_ledger(evidence, process, numbers, attempts):
                 findings.append(
                     f"Story {row.get('story')} PR/head production event needs a "
                     "nonempty string attempt trace ID")
+                production_invalid = True
+            elif ((row.get("story"), row.get("trace_id")) not in
+                  delivery_capable_attempts):
+                findings.append(
+                    f"Story {row.get('story')} PR/head production event for "
+                    f"{identity} needs a matching successful attempt outcome")
                 production_invalid = True
             if production_invalid:
                 continue

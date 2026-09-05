@@ -96,6 +96,13 @@ def fixture():
     return evidence, process, telemetry, touches
 
 
+def remove_delivery_for_trace(values, trace):
+    values[1] = [
+        row for row in values[1]
+        if not (row.get("event") == "delivery.pull-request.written" and
+                row.get("trace_id") == trace)]
+
+
 class Rung2ReportTests(unittest.TestCase):
     def test_reconstructs_failed_rung_without_hiding_recovery_or_cost_gap(self):
         result = report.build(*fixture())
@@ -210,6 +217,7 @@ class Rung2ReportTests(unittest.TestCase):
 
     def test_explicit_terminal_evidence_unavailable_completes_ledger(self):
         values = list(fixture())
+        remove_delivery_for_trace(values, "trace-20-0")
         values[1] = [row for row in values[1]
                      if not (row.get("event") == "worker.outcome" and
                              row.get("trace_id") == "trace-20-0")]
@@ -303,6 +311,20 @@ class Rung2ReportTests(unittest.TestCase):
                                     for finding in result[
                                         "measurement_integrity"]["findings"]))
 
+    def test_unhashable_claim_event_id_fails_closed(self):
+        values = list(fixture())
+        claim = next(row for row in values[1]
+                     if row.get("event") == "story.claimed")
+        claim["event_id"] = []
+        result = report.build(*values)
+        reversed_result = report.build(
+            values[0], list(reversed(values[1])), values[2], values[3])
+        self.assertEqual(result, reversed_result)
+        self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+        self.assertTrue(any("durable nonempty string event ID" in finding
+                            for finding in result[
+                                "measurement_integrity"]["findings"]))
+
     def test_orphan_attempt_event_requires_valid_trace_identity(self):
         for invalid in (None, 123, "   "):
             with self.subTest(invalid=invalid):
@@ -328,6 +350,7 @@ class Rung2ReportTests(unittest.TestCase):
         outcome.update({"result": "NO_ELIGIBLE_WORKER", "worker": None,
                         "exit": None,
                         "detail": "no configured worker is capable and healthy"})
+        remove_delivery_for_trace(values, trace)
         values[1] = [row for row in values[1]
                      if not (row.get("trace_id") == trace and
                              row.get("event") in
@@ -347,6 +370,7 @@ class Rung2ReportTests(unittest.TestCase):
                        row.get("trace_id") == trace)
         outcome.update({"result": "NO_WORKER_LAUNCHED", "worker": None,
                         "exit": None, "diagnostic_ref": "worker-exhaustion"})
+        remove_delivery_for_trace(values, trace)
         values[1] = [row for row in values[1]
                      if not (row.get("trace_id") == trace and
                              row.get("event") in
@@ -596,11 +620,19 @@ class Rung2ReportTests(unittest.TestCase):
         outcome = next(row for row in values[1]
                        if row.get("event") == "worker.outcome")
         outcome.update({"result": "FAILED", "exit": 1})
+        trace = outcome["trace_id"]
+        values[1] = [row for row in values[1]
+                     if not (row.get("trace_id") == trace and row.get("event") in
+                             ("worker.launch.start", "worker.launch.end"))]
+        remove_delivery_for_trace(values, trace)
+        values[0]["evidence_unavailable"] = [{
+            "kind": "attempt-launches", "story": outcome["story"],
+            "identity": trace, "reason": "legacy launch log missing"}]
         result = report.build(*values)
         self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
-        values[0]["evidence_unavailable"] = [{
+        values[0]["evidence_unavailable"].append({
             "kind": "attempt-diagnostics", "story": outcome["story"],
-            "identity": outcome["trace_id"], "reason": "legacy log missing"}]
+            "identity": outcome["trace_id"], "reason": "legacy log missing"})
         result = report.build(*values)
         self.assertNotEqual("INCONCLUSIVE", result["rung_verdict"])
         ledger = next(row for row in result["attempt_ledger"]
@@ -615,6 +647,7 @@ class Rung2ReportTests(unittest.TestCase):
         outcome.update({"result": "FAILED", "exit": 1,
                         "recovery_ref": "durable-recovery"})
         trace = outcome["trace_id"]
+        remove_delivery_for_trace(values, trace)
         values[1] = [
             row for row in values[1]
             if not (row.get("trace_id") == trace and row.get("event") in
@@ -642,6 +675,7 @@ class Rung2ReportTests(unittest.TestCase):
             row.get("trace_id") == outcome["trace_id"])
         launch_end.update({"event_id": "launch-failure-20", "result": "FAILED",
                            "exit": 1, "stderr": "durable diagnostic"})
+        remove_delivery_for_trace(values, outcome["trace_id"])
         result = report.build(*values)
         self.assertNotEqual("INCONCLUSIVE", result["rung_verdict"])
         ledger = next(row for row in result["attempt_ledger"]
@@ -676,6 +710,14 @@ class Rung2ReportTests(unittest.TestCase):
         outcome = next(row for row in values[1]
                        if row.get("event") == "worker.outcome")
         outcome.update({"result": "FAILED", "exit": 1})
+        trace = outcome["trace_id"]
+        original_end = next(
+            row for row in values[1]
+            if row.get("event") == "worker.launch.end" and
+            row.get("trace_id") == trace)
+        original_end.update({"result": "FAILED", "exit": 1,
+                             "stderr": "original worker failed"})
+        remove_delivery_for_trace(values, trace)
         for index in (1, 2):
             values[1].append({
                 "event": "worker.launch.start", "story": outcome["story"],
@@ -708,6 +750,14 @@ class Rung2ReportTests(unittest.TestCase):
         outcome = next(row for row in values[1]
                        if row.get("event") == "worker.outcome")
         outcome.update({"result": "FAILED", "exit": 1})
+        trace = outcome["trace_id"]
+        original_end = next(
+            row for row in values[1]
+            if row.get("event") == "worker.launch.end" and
+            row.get("trace_id") == trace)
+        original_end.update({"result": "FAILED", "exit": 1,
+                             "stderr": "original worker failed"})
+        remove_delivery_for_trace(values, trace)
         for worker in ("claude", "codex"):
             values[1].append({
                 "event": "worker.launch.start", "story": outcome["story"],
@@ -771,6 +821,21 @@ class Rung2ReportTests(unittest.TestCase):
         self.assertTrue(any("exactly one successful worker-specific launch overall"
                             in finding for finding in
                             result["measurement_integrity"]["findings"]))
+
+    def test_failed_outcome_rejects_contradictory_successful_launch(self):
+        values = list(fixture())
+        outcome = next(row for row in values[1]
+                       if row.get("event") == "worker.outcome")
+        outcome.update({"result": "FAILED", "exit": 1,
+                        "diagnostic_ref": "durable failure"})
+        result = report.build(*values)
+        reversed_result = report.build(
+            values[0], list(reversed(values[1])), values[2], values[3])
+        self.assertEqual(result, reversed_result)
+        self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+        self.assertTrue(any("cannot contain a successful worker launch" in finding
+                            for finding in result[
+                                "measurement_integrity"]["findings"]))
 
     def test_launched_outcome_requires_successful_matching_launch_end(self):
         values = list(fixture())
@@ -885,6 +950,7 @@ class Rung2ReportTests(unittest.TestCase):
         launch_end.update({"event_id": "timeout-diagnostic", "exit": None,
                            "result": "AMBIGUOUS",
                            "stderr": "timed out with partial output"})
+        remove_delivery_for_trace(values, outcome["trace_id"])
         result = report.build(*values)
         self.assertNotEqual("INCONCLUSIVE", result["rung_verdict"])
 
@@ -1004,6 +1070,27 @@ class Rung2ReportTests(unittest.TestCase):
                                     "nonempty string event ID" in finding
                                     for finding in result[
                                         "measurement_integrity"]["findings"]))
+
+    def test_failed_attempt_cannot_produce_delivery(self):
+        values = list(fixture())
+        outcome = next(row for row in values[1]
+                       if row.get("event") == "worker.outcome")
+        outcome.update({"result": "FAILED", "exit": 1,
+                        "diagnostic_ref": "durable failure"})
+        launch_end = next(
+            row for row in values[1]
+            if row.get("event") == "worker.launch.end" and
+            row.get("trace_id") == outcome["trace_id"])
+        launch_end.update({"result": "FAILED", "exit": 1,
+                           "stderr": "durable failure"})
+        result = report.build(*values)
+        reversed_result = report.build(
+            values[0], list(reversed(values[1])), values[2], values[3])
+        self.assertEqual(result, reversed_result)
+        self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+        self.assertTrue(any("needs a matching successful attempt outcome" in finding
+                            for finding in result[
+                                "measurement_integrity"]["findings"]))
 
     def test_pr_only_declaration_uses_durable_process_head(self):
         values = list(fixture())
