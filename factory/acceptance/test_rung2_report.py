@@ -230,6 +230,8 @@ class Rung2ReportTests(unittest.TestCase):
         for mutation, finding in (
                 ({"event_id": []}, "durable nonempty string event ID"),
                 ({"decision": "GARBAGE"}, "inconsistent decision and result"),
+                ({"decision": []}, "inconsistent decision and result"),
+                ({"result": {}}, "inconsistent decision and result"),
                 ({"worker": []}, "nonempty string worker identity")):
             with self.subTest(mutation=mutation):
                 values = list(fixture())

@@ -179,8 +179,10 @@ def attempt_ledger(evidence, process, numbers):
                 findings.append(
                     f"worker failover for Story {row.get('story')} needs a "
                     "nonempty string worker identity")
-            if row.get("result") not in valid_failover.get(
-                    row.get("decision"), set()):
+            decision, result = row.get("decision"), row.get("result")
+            if (not isinstance(decision, str) or
+                    not isinstance(result, str) or
+                    result not in valid_failover.get(decision, set())):
                 findings.append(
                     f"worker failover for Story {row.get('story')} has an "
                     "inconsistent decision and result")
@@ -361,7 +363,8 @@ def attempt_ledger(evidence, process, numbers):
                 findings.append(
                     f"worker failover {failover.get('event_id')!r} for claim "
                     f"{claim_id!r} needs exactly one matching worker launch")
-            if failover.get("decision") in {"NOT_NEEDED", "SUPPRESSED"} and (
+            if (failover.get("decision") == "NOT_NEEDED" or
+                    failover.get("decision") == "SUPPRESSED") and (
                     not unavailable and
                     (not outcome or
                      failover.get("worker") != outcome.get("worker") or
