@@ -820,6 +820,9 @@ def review_ledger(evidence, process, numbers, attempts):
 
 def build(evidence, process, telemetry, touches):
     integrity = []
+    stories = evidence.get("stories") or []
+    numbers = {row.get("number") for row in stories if isinstance(row.get("number"), int)}
+    repository = evidence.get("repository")
     unavailable_records = evidence.get("evidence_unavailable", [])
     if not isinstance(unavailable_records, list):
         integrity.append("evidence_unavailable must be a list of named records")
@@ -843,20 +846,28 @@ def build(evidence, process, telemetry, touches):
     else:
         valid_process = []
         for row in process:
-            if not isinstance(row, dict) or not valid_event_id(row.get("event")):
+            if not isinstance(row, dict):
                 integrity.append(
                     "every process record needs a nonempty string event name")
                 continue
+            if row.get("repo") != repository:
+                continue
+            story = row.get("story")
+            if (isinstance(story, int) and not isinstance(story, bool) and
+                    story not in numbers):
+                continue
+            if not valid_event_id(row.get("event")):
+                if story in numbers:
+                    integrity.append(
+                        "every process record needs a nonempty string event name")
+                continue
             if ("story" in row and
-                    (not isinstance(row.get("story"), int) or
-                     isinstance(row.get("story"), bool))):
+                    (not isinstance(story, int) or isinstance(story, bool))):
                 integrity.append(
                     "every process Story identity must be an integer")
                 continue
             valid_process.append(row)
         process = valid_process
-    stories = evidence.get("stories") or []
-    numbers = {row.get("number") for row in stories if isinstance(row.get("number"), int)}
     if not numbers or len(numbers) != len(stories):
         integrity.append("every measured Story needs one distinct integer number")
     if any(not row.get("merged") for row in stories):

@@ -251,6 +251,18 @@ class Rung2ReportTests(unittest.TestCase):
         self.assert_order_independent_inconclusive(
             values, "nonempty string event name")
 
+    def test_malformed_foreign_process_event_is_out_of_scope(self):
+        values = list(fixture())
+        expected = report.build(*values)
+        values[1].append({
+            "event": [], "story": 999, "repo": "other/product",
+            "trace_id": [], "event_id": "foreign-malformed-event"})
+        result = report.build(*values)
+        reversed_result = report.build(
+            values[0], list(reversed(values[1])), values[2], values[3])
+        self.assertEqual(expected, result)
+        self.assertEqual(expected, reversed_result)
+
     def test_malformed_evidence_unavailable_container_fails_closed(self):
         for malformed in (None, {}, [None], [{"kind": "attempt-failover"}]):
             with self.subTest(malformed=malformed):
