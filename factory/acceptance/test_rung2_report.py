@@ -10,6 +10,7 @@ def fixture():
     evidence = {
         "repository": "owner/product", "commitment": 17, "project": 18,
         "project_ref": "owner/product#18", "product_outcome": "accepted",
+        "factory_revision": {"start": "a" * 40, "closeout": "a" * 40},
         "stories": [
             {"number": 20, "merged": True, "poisoned": True, "human_recovery": True},
             {"number": 21, "merged": True, "poisoned": True, "human_recovery": True},
@@ -144,6 +145,45 @@ class Rung2ReportTests(unittest.TestCase):
         self.assertEqual("unavailable",
                          result["kpis"]["engine_usage_cost"]["cost_per_accepted_story_usd"])
         self.assertEqual(3600, result["kpis"]["cycle_time"]["seconds"])
+
+    def test_stable_factory_revision_is_preserved_and_accepted(self):
+        result = report.build(*fixture())
+        self.assertTrue(result["measurement_integrity"]["passed"])
+        self.assertEqual({
+            "start": "a" * 40, "closeout": "a" * 40, "stable": True},
+            result["factory_revision"])
+        rendered = report.render(result)
+        self.assertIn(f"`{'a' * 40}` at start", rendered)
+        self.assertIn("stable: yes", rendered)
+
+    def test_factory_revision_drift_is_inconclusive(self):
+        values = list(fixture())
+        values[0]["factory_revision"]["closeout"] = "b" * 40
+        result = report.build(*values)
+        self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+        self.assertFalse(result["qualification_series"]["eligible"])
+        self.assertEqual({
+            "start": "a" * 40, "closeout": "b" * 40, "stable": False},
+            result["factory_revision"])
+        self.assertTrue(any(
+            "factory revision drifted during qualification" in finding
+            for finding in result["measurement_integrity"]["findings"]))
+
+    def test_factory_revision_must_be_exact_lowercase_sha(self):
+        for field, value in (
+                ("start", None), ("start", "a" * 39),
+                ("start", "A" * 40), ("start", "a" * 64),
+                ("closeout", None), ("closeout", "0" * 40)):
+            with self.subTest(field=field, value=value):
+                values = list(fixture())
+                values[0]["factory_revision"][field] = value
+                result = report.build(*values)
+                self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+                self.assertFalse(result["factory_revision"]["stable"])
+                self.assertTrue(any(
+                    f"qualification {field} needs an exact lowercase "
+                    "40-character factory commit" in finding
+                    for finding in result["measurement_integrity"]["findings"]))
 
     def test_missing_touch_receipt_fails_integrity(self):
         values = fixture(); values[3].pop()
