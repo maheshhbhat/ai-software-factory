@@ -493,6 +493,32 @@ def attempt_ledger(evidence, process, numbers):
                 findings.append(
                     f"worker launch {start_id!r} for claim {claim_id!r} needs "
                     "exactly one failover decision or evidence-unavailable record")
+        complete_routing = bool(launch_ledger) and all(
+            row.get("failover") and not row.get("failover_evidence_unavailable")
+            for row in launch_ledger)
+        if complete_routing:
+            workers = {row["start"].get("worker") for row in launch_ledger}
+            edges = {
+                row["failover"].get("worker"): row["failover"].get("next")
+                for row in launch_ledger
+                if row["failover"].get("decision") == "FELL_BACK"}
+            terminals = [
+                row["failover"].get("worker") for row in launch_ledger
+                if row["failover"].get("decision") != "FELL_BACK"]
+            indegree = Counter(edges.values())
+            roots = [worker for worker in workers if indegree[worker] == 0]
+            visited = set()
+            current = roots[0] if len(roots) == 1 else None
+            while current in workers and current not in visited:
+                visited.add(current)
+                current = edges.get(current)
+            if (len(terminals) != 1 or len(roots) != 1 or
+                    visited != workers or current is not None or
+                    any(count != 1 for count in indegree.values())):
+                findings.append(
+                    f"claim {claim_id!r} for Story {story} needs one acyclic "
+                    "failover chain covering every launch and ending in exactly "
+                    "one terminal decision")
         all_successful_launches = [
             row for row in launch_ledger
             if row.get("terminal_diagnostic")

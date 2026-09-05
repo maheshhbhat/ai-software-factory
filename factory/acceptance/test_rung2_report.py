@@ -355,6 +355,54 @@ class Rung2ReportTests(unittest.TestCase):
         self.assert_order_independent_inconclusive(
             values, "needs exactly one launch of its nonempty next-worker identity")
 
+    def test_failover_route_must_be_one_acyclic_terminal_chain(self):
+        values = list(fixture())
+        trace = "trace-20-0"
+        start = next(
+            row for row in values[1]
+            if row.get("event") == "worker.launch.start"
+            and row.get("trace_id") == trace)
+        end = next(
+            row for row in values[1]
+            if row.get("event") == "worker.launch.end"
+            and row.get("trace_id") == trace)
+        failover = next(
+            row for row in values[1]
+            if row.get("event") == "worker.failover"
+            and row.get("trace_id") == trace)
+        start["worker"] = "worker-a"
+        end.update({
+            "worker": "worker-a", "result": "FAILED", "exit": 1,
+            "detail": "worker A failed definitely"})
+        failover.update({
+            "worker": "worker-a", "decision": "FELL_BACK",
+            "result": "FAILED", "next": "worker-b"})
+        values[1].extend([
+            {"event": "worker.launch.start", "story": 20,
+             "repo": values[0]["repository"], "trace_id": trace,
+             "event_id": "cycle-start-b", "span_id": "cycle-span-b",
+             "worker": "worker-b"},
+            {"event": "worker.launch.end", "story": 20,
+             "repo": values[0]["repository"], "trace_id": trace,
+             "event_id": "cycle-end-b", "span_id": "cycle-span-b",
+             "worker": "worker-b", "result": "FAILED", "exit": 1,
+             "detail": "worker B failed definitely"},
+            {"event": "worker.failover", "story": 20,
+             "repo": values[0]["repository"], "trace_id": trace,
+             "event_id": "cycle-route-b", "worker": "worker-b",
+             "decision": "FELL_BACK", "result": "FAILED",
+             "next": "worker-a"}])
+        outcome = next(
+            row for row in values[1]
+            if row.get("event") == "worker.outcome"
+            and row.get("trace_id") == trace)
+        outcome.update({
+            "worker": None, "result": "NO_WORKER_LAUNCHED", "exit": None,
+            "detail": "every eligible worker failed definitely"})
+        remove_delivery_for_trace(values, trace)
+        self.assert_order_independent_inconclusive(
+            values, "needs one acyclic failover chain")
+
     def test_conflicting_failover_event_payloads_fail_deterministically(self):
         values = list(fixture())
         common = {
