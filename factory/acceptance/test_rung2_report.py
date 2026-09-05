@@ -104,6 +104,15 @@ def remove_delivery_for_trace(values, trace):
 
 
 class Rung2ReportTests(unittest.TestCase):
+    def assert_order_independent_inconclusive(self, values, finding_text):
+        result = report.build(*values)
+        reversed_result = report.build(
+            values[0], list(reversed(values[1])), values[2], values[3])
+        self.assertEqual(result, reversed_result)
+        self.assertEqual("INCONCLUSIVE", result["rung_verdict"])
+        self.assertTrue(any(finding_text in finding for finding in result[
+            "measurement_integrity"]["findings"]))
+
     def test_reconstructs_failed_rung_without_hiding_recovery_or_cost_gap(self):
         result = report.build(*fixture())
         self.assertTrue(result["measurement_integrity"]["passed"])
@@ -324,6 +333,30 @@ class Rung2ReportTests(unittest.TestCase):
         self.assertTrue(any("durable nonempty string event ID" in finding
                             for finding in result[
                                 "measurement_integrity"]["findings"]))
+
+    def test_unhashable_claim_trace_id_fails_closed(self):
+        values = list(fixture())
+        claim = next(row for row in values[1]
+                     if row.get("event") == "story.claimed")
+        claim["trace_id"] = []
+        self.assert_order_independent_inconclusive(
+            values, "nonempty string attempt trace ID")
+
+    def test_unhashable_terminal_outcome_event_id_fails_closed(self):
+        values = list(fixture())
+        outcome = next(row for row in values[1]
+                       if row.get("event") == "worker.outcome")
+        outcome["event_id"] = []
+        self.assert_order_independent_inconclusive(
+            values, "terminal worker outcome for claim")
+
+    def test_unhashable_launch_event_id_fails_closed(self):
+        values = list(fixture())
+        launch = next(row for row in values[1]
+                      if row.get("event") == "worker.launch.start")
+        launch["event_id"] = []
+        self.assert_order_independent_inconclusive(
+            values, "needs a durable string event ID")
 
     def test_orphan_attempt_event_requires_valid_trace_identity(self):
         for invalid in (None, 123, "   "):
@@ -1048,6 +1081,15 @@ class Rung2ReportTests(unittest.TestCase):
             "conflicting terminal and production PR/head identities" in finding
             for finding in result["measurement_integrity"]["findings"]))
 
+    def test_malformed_terminal_delivery_identity_fails_closed(self):
+        values = list(fixture())
+        outcome = next(row for row in values[1]
+                       if row.get("event") == "worker.outcome")
+        outcome["detail"] = json.dumps({
+            "pull_request": [], "head": {"not": "a commit"}})
+        self.assert_order_independent_inconclusive(
+            values, "malformed terminal PR/head identity")
+
     def test_production_event_without_durable_id_is_inconclusive(self):
         values = list(fixture())
         production = next(row for row in values[1]
@@ -1091,6 +1133,31 @@ class Rung2ReportTests(unittest.TestCase):
         self.assertTrue(any("needs a matching successful attempt outcome" in finding
                             for finding in result[
                                 "measurement_integrity"]["findings"]))
+
+    def test_malformed_exact_head_review_verdict_fails_closed(self):
+        values = list(fixture())
+        production = next(
+            row for row in values[1]
+            if row.get("event") == "delivery.pull-request.written")
+        values[1].append({
+            "event": "review.outcome.published",
+            "story": production["story"], "repo": values[0]["repository"],
+            "pull_request": production["pull_request"],
+            "head": production["head"], "verdict": "unknown",
+            "event_id": "malformed-review-verdict"})
+        self.assert_order_independent_inconclusive(
+            values, "contains an unrecognized verdict")
+
+    def test_production_event_id_cannot_be_reused_across_attempts(self):
+        values = list(fixture())
+        productions = [
+            row for row in values[1]
+            if row.get("event") == "delivery.pull-request.written" and
+            row.get("story") == 20]
+        self.assertGreaterEqual(len(productions), 2)
+        productions[1]["event_id"] = productions[0]["event_id"]
+        self.assert_order_independent_inconclusive(
+            values, "is reused across multiple attempt or delivery identities")
 
     def test_pr_only_declaration_uses_durable_process_head(self):
         values = list(fixture())

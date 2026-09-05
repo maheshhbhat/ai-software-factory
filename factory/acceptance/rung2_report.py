@@ -83,10 +83,13 @@ def unique(rows, key):
 def deterministic_copies(rows, key, findings, description):
     groups = {}
     for row in rows:
-        groups.setdefault(key(row), []).append(row)
+        marker = key(row)
+        encoded = json.dumps(marker, sort_keys=True, default=str)
+        groups.setdefault(encoded, {"marker": marker, "rows": []})["rows"].append(row)
     result = []
-    for marker in sorted(groups, key=lambda value: tuple(str(v) for v in value)):
-        candidates = groups[marker]
+    for encoded in sorted(groups):
+        marker = groups[encoded]["marker"]
+        candidates = groups[encoded]["rows"]
         encodings = {
             json.dumps(row, sort_keys=True, default=str)
             for row in candidates}
@@ -133,12 +136,20 @@ def attempt_ledger(evidence, process, numbers):
                     f"claim {row.get('event_id')!r} for Story "
                     f"{row.get('story')} needs a durable nonempty string event ID")
                 continue
+            if ("trace_id" in row and
+                    not valid_event_id(row.get("trace_id"))):
+                findings.append(
+                    f"claim {row.get('event_id')!r} for Story "
+                    f"{row.get('story')} needs a nonempty string attempt trace ID")
             claim_groups.setdefault(
                 (row.get("story"), row.get("event_id")), []).append(row)
     selected_claims = []
     for key in sorted(claim_groups, key=lambda value: tuple(str(v) for v in value)):
         candidates = claim_groups[key]
-        if len({row.get("trace_id") for row in candidates}) > 1:
+        trace_identities = {
+            json.dumps(row.get("trace_id"), sort_keys=True, default=str)
+            for row in candidates}
+        if len(trace_identities) > 1:
             findings.append(
                 f"claim {key[1]!r} for Story {key[0]} has conflicting trace identities")
         selected_claims.append(sorted(
@@ -200,8 +211,14 @@ def attempt_ledger(evidence, process, numbers):
                     row.get("story") == story and
                     ((trace and row.get("trace_id") == trace) or
                      (not trace and row.get("claim_event_id") == claim_id))):
+                if not valid_event_id(row.get("event_id")):
+                    findings.append(
+                        f"terminal worker outcome for claim {claim_id!r} needs "
+                        "a durable nonempty string event ID")
+                    continue
                 outcome_groups.setdefault(
-                    (row.get("trace_id"), row.get("event_id")), []).append(row)
+                    (json.dumps(row.get("trace_id"), sort_keys=True, default=str),
+                     row.get("event_id")), []).append(row)
         outcomes = []
         for key in sorted(
                 outcome_groups,
@@ -390,7 +407,7 @@ def attempt_ledger(evidence, process, numbers):
     return rows, findings
 
 
-def delivered_identity(outcome):
+def delivered_identity(outcome, findings=None, story=None):
     try:
         detail = json.loads(outcome.get("detail") or "")
     except (TypeError, json.JSONDecodeError):
@@ -398,7 +415,15 @@ def delivered_identity(outcome):
     if not isinstance(detail, dict):
         return None
     pr, head = detail.get("pull_request"), detail.get("head")
-    return (pr, head) if pr and head else None
+    if "pull_request" not in detail and "head" not in detail:
+        return None
+    if not valid_pull_request(pr) or not valid_commit_id(head):
+        if findings is not None:
+            findings.append(
+                f"successful attempt for Story {story} has malformed terminal "
+                "PR/head identity")
+        return None
+    return pr, head
 
 
 def review_ledger(evidence, process, numbers, attempts):
@@ -422,6 +447,7 @@ def review_ledger(evidence, process, numbers, attempts):
         key=lambda row: json.dumps(row, sort_keys=True, default=str))
     scoped_reviews = durable_reviews + legacy_reviews
     grouped = {}
+    production_ids = {}
     for row in process:
         if (row.get("event") == "delivery.pull-request.written" and
                 row.get("story") in numbers and row.get("repo") == repository):
@@ -452,6 +478,13 @@ def review_ledger(evidence, process, numbers, attempts):
             key = (row.get("story"), row.get("trace_id"),
                    row.get("pull_request"), row.get("head"))
             grouped.setdefault(key, []).append(row)
+            if valid_event_id(row.get("event_id")):
+                production_ids.setdefault(row["event_id"], set()).add(key)
+    for event_id, identities in sorted(production_ids.items()):
+        if len(identities) > 1:
+            findings.append(
+                f"PR/head production event ID {event_id!r} is reused across "
+                "multiple attempt or delivery identities")
     produced = []
     for key in sorted(grouped, key=lambda value: tuple(str(v) for v in value)):
         candidates = grouped[key]
@@ -476,7 +509,8 @@ def review_ledger(evidence, process, numbers, attempts):
             matching = [row for row in produced
                         if row.get("story") == attempt.get("story")
                         and row.get("trace_id") == attempt.get("trace_id")]
-            outcome_identity = delivered_identity(outcome)
+            outcome_identity = delivered_identity(
+                outcome, findings, attempt.get("story"))
             identity = ((matching[0].get("pull_request"), matching[0].get("head"))
                         if len(matching) == 1 else outcome_identity)
             if (len(matching) == 1 and outcome_identity and
@@ -521,11 +555,18 @@ def review_ledger(evidence, process, numbers, attempts):
     for item in produced:
         pr, head, story = (item.get("pull_request"), item.get("head"),
                            item.get("story"))
-        review_candidates = [
+        matching_review_rows = [
             row for row in scoped_reviews
             if row.get("story") == story
-            and row.get("pull_request") == pr and row.get("head") == head
-            and row.get("verdict") in ("approval", "findings")]
+            and row.get("pull_request") == pr and row.get("head") == head]
+        if any(row.get("verdict") not in ("approval", "findings")
+               for row in matching_review_rows):
+            findings.append(
+                f"exact-head review evidence for PR {pr!r} head {head!r} "
+                "contains an unrecognized verdict")
+        review_candidates = [
+            row for row in matching_review_rows
+            if row.get("verdict") in ("approval", "findings")]
         durable_reviews = deterministic_copies(
             [row for row in review_candidates
              if valid_event_id(row.get("event_id"))],
