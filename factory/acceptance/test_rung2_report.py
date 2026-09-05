@@ -221,6 +221,52 @@ class Rung2ReportTests(unittest.TestCase):
                     "result": "LAUNCHED", **mutation})
                 self.assert_order_independent_inconclusive(values, finding)
 
+    def test_claim_id_trace_exception_applies_only_to_legacy_claim(self):
+        values = list(fixture())
+        values[1].append({
+            "event": "worker.outcome", "story": 20,
+            "repo": values[0]["repository"], "trace_id": [],
+            "claim_event_id": "20-0", "event_id": "malformed-extra-outcome",
+            "worker": "factory-worker", "result": "LAUNCHED", "exit": 0})
+        self.assert_order_independent_inconclusive(
+            values, "nonempty string attempt trace ID")
+
+    def test_failover_worker_must_match_claim_launch(self):
+        values = list(fixture())
+        values[1].append({
+            "event": "worker.failover", "story": 20,
+            "repo": values[0]["repository"], "trace_id": "trace-20-0",
+            "event_id": "mismatched-failover-worker", "worker": "other",
+            "decision": "NOT_NEEDED", "result": "LAUNCHED"})
+        self.assert_order_independent_inconclusive(
+            values, "needs exactly one matching worker launch")
+
+    def test_conflicting_failover_event_payloads_fail_deterministically(self):
+        values = list(fixture())
+        common = {
+            "event": "worker.failover", "story": 20,
+            "repo": values[0]["repository"], "trace_id": "trace-20-0",
+            "event_id": "reused-failover-event", "worker": "factory-worker"}
+        values[1].extend([
+            {**common, "decision": "NOT_NEEDED", "result": "LAUNCHED"},
+            {**common, "decision": "EXHAUSTED", "result": "FAILED"}])
+        self.assert_order_independent_inconclusive(
+            values, "identifies conflicting producer payloads")
+
+    def test_identical_failover_event_payload_may_repeat_across_traces(self):
+        values = list(fixture())
+        for trace in ("trace-20-0", "trace-20-1"):
+            values[1].append({
+                "event": "worker.failover", "story": 20,
+                "repo": values[0]["repository"], "trace_id": trace,
+                "event_id": "repeated-identical-failover", "worker": "factory-worker",
+                "decision": "NOT_NEEDED", "result": "LAUNCHED"})
+        first = report.build(*values)
+        second = report.build(
+            values[0], list(reversed(values[1])), values[2], values[3])
+        self.assertEqual(first, second)
+        self.assertNotEqual("INCONCLUSIVE", first["rung_verdict"])
+
     def test_delivery_trace_without_claim_is_inconclusive(self):
         values = list(fixture())
         values[1].extend([

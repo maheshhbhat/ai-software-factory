@@ -120,6 +120,12 @@ def evidence_unavailable(evidence, *, kind, story, identity):
 def attempt_ledger(evidence, process, numbers):
     repository = evidence.get("repository")
     rows, findings = [], []
+    legacy_claim_ids = {
+        (row.get("story"), row.get("event_id"))
+        for row in process
+        if (row.get("event") == "story.claimed" and
+            row.get("repo") == repository and row.get("story") in numbers and
+            "trace_id" not in row and valid_event_id(row.get("event_id")))}
     attempt_events = {
         TERMINAL_WORKER_EVENT, "worker.launch.start", "worker.launch.end",
         "worker.failover", "delivery.pull-request.written",
@@ -129,7 +135,8 @@ def attempt_ledger(evidence, process, numbers):
                 row.get("repo") == repository and row.get("story") in numbers and
                 not valid_event_id(row.get("trace_id")) and
                 not (row.get("event") == TERMINAL_WORKER_EVENT and
-                     valid_event_id(row.get("claim_event_id")))):
+                     (row.get("story"), row.get("claim_event_id")) in
+                     legacy_claim_ids)):
             findings.append(
                 f"{row.get('event')} event for Story {row.get('story')} needs a "
                 "nonempty string attempt trace ID")
@@ -159,9 +166,11 @@ def attempt_ledger(evidence, process, numbers):
         "FELL_BACK": {"FAILED"},
         "EXHAUSTED": {"FAILED"},
     }
+    scoped_failovers = []
     for row in process:
         if (row.get("event") == "worker.failover" and
                 row.get("repo") == repository and row.get("story") in numbers):
+            scoped_failovers.append(row)
             if not valid_event_id(row.get("event_id")):
                 findings.append(
                     f"worker failover for Story {row.get('story')} needs a "
@@ -175,6 +184,20 @@ def attempt_ledger(evidence, process, numbers):
                 findings.append(
                     f"worker failover for Story {row.get('story')} has an "
                     "inconsistent decision and result")
+    failover_event_ids = {}
+    for row in scoped_failovers:
+        if valid_event_id(row.get("event_id")):
+            producer_payload = {
+                key: value for key, value in row.items()
+                if key not in unhashed_context}
+            encoded = json.dumps(
+                producer_payload, sort_keys=True, default=str)
+            failover_event_ids.setdefault(row["event_id"], set()).add(encoded)
+    for event_id, payloads in sorted(failover_event_ids.items()):
+        if len(payloads) > 1:
+            findings.append(
+                f"worker failover event ID {event_id!r} identifies conflicting "
+                "producer payloads")
     claim_groups = {}
     for row in process:
         if (row.get("event") == "story.claimed" and
@@ -320,6 +343,36 @@ def attempt_ledger(evidence, process, numbers):
         launch_starts.sort(key=lambda row: (
             str(row.get("trace_id") or ""), str(row.get("span_id") or ""),
             str(row.get("worker") or ""), str(row.get("event_id") or "")))
+        failovers = deterministic_copies(
+            [row for row in scoped_failovers
+             if trace and row.get("story") == story
+             and row.get("trace_id") == trace],
+            lambda row: (row.get("trace_id"), row.get("event_id")),
+            findings, "worker failover")
+        failovers.sort(key=lambda row: (
+            str(row.get("trace_id") or ""), str(row.get("worker") or ""),
+            str(row.get("event_id") or "")))
+        for failover in failovers:
+            matching_starts = [
+                row for row in launch_starts
+                if valid_event_id(failover.get("worker"))
+                and row.get("worker") == failover.get("worker")]
+            if len(matching_starts) != 1:
+                findings.append(
+                    f"worker failover {failover.get('event_id')!r} for claim "
+                    f"{claim_id!r} needs exactly one matching worker launch")
+            if failover.get("decision") in {"NOT_NEEDED", "SUPPRESSED"} and (
+                    not outcome or failover.get("worker") != outcome.get("worker") or
+                    failover.get("result") != outcome.get("result")):
+                findings.append(
+                    f"terminal worker failover {failover.get('event_id')!r} for "
+                    f"claim {claim_id!r} must match its terminal worker outcome")
+            if failover.get("decision") == "EXHAUSTED" and (
+                    not outcome or outcome.get("result") != "NO_WORKER_LAUNCHED" or
+                    outcome.get("worker") is not None):
+                findings.append(
+                    f"exhausted worker failover {failover.get('event_id')!r} for "
+                    f"claim {claim_id!r} must end in NO_WORKER_LAUNCHED")
         launch_ends = deterministic_copies(
             [row for row in process
              if row.get("event") == "worker.launch.end"
