@@ -20,6 +20,7 @@ import contract
 
 MARKER = "planning-artifact"
 PHASES = frozenset({"build", "ship", "shadow", "cutover", "hardening"})
+TERMINAL_STORY_LABELS = frozenset({"story:merged", "story:completed"})
 HAZARD_NAMES = frozenset({
     "package.json", "package-lock.json", "requirements.txt", "pyproject.toml",
     "poetry.lock", "go.mod", "go.sum", "cargo.toml", "cargo.lock",
@@ -228,6 +229,28 @@ def _prior(items: list[dict], artifact: int, kind: str) -> dict | None:
     return found[0] if found else None
 
 
+def _strip_marker(body: str) -> str:
+    return re.sub(rf"^<!-- {MARKER}:[^\n]*-->\n\n", "", body or "", count=1)
+
+
+def _reject_terminal_story_mutation(prior: dict, title: str, body: str,
+                                    labels: list[str]) -> None:
+    """A Story already marked story:merged or story:completed is done work.
+    Replanning must never reopen or relabel it -- only a call that leaves its
+    title, body, and labels exactly as they are may pass through."""
+    current_labels = label_names(prior)
+    terminal = current_labels & TERMINAL_STORY_LABELS
+    if not terminal:
+        return
+    if (prior.get("title") == title
+            and _strip_marker(prior.get("body") or "") == body
+            and current_labels == set(labels)):
+        return
+    raise ArtifactError(
+        f"Story #{prior['number']} is terminal ({', '.join(sorted(terminal))}) "
+        "and cannot be mutated by replanning")
+
+
 def _issue_reconcile(store: Store, artifact: int, key: str, kind: str, title: str,
                      body: str, labels: list[str]) -> dict:
     current = _find(store.list_issues("all"), marker(key, kind))
@@ -236,6 +259,7 @@ def _issue_reconcile(store: Store, artifact: int, key: str, kind: str, title: st
     prior = _prior(store.list_issues("all"), artifact, kind)
     if not prior:
         return _issue_once(store, key, kind, title, body, labels)
+    _reject_terminal_story_mutation(prior, title, body, labels)
     for label in labels:
         store.ensure_label(label)
     store.update_issue(prior["number"], f"{marker(key, kind)}\n\n{body}", title)
