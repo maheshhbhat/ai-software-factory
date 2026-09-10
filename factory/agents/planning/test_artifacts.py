@@ -557,5 +557,66 @@ reason: {reason}""")
             artifacts.verify(store, trigger, "v2", contract.Altitude.PROJECT)
 
 
+class TerminalStoryProtectionTests(unittest.TestCase):
+    @staticmethod
+    def mark_terminal(store, number, terminal_label):
+        story = next(item for item in store.issues if item["number"] == number)
+        story["labels"] = [name for name in story["labels"] if name != "story:blocked"]
+        story["labels"].append(terminal_label)
+
+    def test_terminal_merged_story_body_mutation_is_rejected(self):
+        store = FakeStore([project_issue()])
+        trigger = store.get_issue(10)
+        artifacts.write(store, trigger, "10:feedback:project:prompt-v2", project_output())
+        self.mark_terminal(store, 12, "story:merged")
+        revised = project_output()
+        revised["stories"][0]["spec"] = "Calculate a different projection."
+
+        with self.assertRaisesRegex(artifacts.ArtifactError, "terminal"):
+            artifacts.write(store, trigger, "10:feedback:project:prompt-v3", revised)
+        self.assertNotIn("different projection", store.get_issue(12)["body"])
+        self.assertEqual(4, len(store.issues))
+
+    def test_terminal_merged_story_label_mutation_is_rejected(self):
+        store = FakeStore([project_issue()])
+        trigger = store.get_issue(10)
+        artifacts.write(store, trigger, "10:feedback:project:prompt-v2", project_output())
+        self.mark_terminal(store, 12, "story:merged")
+
+        with self.assertRaisesRegex(artifacts.ArtifactError, "terminal"):
+            artifacts.write(store, trigger, "10:feedback:project:prompt-v3", project_output())
+        self.assertEqual(
+            {"type:story", "phase:build", "story:merged"},
+            set(store.get_issue(12)["labels"]))
+
+    def test_terminal_completed_story_mutation_is_rejected(self):
+        store = FakeStore([project_issue()])
+        trigger = store.get_issue(10)
+        artifacts.write(store, trigger, "10:feedback:project:prompt-v2", project_output())
+        self.mark_terminal(store, 12, "story:completed")
+
+        with self.assertRaisesRegex(artifacts.ArtifactError, "terminal"):
+            artifacts.write(store, trigger, "10:feedback:project:prompt-v3", project_output())
+        self.assertIn("story:completed", store.get_issue(12)["labels"])
+        self.assertNotIn("story:blocked", store.get_issue(12)["labels"])
+
+    def test_unchanged_terminal_story_reconciliation_succeeds(self):
+        store = FakeStore([project_issue()])
+        trigger = store.get_issue(10)
+        artifacts.write(store, trigger, "10:feedback:project:prompt-v2", project_output())
+        self.mark_terminal(store, 12, "story:merged")
+        story = store.get_issue(12)
+
+        result = artifacts._issue_reconcile(
+            store, trigger["number"], "10:feedback:project:prompt-v3", "story:model",
+            story["title"], artifacts._strip_marker(story["body"]), story["labels"])
+
+        self.assertEqual(12, result["number"])
+        self.assertEqual(set(story["labels"]), set(store.get_issue(12)["labels"]))
+        self.assertEqual(
+            artifacts._strip_marker(story["body"]),
+            artifacts._strip_marker(store.get_issue(12)["body"]))
+
+
 if __name__ == "__main__":
     unittest.main()
