@@ -20,8 +20,10 @@ ROOT = HERE.parents[2]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parents[1] / "runtime"))
+sys.path.insert(0, str(HERE.parents[1] / "gates"))
 import artifacts  # noqa: E402
 import contract  # noqa: E402
+import merge_gate  # noqa: E402 — reuse the Story `### Scope` pattern dialect and matcher
 import observability as obs  # noqa: E402
 from factory.capacity_pool.executor import CapacityExecutor  # noqa: E402
 from factory.capacity_pool.policy import POLICIES, resolved_registry  # noqa: E402
@@ -59,8 +61,34 @@ def state_version(client: artifacts.GitHubStore, issue: dict) -> str:
     return str(latest.get("id") or latest.get("created_at"))
 
 
-def read_repository(client: artifacts.GitHubStore) -> tuple[str, list[dict], dict]:
-    """Private-repository read preflight. No writer is called before this returns."""
+def grounding_scope(project_body: str | None) -> list[str] | None:
+    """Optional `### Grounding scope` on the triggering Project.
+
+    Absent the section, returns None — callers must read every matching file,
+    unchanged from before this existed. Present, its patterns are validated
+    by the exact Story `### Scope` dialect and matcher (imported from
+    `merge_gate`, never duplicated): one pattern per line, no bullets, no
+    blank lines, no brace/bracket syntax. A malformed section fails closed.
+    """
+    raw = merge_gate.parse_section(project_body or "", "Grounding scope")
+    if raw is None:
+        return None
+    patterns, error = merge_gate.parse_scope(f"### Scope\n{raw}\n")
+    if error:
+        raise InvocationError(f"repository read constraint failed: grounding scope {error}")
+    return patterns
+
+
+def read_repository(client: artifacts.GitHubStore,
+                     project_body: str | None = None) -> tuple[str, list[dict], dict]:
+    """Private-repository read preflight. No writer is called before this returns.
+
+    `project_body` is the triggering Project issue's body. When it declares a
+    `### Grounding scope` (see `grounding_scope` above), only files matching
+    those declared patterns — still subject to the extension allowlist and
+    the 500KB cap below — are read. Absent the section, every matching file
+    is read, exactly as before this parameter existed.
+    """
     metadata = client._api("")
     branch = metadata.get("default_branch")
     if not branch:
@@ -86,6 +114,13 @@ def read_repository(client: artifacts.GitHubStore) -> tuple[str, list[dict], dic
                     path.lower().endswith((".js", ".mjs", ".cjs", ".ts", ".tsx",
                                            ".jsx", ".py", ".json", ".toml", ".md",
                                            ".yml", ".yaml", ".html", ".htm", ".css"))]
+    scope = grounding_scope(project_body)
+    if scope is not None:
+        source_paths = [path for path in source_paths
+                        if any(merge_gate.match_path(pattern, path) for pattern in scope)]
+        if not source_paths:
+            raise InvocationError(
+                "repository read constraint failed: grounding scope matched no files")
     sources, total = {}, 0
     for path in source_paths:
         text = content(path)
@@ -95,8 +130,11 @@ def read_repository(client: artifacts.GitHubStore) -> tuple[str, list[dict], dic
                 "repository read constraint failed: grounded source context exceeds 500KB")
         sources[path] = text
     evidence = repository_evidence(files, sources)
-    return product, adrs, {"default_branch": branch, "files": files,
-                           "sources": sources, **evidence}
+    grounded_files = sorted(sources.keys())
+    obs.process_event("planning.repository.grounded", scoped=scope is not None,
+                      evidence={"grounded_files": grounded_files})
+    return product, adrs, {"default_branch": branch, "files": files, "sources": sources,
+                           "grounded_files": grounded_files, **evidence}
 
 
 def repository_evidence(files: list[str], sources: dict[str, str]) -> dict:
@@ -356,7 +394,7 @@ def execute(repo: str, artifact: int, token: str, timeout: int, max_usd: float,
     client = artifacts.GitHubStore(repo, token)
     try:
         issue = client.get_issue(artifact)
-        product, adrs, repository = read_repository(client)
+        product, adrs, repository = read_repository(client, issue.get("body"))
     except urllib.error.HTTPError as exc:
         if exc.code in (403, 404):
             raise InvocationError(

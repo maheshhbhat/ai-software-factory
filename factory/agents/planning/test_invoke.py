@@ -41,6 +41,25 @@ class Client(FakeStore):
         return []
 
 
+class GroundingScopeClient(Client):
+    """Controls the full file tree, per-path content, and the Project body,
+    so `### Grounding scope` can be exercised against real path matching and
+    the real 500KB accumulator — not a mocked-out version of either."""
+
+    def __init__(self, files, contents, project_body):
+        super().__init__(product_paths=files)
+        self.contents = contents
+        self.issues[0]["labels"] = ["type:project", "project:planning"]
+        self.issues[0]["body"] = project_body
+
+    def _api(self, path, method="GET", payload=None):
+        if path.startswith("/contents/"):
+            target = path[len("/contents/"):]
+            text = self.contents.get(target, "# ADR")
+            return {"content": base64.b64encode(text.encode()).decode()}
+        return super()._api(path, method=method, payload=payload)
+
+
 class ProjectClient(Client):
     def __init__(self):
         FakeStore.__init__(self, [project_issue()])
@@ -128,6 +147,52 @@ class InvocationTests(unittest.TestCase):
         self.assertEqual("# Human product", product)
         self.assertIn("PRODUCT.md", repository["files"])
 
+    def test_absent_grounding_scope_reads_every_matching_file_unchanged(self):
+        """Story #669: no `### Grounding scope` section must be byte-for-byte
+        the pre-existing behavior — every matching file is read."""
+        client = GroundingScopeClient(
+            files=["product.md", "a.py", "b.py"],
+            contents={"a.py": "a = 1", "b.py": "b = 2"},
+            project_body="### Objective\nno scope declared here\n")
+        _, _, repository = invoke.read_repository(client, client.issues[0]["body"])
+        # `GroundingScopeClient`/`Client` always add an ADR fixture path (a
+        # `.md` file, also a generic grounded source) alongside the declared
+        # files — real pre-existing behavior, unaffected by this change.
+        self.assertEqual({"a.py", "b.py", "docs/decisions/0001.md"},
+                         set(repository["grounded_files"]))
+        self.assertEqual(repository["grounded_files"], invoke.read_repository(client)[2]
+                         ["grounded_files"])
+
+    def test_grounding_scope_narrows_to_declared_patterns_only(self):
+        client = GroundingScopeClient(
+            files=["product.md", "a.py", "b.py"],
+            contents={"a.py": "a = 1", "b.py": "b = 2"},
+            project_body="### Grounding scope\na.py\n")
+        _, _, repository = invoke.read_repository(client, client.issues[0]["body"])
+        self.assertEqual(["a.py"], repository["grounded_files"])
+        self.assertNotIn("b.py", repository["sources"])
+
+    def test_grounding_scope_matching_no_files_fails_closed(self):
+        client = GroundingScopeClient(
+            files=["product.md", "a.py"], contents={"a.py": "a = 1"},
+            project_body="### Grounding scope\nnonexistent/**\n")
+        with self.assertRaisesRegex(invoke.InvocationError, "grounding scope matched no files"):
+            invoke.read_repository(client, client.issues[0]["body"])
+
+    def test_malformed_grounding_scope_fails_closed(self):
+        client = GroundingScopeClient(
+            files=["product.md", "a.py"], contents={"a.py": "a = 1"},
+            project_body="### Grounding scope\n- a.py\n")
+        with self.assertRaisesRegex(invoke.InvocationError, "grounding scope"):
+            invoke.read_repository(client, client.issues[0]["body"])
+
+    def test_scoped_grounding_still_enforces_500kb_cap(self):
+        client = GroundingScopeClient(
+            files=["product.md", "a.py"], contents={"a.py": "x" * 600_000},
+            project_body="### Grounding scope\na.py\n")
+        with self.assertRaisesRegex(invoke.InvocationError, "exceeds 500KB"):
+            invoke.read_repository(client, client.issues[0]["body"])
+
     def test_campaign_executes_through_capacity_pool_then_reads_back(self):
         client, (state, registry) = Client(), capacity()
         runner = mock.Mock(return_value=Result(stdout=json.dumps(campaign_output())))
@@ -177,8 +242,8 @@ class InvocationTests(unittest.TestCase):
                              "path": "app.js"}]
         original_read = invoke.read_repository
 
-        def read_with_facts(store):
-            product, adrs, repository = original_read(store)
+        def read_with_facts(store, project_body=None):
+            product, adrs, repository = original_read(store, project_body)
             repository["production_owners"] = repository_facts
             return product, adrs, repository
 
