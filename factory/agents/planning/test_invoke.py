@@ -60,6 +60,21 @@ class GroundingScopeClient(Client):
         return super()._api(path, method=method, payload=payload)
 
 
+class CampaignWithScopeLikeSectionClient(Client):
+    """A campaign (`type:roadmap-commitment`) trigger whose body happens to
+    contain a `### Grounding scope`-shaped section pointing at a pattern that
+    matches nothing real — reproducing the PR #670 finding that this must
+    never be applied outside a confirmed Project trigger."""
+
+    def __init__(self):
+        FakeStore.__init__(self, [{"number": 1, "labels": ["type:roadmap-commitment"],
+                                   "body": ("Retirement direction\n\n"
+                                            "### Grounding scope\nnonexistent/**\n")}])
+        self.repo, self.token = "o/r", "token"
+        self.product_paths = ["product.md"]
+        self.product_text = "# Product"
+
+
 class ProjectClient(Client):
     def __init__(self):
         FakeStore.__init__(self, [project_issue()])
@@ -192,6 +207,35 @@ class InvocationTests(unittest.TestCase):
             project_body="### Grounding scope\na.py\n")
         with self.assertRaisesRegex(invoke.InvocationError, "exceeds 500KB"):
             invoke.read_repository(client, client.issues[0]["body"])
+
+    def test_grounding_scope_rejects_internal_blank_line(self):
+        """PR #670 review finding: merge_gate.parse_scope silently drops an
+        internal blank line rather than rejecting it. Story #669's own
+        fail-closed contract requires rejection; enforce it here without
+        touching that shared, unmodified parser."""
+        client = GroundingScopeClient(
+            files=["product.md", "a.py", "b.py"],
+            contents={"a.py": "a = 1", "b.py": "b = 2"},
+            project_body="### Grounding scope\na.py\n\nb.py\n")
+        with self.assertRaisesRegex(invoke.InvocationError, "blank line"):
+            invoke.read_repository(client, client.issues[0]["body"])
+
+    def test_campaign_trigger_ignores_grounding_scope_shaped_section(self):
+        """PR #670 review finding: a `### Grounding scope`-shaped section in
+        a campaign (`type:roadmap-commitment`) issue's body must never narrow
+        or fail campaign planning, which surveys the whole repository to
+        propose a Project in the first place. Before the fix, this raised
+        InvocationError('grounding scope matched no files') instead of
+        completing normally."""
+        client, (state, registry) = CampaignWithScopeLikeSectionClient(), capacity()
+        runner = mock.Mock(return_value=Result(stdout=json.dumps(campaign_output())))
+        try:
+            with mock.patch.object(invoke.artifacts, "GitHubStore", return_value=client):
+                result = invoke.execute("o/r", 1, "token", 30, 2.5, runner=runner,
+                                        state=state, registry=registry)
+        finally:
+            state.close()
+        self.assertEqual("campaign", result.altitude.value)
 
     def test_campaign_executes_through_capacity_pool_then_reads_back(self):
         client, (state, registry) = Client(), capacity()

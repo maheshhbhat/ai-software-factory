@@ -68,11 +68,21 @@ def grounding_scope(project_body: str | None) -> list[str] | None:
     unchanged from before this existed. Present, its patterns are validated
     by the exact Story `### Scope` dialect and matcher (imported from
     `merge_gate`, never duplicated): one pattern per line, no bullets, no
-    blank lines, no brace/bracket syntax. A malformed section fails closed.
+    brace/bracket syntax. A malformed section fails closed.
+
+    Story #669's contract also fails closed on an internal blank line.
+    `merge_gate.parse_scope` itself tolerates one (silently dropped, kept for
+    the Story `### Scope` dialect's own established behavior — not something
+    this Story owns or may change), so that case is rejected here explicitly,
+    before delegating, rather than by loosening or duplicating that parser.
     """
     raw = merge_gate.parse_section(project_body or "", "Grounding scope")
     if raw is None:
         return None
+    lines = raw.strip("\n").split("\n")
+    if len(lines) > 1 and any(line.strip() == "" for line in lines):
+        raise InvocationError(
+            "repository read constraint failed: grounding scope contains a blank line")
     patterns, error = merge_gate.parse_scope(f"### Scope\n{raw}\n")
     if error:
         raise InvocationError(f"repository read constraint failed: grounding scope {error}")
@@ -83,11 +93,14 @@ def read_repository(client: artifacts.GitHubStore,
                      project_body: str | None = None) -> tuple[str, list[dict], dict]:
     """Private-repository read preflight. No writer is called before this returns.
 
-    `project_body` is the triggering Project issue's body. When it declares a
-    `### Grounding scope` (see `grounding_scope` above), only files matching
-    those declared patterns — still subject to the extension allowlist and
-    the 500KB cap below — are read. Absent the section, every matching file
-    is read, exactly as before this parameter existed.
+    `project_body` must be the triggering Project issue's body, or None — the
+    caller (`execute`, below) is what enforces that this is only ever the
+    body of a confirmed `type:project` trigger, never a campaign issue's.
+    When it declares a `### Grounding scope` (see `grounding_scope` above),
+    only files matching those declared patterns — still subject to the
+    extension allowlist and the 500KB cap below — are read. Absent the
+    section, or when `project_body` is None, every matching file is read,
+    exactly as before this parameter existed.
     """
     metadata = client._api("")
     branch = metadata.get("default_branch")
@@ -394,7 +407,14 @@ def execute(repo: str, artifact: int, token: str, timeout: int, max_usd: float,
     client = artifacts.GitHubStore(repo, token)
     try:
         issue = client.get_issue(artifact)
-        product, adrs, repository = read_repository(client, issue.get("body"))
+        # Grounding scope narrows Planning's read only for a Project trigger.
+        # Campaign/roadmap-commitment planning surveys the whole repository
+        # to propose a Project in the first place, so it must never be
+        # narrowed by a scope-shaped section that happens to appear in a
+        # campaign issue's body.
+        is_project_trigger = "type:project" in labels_of(issue)
+        project_body = issue.get("body") if is_project_trigger else None
+        product, adrs, repository = read_repository(client, project_body)
     except urllib.error.HTTPError as exc:
         if exc.code in (403, 404):
             raise InvocationError(
