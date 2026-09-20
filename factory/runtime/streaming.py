@@ -17,10 +17,16 @@ CAPTURE_CHARS_PER_LINE = 64 * 1024
 
 
 def run(command: list[str], *, cwd, env, timeout: int, component: str,
-        operation: str, **fields) -> subprocess.CompletedProcess:
+        operation: str, input: str | None = None,
+        **fields) -> subprocess.CompletedProcess:
+    # `input` is a named parameter, deliberately never part of `**fields`:
+    # it must be structurally impossible for prompt/stdin content to reach
+    # `obs.operational_log(..., **fields)` below, regardless of size or
+    # shape — not a redaction step applied after the fact.
     process = subprocess.Popen(
         command, cwd=str(cwd), env=env, stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE, text=True, start_new_session=True, bufsize=1)
+        stderr=subprocess.PIPE, stdin=(subprocess.PIPE if input is not None else None),
+        text=True, start_new_session=True, bufsize=1)
     captured = {"stdout": collections.deque(maxlen=CAPTURE_LINES),
                 "stderr": collections.deque(maxlen=CAPTURE_LINES)}
 
@@ -33,12 +39,34 @@ def run(command: list[str], *, cwd, env, timeout: int, component: str,
                 engine_output_tail=runlog.tail(line.rstrip()), **fields)
         stream.close()
 
+    def feed_stdin():
+        try:
+            process.stdin.write(input)
+        except (BrokenPipeError, OSError):
+            # The child may exit, or stop reading, before consuming every
+            # byte (e.g. a fast failure). Never let stdin delivery crash
+            # this call — the child's own exit code/output already report
+            # that outcome. Matches subprocess.communicate()'s own
+            # tolerance for this exact case.
+            pass
+        finally:
+            try:
+                process.stdin.close()
+            except OSError:
+                pass
+
     threads = []
     for item in (("stdout", process.stdout), ("stderr", process.stderr)):
         context = contextvars.copy_context()
         threads.append(threading.Thread(
             target=lambda values=item, current=context:
                 current.run(consume, *values), daemon=True))
+    if input is not None:
+        # Its own thread, started alongside the readers below, not before
+        # or after them: a child that writes enough output to fill a pipe
+        # buffer before it finishes reading stdin must not be able to wedge
+        # against a parent blocked on a single sequential write.
+        threads.append(threading.Thread(target=feed_stdin, daemon=True))
     for thread in threads:
         thread.start()
     try:
