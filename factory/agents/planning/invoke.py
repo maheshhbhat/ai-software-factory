@@ -187,20 +187,15 @@ def clone_and_ground_repository(client: artifacts.GitHubStore, repo: str, token:
     tree = client._api(f"/git/trees/{commit_sha}?recursive=1")
     files = sorted(item["path"] for item in tree.get("tree", [])
                    if item.get("type") == "blob")
-    # Checked before any clone/checkout runs: --filter=blob:none only
-    # defers ordinary blob transfer, it does not bound it — the later
-    # checkout still fetches and writes every blob the target commit's
-    # tree references, with nothing else in this function limiting that.
-    # The recursive tree listing already reports each blob's size, so the
-    # same configured ceiling that bounds evidence content also bounds
-    # what checkout would be allowed to materialize.
-    total_blob_bytes = sum(item.get("size") or 0 for item in tree.get("tree", [])
-                           if item.get("type") == "blob")
-    if total_blob_bytes > max_repository_bytes:
-        raise InvocationError(
-            "repository read constraint failed: repository blob content "
-            f"exceeds {max_repository_bytes} bytes; the clone fallback "
-            "cannot bound what checkout would materialize")
+    # NOTE: checkout still has no bound on total blob bytes materialized
+    # (tracked as a known-open finding — see PR #681 discussion). An
+    # earlier attempt reused max_repository_bytes for this, but that
+    # ceiling is exactly what read_repository()'s inline source-content
+    # sum already had to exceed to reach this fallback at all, and this
+    # tree's total blob bytes is a superset of that same content — so the
+    # check could never pass and made this fallback permanently
+    # unreachable. Fixing this needs a genuinely separate disk-budget
+    # value, which is a configuration decision, not a line fix.
     product_paths = [path for path in files if path.lower() == "product.md"]
     if len(product_paths) != 1:
         raise InvocationError("repository read constraint failed: product.md missing or ambiguous")

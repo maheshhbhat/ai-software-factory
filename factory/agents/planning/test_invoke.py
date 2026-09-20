@@ -591,25 +591,21 @@ class InvocationTests(unittest.TestCase):
         self.assertEqual("http.https://github.com/.extraHeader",
                          captured["env"]["GIT_CONFIG_KEY_0"])
 
-    def test_clone_refuses_before_checkout_when_blobs_exceed_the_limit(self):
-        """Review finding: --filter=blob:none only defers ordinary blob
-        transfer, it does not bound it — checkout still fetches and
-        writes every blob the target commit's tree references, with
-        nothing limiting total bytes materialized. The tree API already
-        reports each blob's size, so that must gate checkout the same
-        way the evidence scan is gated."""
+    def test_clone_reaches_checkout_even_when_total_blob_bytes_are_large(self):
+        """Review finding on a prior attempt at this fix: reusing
+        max_repository_bytes as a checkout-size bound made the fallback
+        permanently unreachable, since that ceiling is exactly what
+        read_repository()'s inline content sum already had to exceed to
+        get here, and this tree's total blob bytes is a superset of that
+        same content. This proves the fallback still runs (no bound is
+        enforced here yet — that is a known, separately tracked gap, not
+        this test's claim)."""
         client = CloneSizedClient(
             files=["product.md", "big.bin"], contents={},
             sizes={"big.bin": 4_000_000})
-
-        def runner(command, **kwargs):
-            raise AssertionError(
-                "no clone/checkout subprocess may run once declared blob "
-                "sizes already exceed the configured limit")
-
         with tempfile.TemporaryDirectory() as workspace_root, \
-                mock.patch.object(invoke.subprocess, "run", side_effect=runner), \
-                self.assertRaisesRegex(invoke.InvocationError, "blob content"):
+                mock.patch.object(invoke.subprocess, "run",
+                                  side_effect=fake_clone_runner({})):
             invoke.clone_and_ground_repository(
                 client, "o/r", "token", pathlib.Path(workspace_root), artifact=1)
 
