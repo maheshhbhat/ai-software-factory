@@ -118,7 +118,8 @@ class PlanningCapacityPoolAcceptance(unittest.TestCase):
             return Result(3, stderr="invalid command option")
 
         with mock.patch.dict(os.environ, {}, clear=True), \
-             self.assertRaisesRegex(invoke.InvocationError, "unknown-failure"):
+             self.assertRaisesRegex(invoke.InvocationError,
+                                    "unknown-failure.*invalid command option"):
             self.run_quietly(VALUE, 100, 10, runner=runner)
         self.assertEqual(["claude"], [command[0] for command in calls])
 
