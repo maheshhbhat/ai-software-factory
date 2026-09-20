@@ -52,10 +52,81 @@ class RepositoryBytesClient(Client):
 
     def _api(self, path, method="GET", payload=None):
         if path.startswith("/contents/"):
-            target = path[len("/contents/"):]
+            target = path[len("/contents/"):].split("?", 1)[0]
             text = self.contents.get(target, "# ADR")
             return {"content": base64.b64encode(text.encode()).decode()}
         return super()._api(path, method=method, payload=payload)
+
+
+class CloneFakeClient(RepositoryBytesClient):
+    """Adds the exact-commit ref lookup `clone_and_ground_repository` needs,
+    on top of `RepositoryBytesClient`'s per-path content control."""
+
+    def __init__(self, files, contents, commit_sha="c" * 40):
+        super().__init__(files, contents)
+        self.commit_sha = commit_sha
+
+    def _api(self, path, method="GET", payload=None):
+        if path.startswith("/git/ref/heads/"):
+            return {"object": {"sha": self.commit_sha, "type": "commit"}}
+        return super()._api(path, method=method, payload=payload)
+
+
+class CloneSizedClient(CloneFakeClient):
+    """Adds declared per-path blob sizes to the recursive tree response,
+    as GitHub's real API does, so the checkout-size preflight can be
+    tested against a declared size distinct from any fake local content."""
+
+    def __init__(self, files, contents, sizes, commit_sha="c" * 40):
+        super().__init__(files, contents, commit_sha=commit_sha)
+        self.sizes = sizes
+
+    def _api(self, path, method="GET", payload=None):
+        if path.startswith("/git/trees/"):
+            result = super()._api(path, method=method, payload=payload)
+            for item in result["tree"]:
+                item["size"] = self.sizes.get(item["path"], 0)
+            return result
+        return super()._api(path, method=method, payload=payload)
+
+
+def fake_clone_runner(contents):
+    """Simulates `git clone` + `git checkout` by writing the given files to
+    disk for real, so downstream local-file reads (repository_evidence,
+    the model's own tool access) see genuine content — not a mocked
+    subprocess result with nothing behind it."""
+    def runner(command, **kwargs):
+        if command[:2] == ["git", "clone"]:
+            (pathlib.Path(kwargs["cwd"]) / "repo").mkdir(parents=True, exist_ok=True)
+        elif command[:2] == ["git", "checkout"]:
+            repo_dir = pathlib.Path(kwargs["cwd"])
+            for path, text in contents.items():
+                target = repo_dir / path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(text, encoding="utf-8")
+        return Result(0, "", "")
+    return runner
+
+
+class CloneProjectClient(CloneFakeClient):
+    """A Project trigger (matching ProjectClient's shape, so project_output()
+    validates cleanly) combined with CloneFakeClient's controllable oversized
+    file content, for exercising the clone fallback through full execute()."""
+
+    def __init__(self, contents, commit_sha="c" * 40):
+        super().__init__(files=["product.md", "src/model/core.js"],
+                         contents=contents, commit_sha=commit_sha)
+        FakeStore.__init__(self, [project_issue()])
+        self.issues[0]["labels"] = ["type:project", "project:planning"]
+        self.repo, self.token = "o/r", "token"
+        self.contents = contents
+        self.commit_sha = commit_sha
+
+    def _pages(self, path):
+        if path.endswith("/timeline"):
+            return [{"id": 99, "event": "labeled",
+                     "label": {"name": "project:planning"}}]
+        return []
 
 
 class ProjectClient(Client):
@@ -224,6 +295,443 @@ class InvocationTests(unittest.TestCase):
         process_event.assert_any_call(
             "planning.repository.max_bytes_configured",
             max_repository_bytes=500_000, repo="o/r", artifact=42)
+
+    def test_oversized_repository_falls_back_to_an_exact_commit_clone(self):
+        """Story #680: read_repository's byte cap now raises a distinct
+        RepositoryTooLargeError, and clone_and_ground_repository grounds
+        against an exact, recorded commit instead — stronger provenance
+        than the non-fallback path, which records no commit at all."""
+        client = CloneFakeClient(
+            files=["product.md", "a.py"], contents={"a.py": "x" * 600_000},
+            commit_sha="d34db33f" * 5)
+        with self.assertRaises(invoke.RepositoryTooLargeError):
+            invoke.read_repository(client, max_repository_bytes=500_000)
+        with tempfile.TemporaryDirectory() as workspace_root, \
+                mock.patch.object(invoke.subprocess, "run",
+                                  side_effect=fake_clone_runner({"a.py": "x" * 600_000})):
+            product, adrs, repository, workspace = invoke.clone_and_ground_repository(
+                client, "o/r", "token", pathlib.Path(workspace_root), artifact=42)
+        self.assertEqual("d34db33f" * 5, repository["commit_sha"])
+        self.assertEqual({}, repository["sources"])
+        self.assertIn("a.py", repository["files"])
+        # workspace is the neutral parent, not the checkout itself — see
+        # the review finding this was fixed for: an engine launched with
+        # its working directory *inside* a real checkout auto-loads that
+        # repository's own CLAUDE.md/AGENTS.md as its own instructions.
+        self.assertEqual(pathlib.Path(workspace_root), workspace)
+        self.assertFalse(str(workspace).endswith("repo"))
+
+    def test_clone_fallback_evidence_matches_the_api_based_path(self):
+        """repository_evidence() itself is unchanged; only its input source
+        changes. The same manifest content must produce identical facts
+        whether read via the GitHub API or a local clone."""
+        manifest = json.dumps({"factoryPolicy": {"forbiddenDependencies": ["puppeteer"]}})
+        client = CloneFakeClient(
+            files=["product.md", "app.py", "policy.json"],
+            contents={"app.py": "def handle(): pass", "policy.json": manifest})
+        with tempfile.TemporaryDirectory() as workspace_root, \
+                mock.patch.object(invoke.subprocess, "run",
+                                  side_effect=fake_clone_runner(
+                                      {"app.py": "def handle(): pass",
+                                       "policy.json": manifest})):
+            _, _, repository, _ = invoke.clone_and_ground_repository(
+                client, "o/r", "token", pathlib.Path(workspace_root), artifact=1)
+        api_evidence = invoke.repository_evidence(
+            repository["files"], {"policy.json": manifest})
+        self.assertEqual(api_evidence["forbidden_dependencies"],
+                         repository["forbidden_dependencies"])
+        self.assertEqual(["puppeteer"], repository["forbidden_dependencies"])
+
+    def test_execute_falls_back_and_cleans_up_the_clone_on_success(self):
+        big_content = {"src/model/core.js": "x" * 600_000}
+        client = CloneProjectClient(contents=big_content)
+        runner = mock.Mock(return_value=Result(stdout=json.dumps(project_output())))
+        clone_dirs = []
+
+        def capturing_clone_runner(command, **kwargs):
+            if command[:2] == ["git", "clone"]:
+                (pathlib.Path(kwargs["cwd"]) / "repo").mkdir(parents=True, exist_ok=True)
+                clone_dirs.append(pathlib.Path(kwargs["cwd"]))
+            elif command[:2] == ["git", "checkout"]:
+                for path, text in big_content.items():
+                    target = pathlib.Path(kwargs["cwd"]) / path
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_text(text)
+            return Result(0, "", "")
+
+        state, registry = capacity()
+        try:
+            with mock.patch.object(invoke.artifacts, "GitHubStore", return_value=client), \
+                    mock.patch.object(invoke.subprocess, "run",
+                                      side_effect=capturing_clone_runner):
+                result = invoke.execute("o/r", 10, "token", 30, 2.5,
+                                        runner=runner, state=state, registry=registry,
+                                        max_repository_bytes=500_000)
+        finally:
+            state.close()
+        self.assertIn("project:awaiting-ready", client.get_issue(10)["labels"])
+        self.assertEqual(1, len(clone_dirs))
+        self.assertFalse(clone_dirs[0].exists(),
+                         "the ephemeral clone workspace must not survive execute()")
+
+    def test_execute_cleans_up_the_clone_even_when_the_model_call_fails(self):
+        big_content = {"src/model/core.js": "x" * 600_000}
+        client = CloneProjectClient(contents=big_content)
+        runner = mock.Mock(return_value=Result(1, "", "failed"))
+        clone_dirs = []
+
+        def capturing_clone_runner(command, **kwargs):
+            if command[:2] == ["git", "clone"]:
+                (pathlib.Path(kwargs["cwd"]) / "repo").mkdir(parents=True, exist_ok=True)
+                clone_dirs.append(pathlib.Path(kwargs["cwd"]))
+            elif command[:2] == ["git", "checkout"]:
+                for path, text in big_content.items():
+                    target = pathlib.Path(kwargs["cwd"]) / path
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_text(text)
+            return Result(0, "", "")
+
+        state, registry = capacity()
+        try:
+            with mock.patch.object(invoke.artifacts, "GitHubStore", return_value=client), \
+                    mock.patch.object(invoke.subprocess, "run",
+                                      side_effect=capturing_clone_runner), \
+                    self.assertRaises(invoke.InvocationError):
+                invoke.execute("o/r", 10, "token", 30, 2.5,
+                               runner=runner, state=state, registry=registry,
+                               max_repository_bytes=500_000)
+        finally:
+            state.close()
+        self.assertEqual(1, len(clone_dirs))
+        self.assertFalse(clone_dirs[0].exists(),
+                         "the ephemeral clone workspace must be removed even on failure")
+
+    def test_fallback_keeps_the_read_only_sandbox(self):
+        """run_model's InvocationPayload access mode must stay read-only in
+        the fallback path — Planning must never be able to write into the
+        product repository it is planning, only into its own output file."""
+        captured = {}
+
+        def runner(command, **kwargs):
+            captured["command"] = command
+            return Result(0, json.dumps(project_output()), "")
+
+        state, registry = capacity()
+        try:
+            invoke.run_model(
+                {"trigger": {**project_issue(), "labels": ["type:project", "project:planning"]},
+                 "product": "# Product", "adrs": [],
+                 "repository": {"files": ["product.md", "src/model/core.js"]},
+                 "review_comments": [], "existing_plan": {}},
+                30, 2.5, runner=runner, state=state, registry=registry,
+                workspace=pathlib.Path("/tmp"))
+        finally:
+            state.close()
+        self.assertIn("--sandbox", captured["command"])
+        self.assertEqual("read-only",
+                         captured["command"][captured["command"].index("--sandbox") + 1])
+
+    def test_fallback_skips_git_repo_check_since_cwd_is_neutral(self):
+        """The engine's working directory is the neutral parent, not the
+        checkout — which is itself not a git repository, so the adapter
+        must be told not to require one."""
+        captured = {}
+
+        def runner(command, **kwargs):
+            captured["command"] = command
+            return Result(0, json.dumps(project_output()), "")
+
+        state, registry = capacity()
+        try:
+            invoke.run_model(
+                {"trigger": {**project_issue(), "labels": ["type:project", "project:planning"]},
+                 "product": "# Product", "adrs": [],
+                 "repository": {"files": ["product.md", "src/model/core.js"]},
+                 "review_comments": [], "existing_plan": {}},
+                30, 2.5, runner=runner, state=state, registry=registry,
+                workspace=pathlib.Path("/tmp"))
+        finally:
+            state.close()
+        self.assertIn("--skip-git-repo-check", captured["command"])
+
+    def test_clone_grounding_pins_every_read_to_the_exact_commit(self):
+        """Review finding: the branch can advance between the commit
+        lookup and later reads. Every grounding read must name the
+        resolved commit explicitly, never the branch, so a checkout and
+        its file index/product.md/ADRs can never disagree."""
+        client = CloneFakeClient(
+            files=["product.md", "docs/decisions/0001.md"],
+            contents={}, commit_sha="f" * 40)
+        seen_paths = []
+        original_api = client._api
+
+        def recording_api(path, method="GET", payload=None):
+            seen_paths.append(path)
+            return original_api(path, method=method, payload=payload)
+
+        client._api = recording_api
+        with tempfile.TemporaryDirectory() as workspace_root, \
+                mock.patch.object(invoke.subprocess, "run", side_effect=fake_clone_runner({})):
+            invoke.clone_and_ground_repository(
+                client, "o/r", "token", pathlib.Path(workspace_root), artifact=1)
+        tree_calls = [p for p in seen_paths if p.startswith("/git/trees/")]
+        content_calls = [p for p in seen_paths if p.startswith("/contents/")]
+        self.assertTrue(tree_calls and all("f" * 40 in p for p in tree_calls),
+                        f"tree read must use the exact commit, not the branch: {tree_calls}")
+        self.assertTrue(content_calls and all(f"ref={'f' * 40}" in p for p in content_calls),
+                        f"content reads must pin ?ref= to the exact commit: {content_calls}")
+
+    def test_clone_rejects_a_truncated_tree_listing(self):
+        """Review finding: GitHub returns truncated: true when a
+        repository's tree exceeds its recursive-listing size limit. Using
+        that partial prefix as the complete file index would silently
+        under-report repository.files, and a scope/executor the model
+        legitimately found in the real checkout could then be wrongly
+        rejected by contract.py against an incomplete index."""
+        client = CloneFakeClient(files=["product.md"], contents={})
+        original_api = client._api
+
+        def truncated_api(path, method="GET", payload=None):
+            result = original_api(path, method=method, payload=payload)
+            if path.startswith("/git/trees/"):
+                result["truncated"] = True
+            return result
+
+        client._api = truncated_api
+        with tempfile.TemporaryDirectory() as workspace_root, \
+                mock.patch.object(invoke.subprocess, "run",
+                                  side_effect=fake_clone_runner({})), \
+                self.assertRaisesRegex(invoke.InvocationError, "truncated"):
+            invoke.clone_and_ground_repository(
+                client, "o/r", "token", pathlib.Path(workspace_root), artifact=1)
+
+    def test_clone_evidence_fails_closed_when_oversized(self):
+        """Review finding: the fallback's evidence scan had no size bound
+        at all, removing exactly the protection the non-fallback path has
+        — for the repositories most likely to trip it."""
+        huge_manifest = json.dumps({"factoryPolicy": {
+            "forbiddenDependencies": ["x" * 600_000]}})
+        client = CloneFakeClient(
+            files=["product.md", "policy.json"], contents={})
+        with tempfile.TemporaryDirectory() as workspace_root, \
+                mock.patch.object(invoke.subprocess, "run",
+                                  side_effect=fake_clone_runner(
+                                      {"policy.json": huge_manifest})), \
+                self.assertRaisesRegex(invoke.InvocationError, "evidence"):
+            invoke.clone_and_ground_repository(
+                client, "o/r", "token", pathlib.Path(workspace_root), artifact=1)
+
+    def test_clone_evidence_checks_size_before_reading_file_content(self):
+        """Review finding: a single oversized file was fully read into
+        memory (read_text) before its size was ever checked against the
+        limit — the size check must gate the read, not follow it."""
+        huge_manifest = "x" * 600_000
+        client = CloneFakeClient(files=["product.md", "policy.json"], contents={})
+        with tempfile.TemporaryDirectory() as workspace_root, \
+                mock.patch.object(invoke.subprocess, "run",
+                                  side_effect=fake_clone_runner(
+                                      {"policy.json": huge_manifest})), \
+                mock.patch.object(
+                    pathlib.Path, "read_text",
+                    side_effect=AssertionError(
+                        "read_text must not run once the on-disk size alone "
+                        "exceeds the limit")), \
+                self.assertRaisesRegex(invoke.InvocationError, "evidence"):
+            invoke.clone_and_ground_repository(
+                client, "o/r", "token", pathlib.Path(workspace_root), artifact=1)
+
+    def test_clone_evidence_honors_a_narrower_configured_limit(self):
+        """Review finding: the fallback's evidence check compared against
+        the hardcoded DEFAULT_MAX_REPOSITORY_BYTES regardless of what the
+        caller configured, so an operator-set narrower limit was silently
+        not enforced during the fallback."""
+        client = CloneFakeClient(files=["product.md", "policy.json"], contents={})
+        with tempfile.TemporaryDirectory() as workspace_root, \
+                mock.patch.object(invoke.subprocess, "run",
+                                  side_effect=fake_clone_runner(
+                                      {"policy.json": "x" * 100_000})), \
+                self.assertRaisesRegex(invoke.InvocationError,
+                                      "exceeds 50000 bytes"):
+            invoke.clone_and_ground_repository(
+                client, "o/r", "token", pathlib.Path(workspace_root), artifact=1,
+                max_repository_bytes=50_000)
+
+    def test_clone_evidence_honors_a_wider_configured_limit(self):
+        """Review finding, other direction: the fallback's evidence check
+        compared against the hardcoded default even when the caller
+        configured a wider limit, so a file within the configured
+        allowance but over the hardcoded default was wrongly rejected."""
+        client = CloneFakeClient(files=["product.md", "policy.json"], contents={})
+        with tempfile.TemporaryDirectory() as workspace_root, \
+                mock.patch.object(invoke.subprocess, "run",
+                                  side_effect=fake_clone_runner(
+                                      {"policy.json": "x" * 600_000})):
+            # Must not raise: 600,000 bytes is over the 500,000-byte
+            # default but under this call's explicit 700,000-byte limit.
+            invoke.clone_and_ground_repository(
+                client, "o/r", "token", pathlib.Path(workspace_root), artifact=1,
+                max_repository_bytes=700_000)
+
+    def test_clone_disables_lfs_smudge(self):
+        """Review finding: without GIT_LFS_SKIP_SMUDGE, checkout runs the
+        LFS smudge filter and downloads every tracked object the commit
+        references — unbounded, repository-controlled outbound traffic
+        and disk use Planning never needs (it only reads text)."""
+        captured = {}
+
+        def runner(command, **kwargs):
+            if command[:2] == ["git", "clone"]:
+                captured["env"] = kwargs["env"]
+            return fake_clone_runner({})(command, **kwargs)
+
+        client = CloneFakeClient(files=["product.md"], contents={})
+        with tempfile.TemporaryDirectory() as workspace_root, \
+                mock.patch.object(invoke.subprocess, "run", side_effect=runner):
+            invoke.clone_and_ground_repository(
+                client, "o/r", "token", pathlib.Path(workspace_root), artifact=1)
+        self.assertEqual("1", captured["env"]["GIT_LFS_SKIP_SMUDGE"])
+
+    def test_checkout_carries_the_same_credential_and_lfs_env_as_the_clone(self):
+        """Review finding: with --no-checkout on the clone, the checkout
+        step is the one that actually fetches the target commit's blobs
+        over the network and runs the LFS smudge filter — but it ran with
+        a PATH-only environment, silently dropping both the scoped
+        credential header (breaking private-repository checkout) and
+        GIT_LFS_SKIP_SMUDGE (reopening the unbounded-LFS-download finding
+        this same PR already claimed to fix)."""
+        captured = {}
+
+        def runner(command, **kwargs):
+            if command[:2] == ["git", "checkout"]:
+                captured["env"] = kwargs["env"]
+            return fake_clone_runner({})(command, **kwargs)
+
+        client = CloneFakeClient(files=["product.md"], contents={})
+        with tempfile.TemporaryDirectory() as workspace_root, \
+                mock.patch.object(invoke.subprocess, "run", side_effect=runner):
+            invoke.clone_and_ground_repository(
+                client, "o/r", "token", pathlib.Path(workspace_root), artifact=1)
+        self.assertEqual("1", captured["env"]["GIT_LFS_SKIP_SMUDGE"])
+        self.assertEqual("http.https://github.com/.extraHeader",
+                         captured["env"]["GIT_CONFIG_KEY_0"])
+
+    def test_clone_reaches_checkout_even_when_total_blob_bytes_are_large(self):
+        """Review finding on a prior attempt at this fix: reusing
+        max_repository_bytes as a checkout-size bound made the fallback
+        permanently unreachable, since that ceiling is exactly what
+        read_repository()'s inline content sum already had to exceed to
+        get here, and this tree's total blob bytes is a superset of that
+        same content. This proves the fallback still runs (no bound is
+        enforced here yet — that is a known, separately tracked gap, not
+        this test's claim)."""
+        client = CloneSizedClient(
+            files=["product.md", "big.bin"], contents={},
+            sizes={"big.bin": 4_000_000})
+        with tempfile.TemporaryDirectory() as workspace_root, \
+                mock.patch.object(invoke.subprocess, "run",
+                                  side_effect=fake_clone_runner({})):
+            invoke.clone_and_ground_repository(
+                client, "o/r", "token", pathlib.Path(workspace_root), artifact=1)
+
+    def test_clone_removes_every_symlink_in_the_checkout_not_just_evidence(self):
+        """Security finding: only symlinks selected by the evidence scan
+        were rejected; every other symlink in the checkout remained live
+        and readable, and the prompt tells the model to read repository
+        files directly by path — a tracked symlink to an absolute host
+        path (a worker credential file, a procfs entry) would be exposed
+        to the model like any other repository file."""
+        client = CloneFakeClient(files=["product.md", "src/config.py"], contents={})
+
+        def runner(command, **kwargs):
+            if command[:2] == ["git", "clone"]:
+                (pathlib.Path(kwargs["cwd"]) / "repo").mkdir(parents=True, exist_ok=True)
+            elif command[:2] == ["git", "checkout"]:
+                repo_dir = pathlib.Path(kwargs["cwd"])
+                outside = repo_dir.parent / "outside_target.txt"
+                outside.write_text("host content", encoding="utf-8")
+                link_path = repo_dir / "src" / "config.py"
+                link_path.parent.mkdir(parents=True, exist_ok=True)
+                link_path.symlink_to(outside)
+            return Result(0, "", "")
+
+        with tempfile.TemporaryDirectory() as workspace_root, \
+                mock.patch.object(invoke.subprocess, "run", side_effect=runner):
+            invoke.clone_and_ground_repository(
+                client, "o/r", "token", pathlib.Path(workspace_root), artifact=1)
+            self.assertFalse(
+                (pathlib.Path(workspace_root) / "repo" / "src" / "config.py").exists(),
+                "the symlink must be removed, not merely skipped by the evidence scan")
+
+    def test_clone_fetches_a_filtered_no_checkout_tree_not_full_history(self):
+        """Review finding: an unrestricted clone downloads every reachable
+        object even though the fallback only ever uses one commit's tree
+        — a repository with a long history or large historical binaries
+        can time out or exhaust worker disk before planning begins."""
+        captured = {}
+
+        def runner(command, **kwargs):
+            if command[:2] == ["git", "clone"]:
+                captured["command"] = command
+            return fake_clone_runner({})(command, **kwargs)
+
+        client = CloneFakeClient(files=["product.md"], contents={})
+        with tempfile.TemporaryDirectory() as workspace_root, \
+                mock.patch.object(invoke.subprocess, "run", side_effect=runner):
+            invoke.clone_and_ground_repository(
+                client, "o/r", "token", pathlib.Path(workspace_root), artifact=1)
+        self.assertIn("--filter=blob:none", captured["command"])
+        self.assertIn("--no-checkout", captured["command"])
+
+    def test_clone_evidence_rejects_symlinked_paths(self):
+        """Security finding: a symlink whose target can report a stat()
+        size that does not reflect what read() actually returns (as with
+        a procfs pseudo-file) would defeat the size check entirely. A
+        symlinked evidence path must be rejected outright, never stat'd
+        or read through, regardless of what its target is."""
+        client = CloneFakeClient(files=["product.md", "tests/exhaust.py"], contents={})
+
+        def runner(command, **kwargs):
+            if command[:2] == ["git", "clone"]:
+                (pathlib.Path(kwargs["cwd"]) / "repo").mkdir(parents=True, exist_ok=True)
+            elif command[:2] == ["git", "checkout"]:
+                repo_dir = pathlib.Path(kwargs["cwd"])
+                outside = repo_dir.parent / "outside_target.txt"
+                outside.write_text("innocuous", encoding="utf-8")
+                link_path = repo_dir / "tests" / "exhaust.py"
+                link_path.parent.mkdir(parents=True, exist_ok=True)
+                link_path.symlink_to(outside)
+            return Result(0, "", "")
+
+        with tempfile.TemporaryDirectory() as workspace_root, \
+                mock.patch.object(invoke.subprocess, "run", side_effect=runner), \
+                mock.patch.object(
+                    pathlib.Path, "read_text",
+                    side_effect=AssertionError(
+                        "a symlinked evidence path must never be read")):
+            invoke.clone_and_ground_repository(
+                client, "o/r", "token", pathlib.Path(workspace_root), artifact=1)
+
+    def test_clone_credential_header_is_scoped_to_github_not_global(self):
+        """Review finding: an unscoped http.extraHeader is inherited by
+        every HTTP request git makes for this process, including a Git
+        LFS smudge filter's request to a repository-controlled lfs.url —
+        leaking this factory token to that server. The header must be
+        scoped to the github.com URL prefix, which git-lfs also honors
+        since it reads the same git config."""
+        captured = {}
+
+        def runner(command, **kwargs):
+            if command[:2] == ["git", "clone"]:
+                captured["env"] = kwargs["env"]
+            return fake_clone_runner({})(command, **kwargs)
+
+        client = CloneFakeClient(files=["product.md"], contents={})
+        with tempfile.TemporaryDirectory() as workspace_root, \
+                mock.patch.object(invoke.subprocess, "run", side_effect=runner):
+            invoke.clone_and_ground_repository(
+                client, "o/r", "token", pathlib.Path(workspace_root), artifact=1)
+        self.assertEqual("http.https://github.com/.extraHeader",
+                         captured["env"]["GIT_CONFIG_KEY_0"])
 
     def test_campaign_executes_through_capacity_pool_then_reads_back(self):
         client, (state, registry) = Client(), capacity()

@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import contextlib
 import hashlib
 import json
 import os
@@ -37,6 +39,15 @@ DEFAULT_MAX_REPOSITORY_BYTES = 500_000
 
 class InvocationError(RuntimeError):
     pass
+
+
+class RepositoryTooLargeError(InvocationError):
+    """`read_repository` hit the configured byte cap.
+
+    A distinct type, not just a message, so `execute` can tell "genuinely
+    too large — try the repository-native fallback" apart from every other
+    reason `read_repository` fails closed, which must keep failing closed.
+    """
 
 
 def labels_of(issue: dict) -> list[str]:
@@ -118,13 +129,173 @@ def read_repository(client: artifacts.GitHubStore,
         text = content(path)
         total += len(text.encode())
         if total > max_repository_bytes:
-            raise InvocationError(
+            raise RepositoryTooLargeError(
                 "repository read constraint failed: grounded source context "
                 f"exceeds configured limit of {max_repository_bytes} bytes")
         sources[path] = text
     evidence = repository_evidence(files, sources)
     return product, adrs, {"default_branch": branch, "files": files,
                            "sources": sources, **evidence}
+
+
+def clone_and_ground_repository(client: artifacts.GitHubStore, repo: str, token: str,
+                                workspace_root: pathlib.Path, *,
+                                artifact: int | None = None,
+                                max_repository_bytes: int = DEFAULT_MAX_REPOSITORY_BYTES,
+                                ) -> tuple[str, list[dict], dict, pathlib.Path]:
+    """Fallback grounding for a repository `read_repository` cannot inline
+    (see `RepositoryTooLargeError`). Clones the repository at its exact
+    current commit instead of reading and inlining every file's content —
+    the same clone-and-explore pattern `factory/agents/review/invoke.py`
+    already uses safely in production.
+
+    Returns `(product, adrs, repository, workspace)`. `workspace` is a
+    *neutral* directory containing the checkout at `workspace/repo` — never
+    the checkout itself. An engine launched with its working directory
+    inside a real checkout loads that repository's own `CLAUDE.md`/
+    `AGENTS.md` as its own operating instructions (a real, previously
+    observed incident: see the comment in
+    `factory/capacity_pool/providers/cli.py`'s `probe()`), which would
+    defeat this contract's own rule that repository content is context,
+    never instructions. `run_model` tells the model where the checkout
+    actually is via the prompt instead.
+
+    `repository["sources"]` is empty and `repository["commit_sha"]`
+    records exactly what was checked out. Every grounding read below —
+    the file index, `product.md`, ADRs, and the evidence scan — is pinned
+    to that exact commit, not the branch name, so a push landing between
+    the commit lookup and these reads can never produce a checkout and a
+    file index that disagree. `repository_evidence` runs unchanged,
+    reading the same file categories from the clone instead of the GitHub
+    API, so its forbidden-dependency/production-owner facts are identical
+    either way — bounded by the same `max_repository_bytes` ceiling the
+    non-fallback path uses, so a repository with huge fixture/data files
+    under a test directory still fails closed rather than exhausting
+    memory, exactly the failure mode this Story exists to avoid elsewhere.
+    """
+    metadata = client._api("")
+    branch = metadata.get("default_branch")
+    if not branch:
+        raise InvocationError("repository read constraint failed: default branch unavailable")
+    ref = client._api(f"/git/ref/heads/{branch}")
+    commit_sha = (ref.get("object") or {}).get("sha")
+    if not commit_sha:
+        raise InvocationError("repository read constraint failed: exact commit unavailable")
+    # Every read below names commit_sha explicitly (a tree SHA, or ?ref=)
+    # rather than the branch — never the branch again, which can advance
+    # between this lookup and any later call.
+    tree = client._api(f"/git/trees/{commit_sha}?recursive=1")
+    if tree.get("truncated"):
+        raise InvocationError(
+            "repository read constraint failed: repository tree listing was "
+            "truncated by GitHub; the file index would be incomplete")
+    files = sorted(item["path"] for item in tree.get("tree", [])
+                   if item.get("type") == "blob")
+    # NOTE: checkout still has no bound on total blob bytes materialized
+    # (tracked as a known-open finding — see PR #681 discussion). An
+    # earlier attempt reused max_repository_bytes for this, but that
+    # ceiling is exactly what read_repository()'s inline source-content
+    # sum already had to exceed to reach this fallback at all, and this
+    # tree's total blob bytes is a superset of that same content — so the
+    # check could never pass and made this fallback permanently
+    # unreachable. Fixing this needs a genuinely separate disk-budget
+    # value, which is a configuration decision, not a line fix.
+    product_paths = [path for path in files if path.lower() == "product.md"]
+    if len(product_paths) != 1:
+        raise InvocationError("repository read constraint failed: product.md missing or ambiguous")
+
+    def api_content(path):
+        item = client._api(f"/contents/{path}?ref={commit_sha}")
+        return base64.b64decode(item["content"]).decode("utf-8")
+
+    product = api_content(product_paths[0])
+    adr_paths = [path for path in files
+                 if path.lower().endswith(".md") and
+                 ("/adr" in f"/{path.lower()}" or "/decisions/" in f"/{path.lower()}/")]
+    adrs = [{"path": path, "content": api_content(path)} for path in adr_paths]
+
+    repo_dir = workspace_root / "repo"
+    auth_header = base64.b64encode(f"x-access-token:{token}".encode()).decode()
+    clone_env = dict(os.environ)
+    # Scoped to the github.com URL prefix, not a blanket http.extraHeader:
+    # an unscoped header is sent with every HTTP request git makes for this
+    # process, including a Git LFS smudge filter's request to whatever
+    # lfs.url a checked-out .lfsconfig names. A repository-controlled LFS
+    # server would then receive this factory token. Scoping the config key
+    # to https://github.com/ means git (and git-lfs, which reads the same
+    # config) only attaches it to requests against that URL.
+    clone_env.update({"GIT_CONFIG_COUNT": "1",
+                      "GIT_CONFIG_KEY_0": "http.https://github.com/.extraHeader",
+                      "GIT_CONFIG_VALUE_0": f"Authorization: Basic {auth_header}",
+                      # Planning reads text (product.md, ADRs, JSON/test
+                      # evidence) from the checkout; it never needs the
+                      # binary content an LFS pointer resolves to. Without
+                      # this, checkout runs the LFS smudge filter, which
+                      # downloads every tracked object the commit
+                      # references — an unbounded, repository-controlled
+                      # amount of outbound traffic and worker disk use.
+                      "GIT_LFS_SKIP_SMUDGE": "1"})
+    obs.process_event("planning.repository.cloned", repo=repo, artifact=artifact,
+                      commit_sha=commit_sha)
+    # --filter=blob:none + --no-checkout: fetch the full commit/tree graph
+    # (needed so the later checkout can resolve commit_sha even if it is
+    # not the branch tip by the time this runs) but no blob content up
+    # front. The explicit checkout below then fetches only the blobs the
+    # one target commit's tree actually references, not the repository's
+    # full history of file content.
+    subprocess.run(["git", "clone", "--quiet", "--filter=blob:none", "--no-checkout",
+                    f"https://github.com/{repo}.git", "repo"],
+                   cwd=workspace_root, env=clone_env, check=True,
+                   capture_output=True, text=True, timeout=120)
+    # Same env as the clone above, not a PATH-only trim: with
+    # --filter=blob:none --no-checkout, this checkout is the step that
+    # actually fetches the target commit's blobs over the network, so it
+    # needs the same scoped credential header — and it is the step that
+    # runs the LFS smudge filter, so it needs the same skip-smudge flag.
+    subprocess.run(["git", "checkout", "--quiet", commit_sha], cwd=repo_dir,
+                   env=clone_env, check=True,
+                   capture_output=True, text=True, timeout=60)
+
+    # Every symlink in the checkout is removed outright, not just ones the
+    # evidence scan below happens to select: the prompt tells the model to
+    # read repository files directly from this checkout, and a tracked
+    # symlink to an absolute host path (a worker credential file, a procfs
+    # entry) would otherwise be exposed to it like any other repository
+    # file. Planning never needs a symlink to do its job.
+    for entry in repo_dir.rglob("*"):
+        if entry.is_symlink():
+            entry.unlink()
+
+    # Only the categories repository_evidence() actually inspects — the
+    # model itself reads whatever else it needs directly from the clone.
+    # Bounded exactly like the non-fallback path's grounded-content cap:
+    # this is the one case where the fallback still reads file content
+    # into memory up front, so it needs the same fail-closed protection.
+    evidence_paths = [path for path in files
+                      if path.lower().endswith(".json") or executable_test_path(path)]
+    local_sources, evidence_total = {}, 0
+    for path in evidence_paths:
+        local_path = repo_dir / path
+        # is_symlink() checked without following: a symlink to a special
+        # file (e.g. a procfs path) can report stat() size 0 while still
+        # streaming unbounded content on read, defeating the size check
+        # below entirely. Rejected outright rather than resolved and
+        # validated, since evidence never needs to be a symlink.
+        if local_path.is_symlink() or not local_path.is_file():
+            continue
+        # Checked against the file's size on disk before read_text() runs,
+        # so a single file already over the limit is never materialized in
+        # memory to find that out.
+        evidence_total += local_path.stat().st_size
+        if evidence_total > max_repository_bytes:
+            raise InvocationError(
+                "repository read constraint failed: policy/test evidence content "
+                f"exceeds {max_repository_bytes} bytes")
+        local_sources[path] = local_path.read_text(encoding="utf-8", errors="replace")
+    evidence = repository_evidence(files, local_sources)
+
+    return product, adrs, {"default_branch": branch, "files": files, "sources": {},
+                           "commit_sha": commit_sha, **evidence}, workspace_root
 
 
 def repository_evidence(files: list[str], sources: dict[str, str]) -> dict:
@@ -336,7 +507,22 @@ def _planning_triggers(value: dict) -> frozenset[str]:
 
 def run_model(value: dict, timeout: int, max_usd: float,
               runner=subprocess.run, clock=time.monotonic, *,
-              state: CapacityState | None = None, registry=None) -> dict:
+              state: CapacityState | None = None, registry=None,
+              workspace: pathlib.Path | None = None) -> dict:
+    """`workspace`, when given, is a *neutral* directory containing a real
+    repository checkout at `workspace/repo` (see
+    `clone_and_ground_repository`) — the engine's own working directory
+    stays outside the checkout itself, so it never auto-loads the target
+    repository's own `CLAUDE.md`/`AGENTS.md` as its own instructions (a
+    real, previously observed incident; see the comment in
+    `factory/capacity_pool/providers/cli.py`'s `probe()`). `prompt.md`
+    tells the model the checkout is at `./repo` relative to its working
+    directory. `access="read-only"` is already `InvocationPayload`'s
+    default — unchanged either way, so the model can read files there but
+    never write into the product repo. `skip_git_repo_check` is set for
+    this case because the neutral working directory itself is not a git
+    repository, only the `repo` subdirectory beneath it is.
+    """
     altitude = contract.select_altitude(set((value.get("trigger") or {}).get("labels", [])))
     schema_value = contract.json_schema(altitude)
     prompt = (HERE.joinpath("prompt.md").read_text()
@@ -354,9 +540,11 @@ def run_model(value: dict, timeout: int, max_usd: float,
                 triggers=_planning_triggers(value), total_timeout_seconds=timeout,
                 total_budget_units=max_usd)
             payload = InvocationPayload(prompt, schema_value, pathlib.Path(schema.name),
-                                        pathlib.Path(output.name))
+                                        pathlib.Path(output.name),
+                                        skip_git_repo_check=(workspace is not None))
             adapters = {provider: cli_adapter(
-                provider, cwd=ROOT, environment=provider_environment(provider), runner=runner)
+                provider, cwd=(workspace or ROOT),
+                environment=provider_environment(provider), runner=runner)
                 for provider in {item.provider for item in available}}
             executor = CapacityExecutor(
                 adapters, state,
@@ -383,40 +571,55 @@ def execute(repo: str, artifact: int, token: str, timeout: int, max_usd: float,
             runner=subprocess.run, *, state=None, registry=None,
             max_repository_bytes: int = DEFAULT_MAX_REPOSITORY_BYTES) -> artifacts.WrittenPlan:
     client = artifacts.GitHubStore(repo, token)
-    try:
-        issue = client.get_issue(artifact)
-        product, adrs, repository = read_repository(
-            client, max_repository_bytes=max_repository_bytes, repo=repo, artifact=artifact)
-    except urllib.error.HTTPError as exc:
-        if exc.code in (403, 404):
-            raise InvocationError(
-                f"repository read constraint failed: GitHub returned {exc.code}; "
-                "no planning artifacts were written") from exc
-        raise
-    feedback = review_comments(client, artifact)
-    prior_plan = existing_plan(client, artifact)
-    value = {"trigger": {**issue, "labels": labels_of(issue)}, "product": product,
-             "adrs": adrs, "repository": repository, "review_comments": feedback,
-             "existing_plan": prior_plan}
-    validated = contract.validate_input(value)
-    altitude = contract.select_altitude(set(validated.trigger["labels"]))
-    key = (f"{artifact}:{state_version(client, issue)}:{altitude.value}:"
-           f"prompt-{prompt_version()}:feedback-{feedback_version(feedback)}")
-    output = run_model(value, timeout, max_usd, runner=runner,
-                       state=state, registry=registry)
-    contract.validate_output(altitude, output, repository)
-    artifacts.write(client, value["trigger"], key, output)
-    verified = verify_with_retry(client, value["trigger"], key, altitude)
-    if altitude is contract.Altitude.PROJECT:
-        fresh = client.get_issue(artifact)
-        labels = set(labels_of(fresh))
-        if "project:planning" not in labels:
-            raise InvocationError(
-                "verified project output cannot finish: trigger is not project:planning")
-        labels.remove("project:planning")
-        labels.add("project:awaiting-ready")
-        client.update_labels(artifact, sorted(labels))
-    return verified
+    # The ExitStack only ever holds anything when the repository-native
+    # fallback below actually triggers; for every repository that already
+    # fits, this is an empty stack and changes nothing. It wraps the rest
+    # of this function (not just the read) so the clone survives through
+    # run_model and is removed on every exit path once execute returns.
+    with contextlib.ExitStack() as stack:
+        try:
+            issue = client.get_issue(artifact)
+            workspace = None
+            try:
+                product, adrs, repository = read_repository(
+                    client, max_repository_bytes=max_repository_bytes,
+                    repo=repo, artifact=artifact)
+            except RepositoryTooLargeError:
+                temp = stack.enter_context(
+                    tempfile.TemporaryDirectory(prefix=f"factory-planning-{artifact}-"))
+                product, adrs, repository, workspace = clone_and_ground_repository(
+                    client, repo, token, pathlib.Path(temp), artifact=artifact,
+                    max_repository_bytes=max_repository_bytes)
+        except urllib.error.HTTPError as exc:
+            if exc.code in (403, 404):
+                raise InvocationError(
+                    f"repository read constraint failed: GitHub returned {exc.code}; "
+                    "no planning artifacts were written") from exc
+            raise
+        feedback = review_comments(client, artifact)
+        prior_plan = existing_plan(client, artifact)
+        value = {"trigger": {**issue, "labels": labels_of(issue)}, "product": product,
+                 "adrs": adrs, "repository": repository, "review_comments": feedback,
+                 "existing_plan": prior_plan}
+        validated = contract.validate_input(value)
+        altitude = contract.select_altitude(set(validated.trigger["labels"]))
+        key = (f"{artifact}:{state_version(client, issue)}:{altitude.value}:"
+               f"prompt-{prompt_version()}:feedback-{feedback_version(feedback)}")
+        output = run_model(value, timeout, max_usd, runner=runner,
+                           state=state, registry=registry, workspace=workspace)
+        contract.validate_output(altitude, output, repository)
+        artifacts.write(client, value["trigger"], key, output)
+        verified = verify_with_retry(client, value["trigger"], key, altitude)
+        if altitude is contract.Altitude.PROJECT:
+            fresh = client.get_issue(artifact)
+            labels = set(labels_of(fresh))
+            if "project:planning" not in labels:
+                raise InvocationError(
+                    "verified project output cannot finish: trigger is not project:planning")
+            labels.remove("project:planning")
+            labels.add("project:awaiting-ready")
+            client.update_labels(artifact, sorted(labels))
+        return verified
 
 
 def main(argv: list[str]) -> int:
