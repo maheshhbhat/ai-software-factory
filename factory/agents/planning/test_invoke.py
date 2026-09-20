@@ -184,6 +184,18 @@ class InvocationTests(unittest.TestCase):
         with self.assertRaisesRegex(invoke.InvocationError, "must be positive"):
             invoke.read_repository(client, max_repository_bytes=0)
 
+    def test_effective_limit_is_logged_even_when_the_read_fails(self):
+        """PR #673 review finding: the observability call originally sat
+        after the read loop, so the exact failure it exists to explain
+        (exceeding the configured limit) skipped it entirely."""
+        client = RepositoryBytesClient(
+            files=["product.md", "a.py"], contents={"a.py": "x" * 600_000})
+        with mock.patch.object(invoke.obs, "process_event") as process_event:
+            with self.assertRaises(invoke.InvocationError):
+                invoke.read_repository(client, max_repository_bytes=500_000)
+        process_event.assert_any_call(
+            "planning.repository.max_bytes_configured", max_repository_bytes=500_000)
+
     def test_campaign_executes_through_capacity_pool_then_reads_back(self):
         client, (state, registry) = Client(), capacity()
         runner = mock.Mock(return_value=Result(stdout=json.dumps(campaign_output())))

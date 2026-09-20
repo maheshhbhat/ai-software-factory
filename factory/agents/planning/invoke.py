@@ -100,6 +100,11 @@ def read_repository(client: artifacts.GitHubStore,
                     path.lower().endswith((".js", ".mjs", ".cjs", ".ts", ".tsx",
                                            ".jsx", ".py", ".json", ".toml", ".md",
                                            ".yml", ".yaml", ".html", ".htm", ".css"))]
+    # Recorded before any content is read, so the configured limit is
+    # attributable in the log even when the read below fails because of it —
+    # the exact case this audit trail exists to explain.
+    obs.process_event("planning.repository.max_bytes_configured",
+                      max_repository_bytes=max_repository_bytes)
     sources, total = {}, 0
     for path in source_paths:
         text = content(path)
@@ -110,8 +115,6 @@ def read_repository(client: artifacts.GitHubStore,
                 f"exceeds configured limit of {max_repository_bytes} bytes")
         sources[path] = text
     evidence = repository_evidence(files, sources)
-    obs.process_event("planning.repository.grounded",
-                      max_repository_bytes=max_repository_bytes, grounded_bytes=total)
     return product, adrs, {"default_branch": branch, "files": files,
                            "sources": sources, **evidence}
 
