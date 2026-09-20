@@ -41,6 +41,23 @@ class Client(FakeStore):
         return []
 
 
+class RepositoryBytesClient(Client):
+    """Controls the full file tree and per-path content, so the
+    repository-grounding byte limit can be tested precisely against real
+    accumulated byte counts rather than a mocked-out check."""
+
+    def __init__(self, files, contents):
+        super().__init__(product_paths=files)
+        self.contents = contents
+
+    def _api(self, path, method="GET", payload=None):
+        if path.startswith("/contents/"):
+            target = path[len("/contents/"):]
+            text = self.contents.get(target, "# ADR")
+            return {"content": base64.b64encode(text.encode()).decode()}
+        return super()._api(path, method=method, payload=payload)
+
+
 class ProjectClient(Client):
     def __init__(self):
         FakeStore.__init__(self, [project_issue()])
@@ -128,6 +145,86 @@ class InvocationTests(unittest.TestCase):
         self.assertEqual("# Human product", product)
         self.assertIn("PRODUCT.md", repository["files"])
 
+    def test_default_repository_byte_limit_constant_is_unchanged(self):
+        self.assertEqual(500_000, invoke.DEFAULT_MAX_REPOSITORY_BYTES)
+
+    def test_default_read_fails_over_500kb_without_override(self):
+        client = RepositoryBytesClient(
+            files=["product.md", "a.py"], contents={"a.py": "x" * 600_000})
+        with self.assertRaisesRegex(invoke.InvocationError,
+                                    "exceeds configured limit of 500000 bytes"):
+            invoke.read_repository(client)
+
+    def test_explicit_wider_override_permits_more_content(self):
+        client = RepositoryBytesClient(
+            files=["product.md", "a.py"], contents={"a.py": "x" * 600_000})
+        _, _, repository = invoke.read_repository(client, max_repository_bytes=700_000)
+        self.assertIn("a.py", repository["sources"])
+
+    def test_explicit_narrower_override_rejects_content_that_passes_at_default(self):
+        """Proves this is a real override in both directions, not just a
+        higher ceiling: content well under the 500KB default still fails
+        against an explicitly smaller configured limit."""
+        client = RepositoryBytesClient(
+            files=["product.md", "a.py"], contents={"a.py": "x" * 100_000})
+        invoke.read_repository(client)  # succeeds at the unchanged default
+        with self.assertRaisesRegex(invoke.InvocationError,
+                                    "exceeds configured limit of 50000 bytes"):
+            invoke.read_repository(client, max_repository_bytes=50_000)
+
+    def test_content_exceeding_explicit_override_still_fails_closed(self):
+        client = RepositoryBytesClient(
+            files=["product.md", "a.py"], contents={"a.py": "x" * 800_000})
+        with self.assertRaisesRegex(invoke.InvocationError,
+                                    "exceeds configured limit of 700000 bytes"):
+            invoke.read_repository(client, max_repository_bytes=700_000)
+
+    def test_non_positive_override_rejected(self):
+        client = RepositoryBytesClient(files=["product.md"], contents={})
+        with self.assertRaisesRegex(invoke.InvocationError, "must be positive"):
+            invoke.read_repository(client, max_repository_bytes=0)
+
+    def test_effective_limit_is_logged_even_when_the_read_fails(self):
+        """PR #673 review finding: the observability call originally sat
+        after the read loop, so the exact failure it exists to explain
+        (exceeding the configured limit) skipped it entirely."""
+        client = RepositoryBytesClient(
+            files=["product.md", "a.py"], contents={"a.py": "x" * 600_000})
+        with mock.patch.object(invoke.obs, "process_event") as process_event:
+            with self.assertRaises(invoke.InvocationError):
+                invoke.read_repository(client, max_repository_bytes=500_000)
+        process_event.assert_any_call(
+            "planning.repository.max_bytes_configured",
+            max_repository_bytes=500_000, repo=None, artifact=None)
+
+    def test_effective_limit_is_logged_even_when_product_preflight_fails(self):
+        """Second-round finding on the same PR: moving the log before the
+        byte-accumulation loop wasn't enough — product.md/ADR reads happen
+        even earlier and can fail first. The log must be the first thing
+        this function does past its own input validation."""
+        client = Client(product_paths=[])
+        with mock.patch.object(invoke.obs, "process_event") as process_event:
+            with self.assertRaises(invoke.InvocationError):
+                invoke.read_repository(client, max_repository_bytes=123)
+        process_event.assert_any_call(
+            "planning.repository.max_bytes_configured",
+            max_repository_bytes=123, repo=None, artifact=None)
+
+    def test_logged_limit_carries_invocation_identity_when_available(self):
+        """Third-round finding on the same PR: the log carried no repo/
+        artifact identity at all, so two invocations with the same limit
+        were indistinguishable in the log — and would hash to the same
+        event_id. Proves both fields reach the log when the caller supplies
+        them (as execute() now always does)."""
+        client = RepositoryBytesClient(
+            files=["product.md", "a.py"], contents={"a.py": "small"})
+        with mock.patch.object(invoke.obs, "process_event") as process_event:
+            invoke.read_repository(client, max_repository_bytes=500_000,
+                                   repo="o/r", artifact=42)
+        process_event.assert_any_call(
+            "planning.repository.max_bytes_configured",
+            max_repository_bytes=500_000, repo="o/r", artifact=42)
+
     def test_campaign_executes_through_capacity_pool_then_reads_back(self):
         client, (state, registry) = Client(), capacity()
         runner = mock.Mock(return_value=Result(stdout=json.dumps(campaign_output())))
@@ -177,8 +274,8 @@ class InvocationTests(unittest.TestCase):
                              "path": "app.js"}]
         original_read = invoke.read_repository
 
-        def read_with_facts(store):
-            product, adrs, repository = original_read(store)
+        def read_with_facts(store, **kwargs):
+            product, adrs, repository = original_read(store, **kwargs)
             repository["production_owners"] = repository_facts
             return product, adrs, repository
 

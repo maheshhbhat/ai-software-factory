@@ -32,6 +32,7 @@ from factory.capacity_pool.state import CapacityState, default_state_path  # noq
 
 DEFAULT_TIMEOUT = 900
 DEFAULT_MAX_USD = 5.0
+DEFAULT_MAX_REPOSITORY_BYTES = 500_000
 
 
 class InvocationError(RuntimeError):
@@ -59,8 +60,34 @@ def state_version(client: artifacts.GitHubStore, issue: dict) -> str:
     return str(latest.get("id") or latest.get("created_at"))
 
 
-def read_repository(client: artifacts.GitHubStore) -> tuple[str, list[dict], dict]:
-    """Private-repository read preflight. No writer is called before this returns."""
+def read_repository(client: artifacts.GitHubStore,
+                     max_repository_bytes: int = DEFAULT_MAX_REPOSITORY_BYTES,
+                     *, repo: str | None = None, artifact: int | None = None,
+                     ) -> tuple[str, list[dict], dict]:
+    """Private-repository read preflight. No writer is called before this returns.
+
+    `max_repository_bytes` bounds the total grounded source content read for
+    Planning's prompt. The default (`DEFAULT_MAX_REPOSITORY_BYTES`) is
+    unchanged from the prior hardcoded 500,000; a caller may explicitly pass
+    a different positive value instead. There is no automatic sizing from
+    repository size, and no truncation — exceeding this bound, whatever its
+    value, still fails closed before any planning artifact is written.
+
+    `repo`/`artifact` identify the invocation in the audit log below; they
+    are not otherwise used. Planning runs in its own subprocess and does not
+    inherit the poller's ambient tracing context, so without them a log
+    entry cannot show which invocation it belongs to — and two invocations
+    sharing the same limit would otherwise hash to the same log event_id.
+    """
+    if max_repository_bytes <= 0:
+        raise InvocationError(
+            "repository read constraint failed: max_repository_bytes must be positive")
+    # Recorded as the first thing this function does that isn't input
+    # validation, so the configured limit is attributable in the log
+    # whatever later fails — a byte-limit breach, but just as much a
+    # product.md/ADR fetch or decode failure that happens first.
+    obs.process_event("planning.repository.max_bytes_configured",
+                      max_repository_bytes=max_repository_bytes, repo=repo, artifact=artifact)
     metadata = client._api("")
     branch = metadata.get("default_branch")
     if not branch:
@@ -90,9 +117,10 @@ def read_repository(client: artifacts.GitHubStore) -> tuple[str, list[dict], dic
     for path in source_paths:
         text = content(path)
         total += len(text.encode())
-        if total > 500_000:
+        if total > max_repository_bytes:
             raise InvocationError(
-                "repository read constraint failed: grounded source context exceeds 500KB")
+                "repository read constraint failed: grounded source context "
+                f"exceeds configured limit of {max_repository_bytes} bytes")
         sources[path] = text
     evidence = repository_evidence(files, sources)
     return product, adrs, {"default_branch": branch, "files": files,
@@ -352,11 +380,13 @@ def run_model(value: dict, timeout: int, max_usd: float,
                 state.close()
 
 def execute(repo: str, artifact: int, token: str, timeout: int, max_usd: float,
-            runner=subprocess.run, *, state=None, registry=None) -> artifacts.WrittenPlan:
+            runner=subprocess.run, *, state=None, registry=None,
+            max_repository_bytes: int = DEFAULT_MAX_REPOSITORY_BYTES) -> artifacts.WrittenPlan:
     client = artifacts.GitHubStore(repo, token)
     try:
         issue = client.get_issue(artifact)
-        product, adrs, repository = read_repository(client)
+        product, adrs, repository = read_repository(
+            client, max_repository_bytes=max_repository_bytes, repo=repo, artifact=artifact)
     except urllib.error.HTTPError as exc:
         if exc.code in (403, 404):
             raise InvocationError(
@@ -397,16 +427,21 @@ def main(argv: list[str]) -> int:
                         default=int(os.environ.get("FACTORY_PLANNING_TIMEOUT", DEFAULT_TIMEOUT)))
     parser.add_argument("--max-usd", type=float,
                         default=float(os.environ.get("FACTORY_PLANNING_MAX_USD", DEFAULT_MAX_USD)))
+    parser.add_argument("--max-repository-bytes", type=int,
+                        default=int(os.environ.get("FACTORY_PLANNING_MAX_REPOSITORY_BYTES",
+                                                    DEFAULT_MAX_REPOSITORY_BYTES)))
     args = parser.parse_args(argv)
     token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
     if not token:
         print("planning failed: no GH_TOKEN/GITHUB_TOKEN", file=sys.stderr)
         return 2
-    if args.timeout <= 0 or args.max_usd <= 0:
-        print("planning failed: timeout and max-usd must be positive", file=sys.stderr)
+    if args.timeout <= 0 or args.max_usd <= 0 or args.max_repository_bytes <= 0:
+        print("planning failed: timeout, max-usd, and max-repository-bytes must be positive",
+              file=sys.stderr)
         return 2
     try:
-        result = execute(args.repo, args.artifact, token, args.timeout, args.max_usd)
+        result = execute(args.repo, args.artifact, token, args.timeout, args.max_usd,
+                         max_repository_bytes=args.max_repository_bytes)
     except Exception as exc:  # fail loudly at the headless boundary
         print(f"planning failed: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
