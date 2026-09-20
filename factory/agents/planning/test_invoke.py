@@ -2,6 +2,7 @@ import base64
 import json
 import pathlib
 import tempfile
+import time
 import unittest
 import urllib.error
 from unittest import mock
@@ -219,6 +220,46 @@ class InvocationTests(unittest.TestCase):
             project_body="### Grounding scope\na.py\n\nb.py\n")
         with self.assertRaisesRegex(invoke.InvocationError, "blank line"):
             invoke.read_repository(client, client.issues[0]["body"])
+
+    def test_repository_evidence_survives_narrow_grounding_scope(self):
+        """PR #670 review finding (P1): a Grounding scope that excludes the
+        repository's only policy-bearing file must not cause
+        repository_evidence() to report empty facts. Evidence is computed
+        from every JSON/executable-test-path file regardless of scope."""
+        client = GroundingScopeClient(
+            files=["product.md", "app.py", "policy.json"],
+            contents={
+                "app.py": "def handle(): pass",
+                "policy.json": json.dumps({"factoryPolicy": {
+                    "forbiddenDependencies": ["puppeteer"]}}),
+            },
+            # Scope deliberately excludes policy.json — only app.py is
+            # declared as relevant grounding for the model.
+            project_body="### Grounding scope\napp.py\n")
+        _, _, repository = invoke.read_repository(client, client.issues[0]["body"])
+        self.assertEqual(["app.py"], repository["grounded_files"])
+        self.assertNotIn("policy.json", repository["sources"])
+        self.assertEqual(["puppeteer"], repository["forbidden_dependencies"])
+
+    def test_grounding_scope_rejects_over_complex_pattern_before_matching(self):
+        """PR #670 review finding (security, P2): merge_gate's `**` matcher
+        has exponential worst-case cost against a deep mismatching path —
+        confirmed directly against the real matcher at ~10s for 12 `**`
+        segments. This must be rejected before any match is attempted, not
+        merely 'eventually' — so this test bounds wall-clock time, not just
+        the raised error, using the same pathological shape (many `**`
+        segments against a path deep enough to actually trigger the
+        exponential branching, not a trivially short one)."""
+        pattern = "/".join(["**"] * 12 + ["x.py"])
+        deep_path = "/".join(["seg"] * 12 + ["z.py"])
+        client = GroundingScopeClient(
+            files=["product.md", deep_path], contents={deep_path: "z = 1"},
+            project_body=f"### Grounding scope\n{pattern}\n")
+        started = time.monotonic()
+        with self.assertRaisesRegex(invoke.InvocationError, "too many \\*\\* segments"):
+            invoke.read_repository(client, client.issues[0]["body"])
+        self.assertLess(time.monotonic() - started, 1.0,
+                        "rejection must be immediate, not after attempting a match")
 
     def test_campaign_trigger_ignores_grounding_scope_shaped_section(self):
         """PR #670 review finding: a `### Grounding scope`-shaped section in

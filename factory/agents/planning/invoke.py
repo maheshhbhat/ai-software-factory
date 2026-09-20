@@ -61,6 +61,16 @@ def state_version(client: artifacts.GitHubStore, issue: dict) -> str:
     return str(latest.get("id") or latest.get("created_at"))
 
 
+# `merge_gate._match_segments` has exponential worst-case cost on a pattern
+# with many `**` segments (measured: 12 segments took 13.73s against one
+# mismatching path — see deferred Story #671, which owns fixing the matcher
+# itself). This Story may not modify or duplicate that matcher, so it bounds
+# its own input instead. Two `**` segments in one pattern is enough for every
+# realistic scope declaration (e.g. "src/**/tests/**") and keeps the
+# matcher's own recursion small and provably fast regardless of path length.
+MAX_SCOPE_WILDCARD_SEGMENTS = 2
+
+
 def grounding_scope(project_body: str | None) -> list[str] | None:
     """Optional `### Grounding scope` on the triggering Project.
 
@@ -70,11 +80,13 @@ def grounding_scope(project_body: str | None) -> list[str] | None:
     `merge_gate`, never duplicated): one pattern per line, no bullets, no
     brace/bracket syntax. A malformed section fails closed.
 
-    Story #669's contract also fails closed on an internal blank line.
-    `merge_gate.parse_scope` itself tolerates one (silently dropped, kept for
-    the Story `### Scope` dialect's own established behavior — not something
-    this Story owns or may change), so that case is rejected here explicitly,
-    before delegating, rather than by loosening or duplicating that parser.
+    Story #669's contract also fails closed on an internal blank line, and on
+    a pattern with more than `MAX_SCOPE_WILDCARD_SEGMENTS` `**` segments —
+    rejected here, before any pattern ever reaches `merge_gate.match_path`.
+    `merge_gate.parse_scope` itself tolerates a blank line (silently dropped,
+    kept for the Story `### Scope` dialect's own established behavior — not
+    something this Story owns or may change), so both cases are rejected
+    explicitly here instead of by loosening or duplicating that parser.
     """
     raw = merge_gate.parse_section(project_body or "", "Grounding scope")
     if raw is None:
@@ -86,6 +98,13 @@ def grounding_scope(project_body: str | None) -> list[str] | None:
     patterns, error = merge_gate.parse_scope(f"### Scope\n{raw}\n")
     if error:
         raise InvocationError(f"repository read constraint failed: grounding scope {error}")
+    for pattern in patterns:
+        wildcard_segments = sum(1 for segment in pattern.split("/") if segment == "**")
+        if wildcard_segments > MAX_SCOPE_WILDCARD_SEGMENTS:
+            raise InvocationError(
+                f"repository read constraint failed: grounding scope pattern {pattern!r} "
+                f"has too many ** segments ({wildcard_segments} > "
+                f"{MAX_SCOPE_WILDCARD_SEGMENTS})")
     return patterns
 
 
@@ -127,6 +146,19 @@ def read_repository(client: artifacts.GitHubStore,
                     path.lower().endswith((".js", ".mjs", ".cjs", ".ts", ".tsx",
                                            ".jsx", ".py", ".json", ".toml", ".md",
                                            ".yml", ".yaml", ".html", ".htm", ".css"))]
+
+    # Evidence bucket: every JSON / executable-test-path file, read in full
+    # from the unscoped file list, regardless of any declared Grounding
+    # scope. Deterministic policy facts (forbidden dependencies, production
+    # owners) must never depend on what a human chose to include for
+    # model-grounding — see Story #669's revision after PR #670 review.
+    # Exempt from the 500KB cap below: that cap bounds what an LLM reads,
+    # and this is plain scanning, never itself sent to the model unless a
+    # Grounding scope independently also matches the same path.
+    evidence_paths = [path for path in source_paths
+                      if path.lower().endswith(".json") or executable_test_path(path)]
+    evidence_sources = {path: content(path) for path in evidence_paths}
+
     scope = grounding_scope(project_body)
     if scope is not None:
         source_paths = [path for path in source_paths
@@ -142,7 +174,7 @@ def read_repository(client: artifacts.GitHubStore,
             raise InvocationError(
                 "repository read constraint failed: grounded source context exceeds 500KB")
         sources[path] = text
-    evidence = repository_evidence(files, sources)
+    evidence = repository_evidence(files, evidence_sources)
     grounded_files = sorted(sources.keys())
     obs.process_event("planning.repository.grounded", scoped=scope is not None,
                       evidence={"grounded_files": grounded_files})
