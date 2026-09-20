@@ -2,6 +2,7 @@ import base64
 import json
 import pathlib
 import tempfile
+import time
 import unittest
 import urllib.error
 from unittest import mock
@@ -39,6 +40,40 @@ class Client(FakeStore):
 
     def _pages(self, path):
         return []
+
+
+class GroundingScopeClient(Client):
+    """Controls the full file tree, per-path content, and the Project body,
+    so `### Grounding scope` can be exercised against real path matching and
+    the real 500KB accumulator — not a mocked-out version of either."""
+
+    def __init__(self, files, contents, project_body):
+        super().__init__(product_paths=files)
+        self.contents = contents
+        self.issues[0]["labels"] = ["type:project", "project:planning"]
+        self.issues[0]["body"] = project_body
+
+    def _api(self, path, method="GET", payload=None):
+        if path.startswith("/contents/"):
+            target = path[len("/contents/"):]
+            text = self.contents.get(target, "# ADR")
+            return {"content": base64.b64encode(text.encode()).decode()}
+        return super()._api(path, method=method, payload=payload)
+
+
+class CampaignWithScopeLikeSectionClient(Client):
+    """A campaign (`type:roadmap-commitment`) trigger whose body happens to
+    contain a `### Grounding scope`-shaped section pointing at a pattern that
+    matches nothing real — reproducing the PR #670 finding that this must
+    never be applied outside a confirmed Project trigger."""
+
+    def __init__(self):
+        FakeStore.__init__(self, [{"number": 1, "labels": ["type:roadmap-commitment"],
+                                   "body": ("Retirement direction\n\n"
+                                            "### Grounding scope\nnonexistent/**\n")}])
+        self.repo, self.token = "o/r", "token"
+        self.product_paths = ["product.md"]
+        self.product_text = "# Product"
 
 
 class ProjectClient(Client):
@@ -128,6 +163,121 @@ class InvocationTests(unittest.TestCase):
         self.assertEqual("# Human product", product)
         self.assertIn("PRODUCT.md", repository["files"])
 
+    def test_absent_grounding_scope_reads_every_matching_file_unchanged(self):
+        """Story #669: no `### Grounding scope` section must be byte-for-byte
+        the pre-existing behavior — every matching file is read."""
+        client = GroundingScopeClient(
+            files=["product.md", "a.py", "b.py"],
+            contents={"a.py": "a = 1", "b.py": "b = 2"},
+            project_body="### Objective\nno scope declared here\n")
+        _, _, repository = invoke.read_repository(client, client.issues[0]["body"])
+        # `GroundingScopeClient`/`Client` always add an ADR fixture path (a
+        # `.md` file, also a generic grounded source) alongside the declared
+        # files — real pre-existing behavior, unaffected by this change.
+        self.assertEqual({"a.py", "b.py", "docs/decisions/0001.md"},
+                         set(repository["grounded_files"]))
+        self.assertEqual(repository["grounded_files"], invoke.read_repository(client)[2]
+                         ["grounded_files"])
+
+    def test_grounding_scope_narrows_to_declared_patterns_only(self):
+        client = GroundingScopeClient(
+            files=["product.md", "a.py", "b.py"],
+            contents={"a.py": "a = 1", "b.py": "b = 2"},
+            project_body="### Grounding scope\na.py\n")
+        _, _, repository = invoke.read_repository(client, client.issues[0]["body"])
+        self.assertEqual(["a.py"], repository["grounded_files"])
+        self.assertNotIn("b.py", repository["sources"])
+
+    def test_grounding_scope_matching_no_files_fails_closed(self):
+        client = GroundingScopeClient(
+            files=["product.md", "a.py"], contents={"a.py": "a = 1"},
+            project_body="### Grounding scope\nnonexistent/**\n")
+        with self.assertRaisesRegex(invoke.InvocationError, "grounding scope matched no files"):
+            invoke.read_repository(client, client.issues[0]["body"])
+
+    def test_malformed_grounding_scope_fails_closed(self):
+        client = GroundingScopeClient(
+            files=["product.md", "a.py"], contents={"a.py": "a = 1"},
+            project_body="### Grounding scope\n- a.py\n")
+        with self.assertRaisesRegex(invoke.InvocationError, "grounding scope"):
+            invoke.read_repository(client, client.issues[0]["body"])
+
+    def test_scoped_grounding_still_enforces_500kb_cap(self):
+        client = GroundingScopeClient(
+            files=["product.md", "a.py"], contents={"a.py": "x" * 600_000},
+            project_body="### Grounding scope\na.py\n")
+        with self.assertRaisesRegex(invoke.InvocationError, "exceeds 500KB"):
+            invoke.read_repository(client, client.issues[0]["body"])
+
+    def test_grounding_scope_rejects_internal_blank_line(self):
+        """PR #670 review finding: merge_gate.parse_scope silently drops an
+        internal blank line rather than rejecting it. Story #669's own
+        fail-closed contract requires rejection; enforce it here without
+        touching that shared, unmodified parser."""
+        client = GroundingScopeClient(
+            files=["product.md", "a.py", "b.py"],
+            contents={"a.py": "a = 1", "b.py": "b = 2"},
+            project_body="### Grounding scope\na.py\n\nb.py\n")
+        with self.assertRaisesRegex(invoke.InvocationError, "blank line"):
+            invoke.read_repository(client, client.issues[0]["body"])
+
+    def test_repository_evidence_survives_narrow_grounding_scope(self):
+        """PR #670 review finding (P1): a Grounding scope that excludes the
+        repository's only policy-bearing file must not cause
+        repository_evidence() to report empty facts. Evidence is computed
+        from every JSON/executable-test-path file regardless of scope."""
+        client = GroundingScopeClient(
+            files=["product.md", "app.py", "policy.json"],
+            contents={
+                "app.py": "def handle(): pass",
+                "policy.json": json.dumps({"factoryPolicy": {
+                    "forbiddenDependencies": ["puppeteer"]}}),
+            },
+            # Scope deliberately excludes policy.json — only app.py is
+            # declared as relevant grounding for the model.
+            project_body="### Grounding scope\napp.py\n")
+        _, _, repository = invoke.read_repository(client, client.issues[0]["body"])
+        self.assertEqual(["app.py"], repository["grounded_files"])
+        self.assertNotIn("policy.json", repository["sources"])
+        self.assertEqual(["puppeteer"], repository["forbidden_dependencies"])
+
+    def test_grounding_scope_rejects_over_complex_pattern_before_matching(self):
+        """PR #670 review finding (security, P2): merge_gate's `**` matcher
+        has exponential worst-case cost against a deep mismatching path —
+        confirmed directly against the real matcher at ~10s for 12 `**`
+        segments. This must be rejected before any match is attempted, not
+        merely 'eventually' — so this test bounds wall-clock time, not just
+        the raised error, using the same pathological shape (many `**`
+        segments against a path deep enough to actually trigger the
+        exponential branching, not a trivially short one)."""
+        pattern = "/".join(["**"] * 12 + ["x.py"])
+        deep_path = "/".join(["seg"] * 12 + ["z.py"])
+        client = GroundingScopeClient(
+            files=["product.md", deep_path], contents={deep_path: "z = 1"},
+            project_body=f"### Grounding scope\n{pattern}\n")
+        started = time.monotonic()
+        with self.assertRaisesRegex(invoke.InvocationError, "too many \\*\\* segments"):
+            invoke.read_repository(client, client.issues[0]["body"])
+        self.assertLess(time.monotonic() - started, 1.0,
+                        "rejection must be immediate, not after attempting a match")
+
+    def test_campaign_trigger_ignores_grounding_scope_shaped_section(self):
+        """PR #670 review finding: a `### Grounding scope`-shaped section in
+        a campaign (`type:roadmap-commitment`) issue's body must never narrow
+        or fail campaign planning, which surveys the whole repository to
+        propose a Project in the first place. Before the fix, this raised
+        InvocationError('grounding scope matched no files') instead of
+        completing normally."""
+        client, (state, registry) = CampaignWithScopeLikeSectionClient(), capacity()
+        runner = mock.Mock(return_value=Result(stdout=json.dumps(campaign_output())))
+        try:
+            with mock.patch.object(invoke.artifacts, "GitHubStore", return_value=client):
+                result = invoke.execute("o/r", 1, "token", 30, 2.5, runner=runner,
+                                        state=state, registry=registry)
+        finally:
+            state.close()
+        self.assertEqual("campaign", result.altitude.value)
+
     def test_campaign_executes_through_capacity_pool_then_reads_back(self):
         client, (state, registry) = Client(), capacity()
         runner = mock.Mock(return_value=Result(stdout=json.dumps(campaign_output())))
@@ -177,8 +327,8 @@ class InvocationTests(unittest.TestCase):
                              "path": "app.js"}]
         original_read = invoke.read_repository
 
-        def read_with_facts(store):
-            product, adrs, repository = original_read(store)
+        def read_with_facts(store, project_body=None):
+            product, adrs, repository = original_read(store, project_body)
             repository["production_owners"] = repository_facts
             return product, adrs, repository
 
