@@ -75,6 +75,12 @@ def read_repository(client: artifacts.GitHubStore,
     if max_repository_bytes <= 0:
         raise InvocationError(
             "repository read constraint failed: max_repository_bytes must be positive")
+    # Recorded as the first thing this function does that isn't input
+    # validation, so the configured limit is attributable in the log
+    # whatever later fails — a byte-limit breach, but just as much a
+    # product.md/ADR fetch or decode failure that happens first.
+    obs.process_event("planning.repository.max_bytes_configured",
+                      max_repository_bytes=max_repository_bytes)
     metadata = client._api("")
     branch = metadata.get("default_branch")
     if not branch:
@@ -100,11 +106,6 @@ def read_repository(client: artifacts.GitHubStore,
                     path.lower().endswith((".js", ".mjs", ".cjs", ".ts", ".tsx",
                                            ".jsx", ".py", ".json", ".toml", ".md",
                                            ".yml", ".yaml", ".html", ".htm", ".css"))]
-    # Recorded before any content is read, so the configured limit is
-    # attributable in the log even when the read below fails because of it —
-    # the exact case this audit trail exists to explain.
-    obs.process_event("planning.repository.max_bytes_configured",
-                      max_repository_bytes=max_repository_bytes)
     sources, total = {}, 0
     for path in source_paths:
         text = content(path)
