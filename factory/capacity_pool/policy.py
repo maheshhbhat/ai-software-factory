@@ -85,18 +85,23 @@ REGISTRY = (
     RegistryEntry("gpt-5.5", "openai", "gpt-5.5", Tier.FLAGSHIP,
                   frozenset({"reason", "json", "code", "write", "tests"}),
                   frozenset({"medium", "high", "max"})),
-    RegistryEntry("gpt-5.4", "openai", "gpt-5.4", Tier.BALANCED,
+    # gpt-5.4 and gpt-5.4-mini removed 2026-09-20: both return a hard 400
+    # from the API itself ("model is not supported when using Codex with a
+    # ChatGPT account") — a permanent account-tier limitation confirmed by a
+    # live probe against each, not a transient health issue. Keeping them
+    # registered only reproduces the same real failure on every route.
+    #
+    # anthropic-economy and anthropic-balanced filled in the same day, each
+    # verified by a live adapter probe answering CAPACITY_OK: Haiku is
+    # Anthropic's cheapest tier (matches Economy), Sonnet is its mid-cost
+    # tier (matches Balanced) — the same tier-naming convention Opus already
+    # fills at Flagship.
+    RegistryEntry("anthropic-economy", "anthropic", "claude-haiku-4-5-20251001",
+                  Tier.ECONOMY,
+                  frozenset({"exact-answer", "basic-tools"}), frozenset({"low"})),
+    RegistryEntry("anthropic-balanced", "anthropic", "claude-sonnet-5", Tier.BALANCED,
                   frozenset({"reason", "json", "code", "write", "tests"}),
                   frozenset({"low", "medium", "high"})),
-    RegistryEntry("gpt-5.4-mini", "openai", "gpt-5.4-mini", Tier.ECONOMY,
-                  frozenset({"exact-answer", "basic-tools"}),
-                  frozenset({"low", "medium"})),
-    RegistryEntry("anthropic-economy", "anthropic", None, Tier.ECONOMY,
-                  frozenset({"exact-answer", "basic-tools"}), frozenset({"low"}),
-                  enabled=False),
-    RegistryEntry("anthropic-balanced", "anthropic", None, Tier.BALANCED,
-                  frozenset({"reason", "json", "code", "write", "tests"}),
-                  frozenset({"low", "medium", "high"}), enabled=False),
     RegistryEntry("claude-fable-5", "anthropic", "claude-fable-5", Tier.FLAGSHIP,
                   frozenset({"reason", "json", "code", "write", "tests"}),
                   frozenset({"medium", "high", "max"})),
@@ -118,9 +123,14 @@ REGISTRY = (
 )
 
 POLICIES = {
+    # Flagship since 2026-09-20: Planning's Balanced-tier candidates proved
+    # too thin in practice (one real model, gpt-5.4/gpt-5.4-mini both
+    # permanently broken), and the operator chose to route Planning to
+    # Flagship (Opus, GPT-5.6-sol) directly rather than keep escalating
+    # per-invocation. No escalation tier above Flagship is defined for this
+    # policy as a result.
     "planning": WorkloadPolicy(
-        "planning", frozenset({"reason", "json"}), Tier.BALANCED, "medium", 900, 5,
-        frozenset({"architecture", "high-complexity"}), Tier.FLAGSHIP),
+        "planning", frozenset({"reason", "json"}), Tier.FLAGSHIP, "medium", 900, 5),
     "delivery": WorkloadPolicy(
         "delivery", frozenset({"code", "write", "tests"}), Tier.BALANCED,
         "medium", 3600, 10, frozenset({"hazard", "high-complexity"}), Tier.FLAGSHIP),
