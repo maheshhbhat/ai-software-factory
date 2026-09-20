@@ -52,7 +52,7 @@ class RepositoryBytesClient(Client):
 
     def _api(self, path, method="GET", payload=None):
         if path.startswith("/contents/"):
-            target = path[len("/contents/"):]
+            target = path[len("/contents/"):].split("?", 1)[0]
             text = self.contents.get(target, "# ADR")
             return {"content": base64.b64encode(text.encode()).decode()}
         return super()._api(path, method=method, payload=payload)
@@ -296,7 +296,12 @@ class InvocationTests(unittest.TestCase):
         self.assertEqual("d34db33f" * 5, repository["commit_sha"])
         self.assertEqual({}, repository["sources"])
         self.assertIn("a.py", repository["files"])
-        self.assertTrue(str(workspace).endswith("repo"))
+        # workspace is the neutral parent, not the checkout itself — see
+        # the review finding this was fixed for: an engine launched with
+        # its working directory *inside* a real checkout auto-loads that
+        # repository's own CLAUDE.md/AGENTS.md as its own instructions.
+        self.assertEqual(pathlib.Path(workspace_root), workspace)
+        self.assertFalse(str(workspace).endswith("repo"))
 
     def test_clone_fallback_evidence_matches_the_api_based_path(self):
         """repository_evidence() itself is unchanged; only its input source
@@ -407,6 +412,72 @@ class InvocationTests(unittest.TestCase):
         self.assertIn("--sandbox", captured["command"])
         self.assertEqual("read-only",
                          captured["command"][captured["command"].index("--sandbox") + 1])
+
+    def test_fallback_skips_git_repo_check_since_cwd_is_neutral(self):
+        """The engine's working directory is the neutral parent, not the
+        checkout — which is itself not a git repository, so the adapter
+        must be told not to require one."""
+        captured = {}
+
+        def runner(command, **kwargs):
+            captured["command"] = command
+            return Result(0, json.dumps(project_output()), "")
+
+        state, registry = capacity()
+        try:
+            invoke.run_model(
+                {"trigger": {**project_issue(), "labels": ["type:project", "project:planning"]},
+                 "product": "# Product", "adrs": [],
+                 "repository": {"files": ["product.md", "src/model/core.js"]},
+                 "review_comments": [], "existing_plan": {}},
+                30, 2.5, runner=runner, state=state, registry=registry,
+                workspace=pathlib.Path("/tmp"))
+        finally:
+            state.close()
+        self.assertIn("--skip-git-repo-check", captured["command"])
+
+    def test_clone_grounding_pins_every_read_to_the_exact_commit(self):
+        """Review finding: the branch can advance between the commit
+        lookup and later reads. Every grounding read must name the
+        resolved commit explicitly, never the branch, so a checkout and
+        its file index/product.md/ADRs can never disagree."""
+        client = CloneFakeClient(
+            files=["product.md", "docs/decisions/0001.md"],
+            contents={}, commit_sha="f" * 40)
+        seen_paths = []
+        original_api = client._api
+
+        def recording_api(path, method="GET", payload=None):
+            seen_paths.append(path)
+            return original_api(path, method=method, payload=payload)
+
+        client._api = recording_api
+        with tempfile.TemporaryDirectory() as workspace_root, \
+                mock.patch.object(invoke.subprocess, "run", side_effect=fake_clone_runner({})):
+            invoke.clone_and_ground_repository(
+                client, "o/r", "token", pathlib.Path(workspace_root), artifact=1)
+        tree_calls = [p for p in seen_paths if p.startswith("/git/trees/")]
+        content_calls = [p for p in seen_paths if p.startswith("/contents/")]
+        self.assertTrue(tree_calls and all("f" * 40 in p for p in tree_calls),
+                        f"tree read must use the exact commit, not the branch: {tree_calls}")
+        self.assertTrue(content_calls and all(f"ref={'f' * 40}" in p for p in content_calls),
+                        f"content reads must pin ?ref= to the exact commit: {content_calls}")
+
+    def test_clone_evidence_fails_closed_when_oversized(self):
+        """Review finding: the fallback's evidence scan had no size bound
+        at all, removing exactly the protection the non-fallback path has
+        — for the repositories most likely to trip it."""
+        huge_manifest = json.dumps({"factoryPolicy": {
+            "forbiddenDependencies": ["x" * 600_000]}})
+        client = CloneFakeClient(
+            files=["product.md", "policy.json"], contents={})
+        with tempfile.TemporaryDirectory() as workspace_root, \
+                mock.patch.object(invoke.subprocess, "run",
+                                  side_effect=fake_clone_runner(
+                                      {"policy.json": huge_manifest})), \
+                self.assertRaisesRegex(invoke.InvocationError, "evidence"):
+            invoke.clone_and_ground_repository(
+                client, "o/r", "token", pathlib.Path(workspace_root), artifact=1)
 
     def test_campaign_executes_through_capacity_pool_then_reads_back(self):
         client, (state, registry) = Client(), capacity()

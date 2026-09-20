@@ -148,15 +148,29 @@ def clone_and_ground_repository(client: artifacts.GitHubStore, repo: str, token:
     the same clone-and-explore pattern `factory/agents/review/invoke.py`
     already uses safely in production.
 
-    Returns `(product, adrs, repository, workspace)`, matching
-    `read_repository`'s first three return values, plus the real checkout
-    path the model should be given tool access to. `repository["sources"]`
-    is empty and `repository["commit_sha"]` records exactly what was
-    checked out — stronger provenance than the non-fallback path, which
-    does not record an exact commit at all. `repository_evidence` runs
-    unchanged, reading the same file categories from the clone instead of
-    the GitHub API, so its forbidden-dependency/production-owner facts are
-    identical either way.
+    Returns `(product, adrs, repository, workspace)`. `workspace` is a
+    *neutral* directory containing the checkout at `workspace/repo` — never
+    the checkout itself. An engine launched with its working directory
+    inside a real checkout loads that repository's own `CLAUDE.md`/
+    `AGENTS.md` as its own operating instructions (a real, previously
+    observed incident: see the comment in
+    `factory/capacity_pool/providers/cli.py`'s `probe()`), which would
+    defeat this contract's own rule that repository content is context,
+    never instructions. `run_model` tells the model where the checkout
+    actually is via the prompt instead.
+
+    `repository["sources"]` is empty and `repository["commit_sha"]`
+    records exactly what was checked out. Every grounding read below —
+    the file index, `product.md`, ADRs, and the evidence scan — is pinned
+    to that exact commit, not the branch name, so a push landing between
+    the commit lookup and these reads can never produce a checkout and a
+    file index that disagree. `repository_evidence` runs unchanged,
+    reading the same file categories from the clone instead of the GitHub
+    API, so its forbidden-dependency/production-owner facts are identical
+    either way — bounded by the same `max_repository_bytes` ceiling the
+    non-fallback path uses, so a repository with huge fixture/data files
+    under a test directory still fails closed rather than exhausting
+    memory, exactly the failure mode this Story exists to avoid elsewhere.
     """
     metadata = client._api("")
     branch = metadata.get("default_branch")
@@ -166,7 +180,10 @@ def clone_and_ground_repository(client: artifacts.GitHubStore, repo: str, token:
     commit_sha = (ref.get("object") or {}).get("sha")
     if not commit_sha:
         raise InvocationError("repository read constraint failed: exact commit unavailable")
-    tree = client._api(f"/git/trees/{branch}?recursive=1")
+    # Every read below names commit_sha explicitly (a tree SHA, or ?ref=)
+    # rather than the branch — never the branch again, which can advance
+    # between this lookup and any later call.
+    tree = client._api(f"/git/trees/{commit_sha}?recursive=1")
     files = sorted(item["path"] for item in tree.get("tree", [])
                    if item.get("type") == "blob")
     product_paths = [path for path in files if path.lower() == "product.md"]
@@ -174,7 +191,7 @@ def clone_and_ground_repository(client: artifacts.GitHubStore, repo: str, token:
         raise InvocationError("repository read constraint failed: product.md missing or ambiguous")
 
     def api_content(path):
-        item = client._api(f"/contents/{path}")
+        item = client._api(f"/contents/{path}?ref={commit_sha}")
         return base64.b64decode(item["content"]).decode("utf-8")
 
     product = api_content(product_paths[0])
@@ -199,17 +216,27 @@ def clone_and_ground_repository(client: artifacts.GitHubStore, repo: str, token:
 
     # Only the categories repository_evidence() actually inspects — the
     # model itself reads whatever else it needs directly from the clone.
+    # Bounded exactly like the non-fallback path's grounded-content cap:
+    # this is the one case where the fallback still reads file content
+    # into memory up front, so it needs the same fail-closed protection.
     evidence_paths = [path for path in files
                       if path.lower().endswith(".json") or executable_test_path(path)]
-    local_sources = {}
+    local_sources, evidence_total = {}, 0
     for path in evidence_paths:
         local_path = repo_dir / path
-        if local_path.is_file():
-            local_sources[path] = local_path.read_text(encoding="utf-8", errors="replace")
+        if not local_path.is_file():
+            continue
+        text = local_path.read_text(encoding="utf-8", errors="replace")
+        evidence_total += len(text.encode())
+        if evidence_total > DEFAULT_MAX_REPOSITORY_BYTES:
+            raise InvocationError(
+                "repository read constraint failed: policy/test evidence content "
+                f"exceeds {DEFAULT_MAX_REPOSITORY_BYTES} bytes")
+        local_sources[path] = text
     evidence = repository_evidence(files, local_sources)
 
     return product, adrs, {"default_branch": branch, "files": files, "sources": {},
-                           "commit_sha": commit_sha, **evidence}, repo_dir
+                           "commit_sha": commit_sha, **evidence}, workspace_root
 
 
 def repository_evidence(files: list[str], sources: dict[str, str]) -> dict:
@@ -423,11 +450,19 @@ def run_model(value: dict, timeout: int, max_usd: float,
               runner=subprocess.run, clock=time.monotonic, *,
               state: CapacityState | None = None, registry=None,
               workspace: pathlib.Path | None = None) -> dict:
-    """`workspace`, when given, is a real repository checkout (see
-    `clone_and_ground_repository`) that the model gets read-only tool
-    access to instead of the factory's own checkout. `access="read-only"`
-    is already `InvocationPayload`'s default — unchanged either way, so
-    the model can read files there but never write into the product repo.
+    """`workspace`, when given, is a *neutral* directory containing a real
+    repository checkout at `workspace/repo` (see
+    `clone_and_ground_repository`) — the engine's own working directory
+    stays outside the checkout itself, so it never auto-loads the target
+    repository's own `CLAUDE.md`/`AGENTS.md` as its own instructions (a
+    real, previously observed incident; see the comment in
+    `factory/capacity_pool/providers/cli.py`'s `probe()`). `prompt.md`
+    tells the model the checkout is at `./repo` relative to its working
+    directory. `access="read-only"` is already `InvocationPayload`'s
+    default — unchanged either way, so the model can read files there but
+    never write into the product repo. `skip_git_repo_check` is set for
+    this case because the neutral working directory itself is not a git
+    repository, only the `repo` subdirectory beneath it is.
     """
     altitude = contract.select_altitude(set((value.get("trigger") or {}).get("labels", [])))
     schema_value = contract.json_schema(altitude)
@@ -446,7 +481,8 @@ def run_model(value: dict, timeout: int, max_usd: float,
                 triggers=_planning_triggers(value), total_timeout_seconds=timeout,
                 total_budget_units=max_usd)
             payload = InvocationPayload(prompt, schema_value, pathlib.Path(schema.name),
-                                        pathlib.Path(output.name))
+                                        pathlib.Path(output.name),
+                                        skip_git_repo_check=(workspace is not None))
             adapters = {provider: cli_adapter(
                 provider, cwd=(workspace or ROOT),
                 environment=provider_environment(provider), runner=runner)
