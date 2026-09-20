@@ -75,7 +75,7 @@ class ProjectClient(Client):
 
 def capacity():
     state = CapacityState()
-    model = ModelCapacity("gpt-5.6-terra", "openai", Tier.BALANCED,
+    model = ModelCapacity("gpt-5.6-sol", "openai", Tier.FLAGSHIP,
                           frozenset({"reason", "json"}))
     state.mark_healthy(model.provider, model.name, "test-probe")
     return state, (model,)
