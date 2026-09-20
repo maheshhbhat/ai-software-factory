@@ -350,9 +350,14 @@ def run_model(value: dict, timeout: int, max_usd: float,
         state = state or _capacity_state()
         try:
             available = tuple(registry or resolved_registry(health=state.health))
+            # Planning's policy has no escalation_triggers any more (it
+            # requests Flagship unconditionally) -- passing a trigger here
+            # would raise "unsupported escalation trigger(s)" for exactly
+            # the architecture/high-complexity work that used to escalate,
+            # crashing the invocation instead of just using the tier it
+            # already requests normally.
             request = POLICIES["planning"].request(
-                triggers=_planning_triggers(value), total_timeout_seconds=timeout,
-                total_budget_units=max_usd)
+                total_timeout_seconds=timeout, total_budget_units=max_usd)
             payload = InvocationPayload(prompt, schema_value, pathlib.Path(schema.name),
                                         pathlib.Path(output.name))
             adapters = {provider: cli_adapter(

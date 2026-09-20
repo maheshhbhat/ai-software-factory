@@ -47,10 +47,9 @@ class CapacityPolicyTests(unittest.TestCase):
         self.assertFalse(spark.capacity().available)
 
     def test_unverified_placeholders_require_config_and_healthy_probe(self):
-        # anthropic-economy and anthropic-balanced were filled in with real,
-        # verified model_ids on 2026-09-20 (Haiku, Sonnet) and no longer go
-        # through this env-var-configured path; codex-spark remains the
-        # checked-in-but-unverified placeholder this test exercises.
+        # codex-spark remains a checked-in-but-unverified placeholder with
+        # no default at all; this is the path that resolves it from an
+        # env var alone.
         class Health:
             def __call__(self, provider, model):
                 return {"state": "healthy" if model == "verified-spark" else "unknown"}
@@ -59,6 +58,24 @@ class CapacityPolicyTests(unittest.TestCase):
             health=Health())
         spark = next(item for item in registry if item.name == "verified-spark")
         self.assertTrue(spark.available)
+
+    def test_env_override_still_wins_over_the_verified_default(self):
+        """Review finding: anthropic-economy/anthropic-balanced were filled
+        in with real, verified model_ids on 2026-09-20 (Haiku, Sonnet), but
+        resolved_registry() checked entry.model_id before the env var --
+        an operator setting FACTORY_CAPACITY_ANTHROPIC_BALANCED_MODEL would
+        be silently ignored in favor of the hardcoded default."""
+        registry = policy.resolved_registry(
+            {"FACTORY_CAPACITY_ANTHROPIC_BALANCED_MODEL": "operator-chosen-sonnet"})
+        names = {item.name for item in registry}
+        self.assertIn("operator-chosen-sonnet", names)
+        self.assertNotIn("claude-sonnet-5", names)
+
+    def test_verified_default_still_applies_without_an_override(self):
+        registry = policy.resolved_registry({})
+        names = {item.name for item in registry}
+        self.assertIn("claude-sonnet-5", names)
+        self.assertIn("claude-haiku-4-5-20251001", names)
 
 
 if __name__ == "__main__":

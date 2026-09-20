@@ -169,7 +169,13 @@ def resolved_registry(environ=None, *, health=None) -> tuple[ModelCapacity, ...]
     environ = os.environ if environ is None else environ
     values = []
     for entry in REGISTRY:
-        model_id = entry.model_id or environ.get(MODEL_ID_ENV.get(entry.name, ""), "").strip()
+        # Env var checked first, not entry.model_id: an operator override
+        # (only 3 entries have a MODEL_ID_ENV mapping at all) must still
+        # win over a verified default hardcoded in the registry, or setting
+        # FACTORY_CAPACITY_ANTHROPIC_BALANCED_MODEL/..._ECONOMY_MODEL would
+        # be silently ignored now that those two entries carry real ids.
+        model_id = (environ.get(MODEL_ID_ENV.get(entry.name, ""), "").strip()
+                    or entry.model_id)
         enabled = entry.enabled or bool(model_id)
         healthy = True
         if health is not None and model_id:
