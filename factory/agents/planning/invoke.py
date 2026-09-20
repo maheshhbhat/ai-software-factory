@@ -141,6 +141,7 @@ def read_repository(client: artifacts.GitHubStore,
 def clone_and_ground_repository(client: artifacts.GitHubStore, repo: str, token: str,
                                 workspace_root: pathlib.Path, *,
                                 artifact: int | None = None,
+                                max_repository_bytes: int = DEFAULT_MAX_REPOSITORY_BYTES,
                                 ) -> tuple[str, list[dict], dict, pathlib.Path]:
     """Fallback grounding for a repository `read_repository` cannot inline
     (see `RepositoryTooLargeError`). Clones the repository at its exact
@@ -238,10 +239,10 @@ def clone_and_ground_repository(client: artifacts.GitHubStore, repo: str, token:
         # so a single file already over the limit is never materialized in
         # memory to find that out.
         evidence_total += local_path.stat().st_size
-        if evidence_total > DEFAULT_MAX_REPOSITORY_BYTES:
+        if evidence_total > max_repository_bytes:
             raise InvocationError(
                 "repository read constraint failed: policy/test evidence content "
-                f"exceeds {DEFAULT_MAX_REPOSITORY_BYTES} bytes")
+                f"exceeds {max_repository_bytes} bytes")
         local_sources[path] = local_path.read_text(encoding="utf-8", errors="replace")
     evidence = repository_evidence(files, local_sources)
 
@@ -539,7 +540,8 @@ def execute(repo: str, artifact: int, token: str, timeout: int, max_usd: float,
                 temp = stack.enter_context(
                     tempfile.TemporaryDirectory(prefix=f"factory-planning-{artifact}-"))
                 product, adrs, repository, workspace = clone_and_ground_repository(
-                    client, repo, token, pathlib.Path(temp), artifact=artifact)
+                    client, repo, token, pathlib.Path(temp), artifact=artifact,
+                    max_repository_bytes=max_repository_bytes)
         except urllib.error.HTTPError as exc:
             if exc.code in (403, 404):
                 raise InvocationError(

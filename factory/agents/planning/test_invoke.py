@@ -498,6 +498,38 @@ class InvocationTests(unittest.TestCase):
             invoke.clone_and_ground_repository(
                 client, "o/r", "token", pathlib.Path(workspace_root), artifact=1)
 
+    def test_clone_evidence_honors_a_narrower_configured_limit(self):
+        """Review finding: the fallback's evidence check compared against
+        the hardcoded DEFAULT_MAX_REPOSITORY_BYTES regardless of what the
+        caller configured, so an operator-set narrower limit was silently
+        not enforced during the fallback."""
+        client = CloneFakeClient(files=["product.md", "policy.json"], contents={})
+        with tempfile.TemporaryDirectory() as workspace_root, \
+                mock.patch.object(invoke.subprocess, "run",
+                                  side_effect=fake_clone_runner(
+                                      {"policy.json": "x" * 100_000})), \
+                self.assertRaisesRegex(invoke.InvocationError,
+                                      "exceeds 50000 bytes"):
+            invoke.clone_and_ground_repository(
+                client, "o/r", "token", pathlib.Path(workspace_root), artifact=1,
+                max_repository_bytes=50_000)
+
+    def test_clone_evidence_honors_a_wider_configured_limit(self):
+        """Review finding, other direction: the fallback's evidence check
+        compared against the hardcoded default even when the caller
+        configured a wider limit, so a file within the configured
+        allowance but over the hardcoded default was wrongly rejected."""
+        client = CloneFakeClient(files=["product.md", "policy.json"], contents={})
+        with tempfile.TemporaryDirectory() as workspace_root, \
+                mock.patch.object(invoke.subprocess, "run",
+                                  side_effect=fake_clone_runner(
+                                      {"policy.json": "x" * 600_000})):
+            # Must not raise: 600,000 bytes is over the 500,000-byte
+            # default but under this call's explicit 700,000-byte limit.
+            invoke.clone_and_ground_repository(
+                client, "o/r", "token", pathlib.Path(workspace_root), artifact=1,
+                max_repository_bytes=700_000)
+
     def test_clone_credential_header_is_scoped_to_github_not_global(self):
         """Review finding: an unscoped http.extraHeader is inherited by
         every HTTP request git makes for this process, including a Git
