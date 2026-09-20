@@ -194,7 +194,8 @@ class InvocationTests(unittest.TestCase):
             with self.assertRaises(invoke.InvocationError):
                 invoke.read_repository(client, max_repository_bytes=500_000)
         process_event.assert_any_call(
-            "planning.repository.max_bytes_configured", max_repository_bytes=500_000)
+            "planning.repository.max_bytes_configured",
+            max_repository_bytes=500_000, repo=None, artifact=None)
 
     def test_effective_limit_is_logged_even_when_product_preflight_fails(self):
         """Second-round finding on the same PR: moving the log before the
@@ -206,7 +207,23 @@ class InvocationTests(unittest.TestCase):
             with self.assertRaises(invoke.InvocationError):
                 invoke.read_repository(client, max_repository_bytes=123)
         process_event.assert_any_call(
-            "planning.repository.max_bytes_configured", max_repository_bytes=123)
+            "planning.repository.max_bytes_configured",
+            max_repository_bytes=123, repo=None, artifact=None)
+
+    def test_logged_limit_carries_invocation_identity_when_available(self):
+        """Third-round finding on the same PR: the log carried no repo/
+        artifact identity at all, so two invocations with the same limit
+        were indistinguishable in the log — and would hash to the same
+        event_id. Proves both fields reach the log when the caller supplies
+        them (as execute() now always does)."""
+        client = RepositoryBytesClient(
+            files=["product.md", "a.py"], contents={"a.py": "small"})
+        with mock.patch.object(invoke.obs, "process_event") as process_event:
+            invoke.read_repository(client, max_repository_bytes=500_000,
+                                   repo="o/r", artifact=42)
+        process_event.assert_any_call(
+            "planning.repository.max_bytes_configured",
+            max_repository_bytes=500_000, repo="o/r", artifact=42)
 
     def test_campaign_executes_through_capacity_pool_then_reads_back(self):
         client, (state, registry) = Client(), capacity()

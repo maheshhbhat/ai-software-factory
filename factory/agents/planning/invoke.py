@@ -62,6 +62,7 @@ def state_version(client: artifacts.GitHubStore, issue: dict) -> str:
 
 def read_repository(client: artifacts.GitHubStore,
                      max_repository_bytes: int = DEFAULT_MAX_REPOSITORY_BYTES,
+                     *, repo: str | None = None, artifact: int | None = None,
                      ) -> tuple[str, list[dict], dict]:
     """Private-repository read preflight. No writer is called before this returns.
 
@@ -71,6 +72,12 @@ def read_repository(client: artifacts.GitHubStore,
     a different positive value instead. There is no automatic sizing from
     repository size, and no truncation — exceeding this bound, whatever its
     value, still fails closed before any planning artifact is written.
+
+    `repo`/`artifact` identify the invocation in the audit log below; they
+    are not otherwise used. Planning runs in its own subprocess and does not
+    inherit the poller's ambient tracing context, so without them a log
+    entry cannot show which invocation it belongs to — and two invocations
+    sharing the same limit would otherwise hash to the same log event_id.
     """
     if max_repository_bytes <= 0:
         raise InvocationError(
@@ -80,7 +87,7 @@ def read_repository(client: artifacts.GitHubStore,
     # whatever later fails — a byte-limit breach, but just as much a
     # product.md/ADR fetch or decode failure that happens first.
     obs.process_event("planning.repository.max_bytes_configured",
-                      max_repository_bytes=max_repository_bytes)
+                      max_repository_bytes=max_repository_bytes, repo=repo, artifact=artifact)
     metadata = client._api("")
     branch = metadata.get("default_branch")
     if not branch:
@@ -379,7 +386,7 @@ def execute(repo: str, artifact: int, token: str, timeout: int, max_usd: float,
     try:
         issue = client.get_issue(artifact)
         product, adrs, repository = read_repository(
-            client, max_repository_bytes=max_repository_bytes)
+            client, max_repository_bytes=max_repository_bytes, repo=repo, artifact=artifact)
     except urllib.error.HTTPError as exc:
         if exc.code in (403, 404):
             raise InvocationError(
