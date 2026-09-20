@@ -144,9 +144,13 @@ class ReviewAcceptanceTests(unittest.TestCase):
         self.assertEqual(cmd[:2], ["codex", "exec"])
         self.assertNotIn("shared-token", " ".join(cmd))
         self.assertNotIn("--output-last-message", cmd)
-        self.serialized = json.loads(cmd[-1].split("Input: ", 1)[1])
+        # Story #674: the prompt is piped via stdin (`input=`), never an
+        # argv element — `cmd[-1]` is now just "-", the stdin marker.
+        prompt = kwargs["input"]
+        self.assertNotIn("shared-token", prompt)
+        self.serialized = json.loads(prompt.split("Input: ", 1)[1])
         self.workspace_entries = sorted(x.name for x in root.iterdir())
-        staging = cmd[-1].split("Write the JSON outcome to: ", 1)[1].splitlines()[0]
+        staging = prompt.split("Write the JSON outcome to: ", 1)[1].splitlines()[0]
         pathlib.Path(staging).write_text(json.dumps(
             {"head": self.client.head, "verdict": "approval", "summary": "safe"}))
         return subprocess.CompletedProcess(cmd, 0, "", "")
