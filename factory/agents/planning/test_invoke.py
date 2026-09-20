@@ -72,6 +72,24 @@ class CloneFakeClient(RepositoryBytesClient):
         return super()._api(path, method=method, payload=payload)
 
 
+class CloneSizedClient(CloneFakeClient):
+    """Adds declared per-path blob sizes to the recursive tree response,
+    as GitHub's real API does, so the checkout-size preflight can be
+    tested against a declared size distinct from any fake local content."""
+
+    def __init__(self, files, contents, sizes, commit_sha="c" * 40):
+        super().__init__(files, contents, commit_sha=commit_sha)
+        self.sizes = sizes
+
+    def _api(self, path, method="GET", payload=None):
+        if path.startswith("/git/trees/"):
+            result = super()._api(path, method=method, payload=payload)
+            for item in result["tree"]:
+                item["size"] = self.sizes.get(item["path"], 0)
+            return result
+        return super()._api(path, method=method, payload=payload)
+
+
 def fake_clone_runner(contents):
     """Simulates `git clone` + `git checkout` by writing the given files to
     disk for real, so downstream local-file reads (repository_evidence,
@@ -572,6 +590,57 @@ class InvocationTests(unittest.TestCase):
         self.assertEqual("1", captured["env"]["GIT_LFS_SKIP_SMUDGE"])
         self.assertEqual("http.https://github.com/.extraHeader",
                          captured["env"]["GIT_CONFIG_KEY_0"])
+
+    def test_clone_refuses_before_checkout_when_blobs_exceed_the_limit(self):
+        """Review finding: --filter=blob:none only defers ordinary blob
+        transfer, it does not bound it — checkout still fetches and
+        writes every blob the target commit's tree references, with
+        nothing limiting total bytes materialized. The tree API already
+        reports each blob's size, so that must gate checkout the same
+        way the evidence scan is gated."""
+        client = CloneSizedClient(
+            files=["product.md", "big.bin"], contents={},
+            sizes={"big.bin": 4_000_000})
+
+        def runner(command, **kwargs):
+            raise AssertionError(
+                "no clone/checkout subprocess may run once declared blob "
+                "sizes already exceed the configured limit")
+
+        with tempfile.TemporaryDirectory() as workspace_root, \
+                mock.patch.object(invoke.subprocess, "run", side_effect=runner), \
+                self.assertRaisesRegex(invoke.InvocationError, "blob content"):
+            invoke.clone_and_ground_repository(
+                client, "o/r", "token", pathlib.Path(workspace_root), artifact=1)
+
+    def test_clone_removes_every_symlink_in_the_checkout_not_just_evidence(self):
+        """Security finding: only symlinks selected by the evidence scan
+        were rejected; every other symlink in the checkout remained live
+        and readable, and the prompt tells the model to read repository
+        files directly by path — a tracked symlink to an absolute host
+        path (a worker credential file, a procfs entry) would be exposed
+        to the model like any other repository file."""
+        client = CloneFakeClient(files=["product.md", "src/config.py"], contents={})
+
+        def runner(command, **kwargs):
+            if command[:2] == ["git", "clone"]:
+                (pathlib.Path(kwargs["cwd"]) / "repo").mkdir(parents=True, exist_ok=True)
+            elif command[:2] == ["git", "checkout"]:
+                repo_dir = pathlib.Path(kwargs["cwd"])
+                outside = repo_dir.parent / "outside_target.txt"
+                outside.write_text("host content", encoding="utf-8")
+                link_path = repo_dir / "src" / "config.py"
+                link_path.parent.mkdir(parents=True, exist_ok=True)
+                link_path.symlink_to(outside)
+            return Result(0, "", "")
+
+        with tempfile.TemporaryDirectory() as workspace_root, \
+                mock.patch.object(invoke.subprocess, "run", side_effect=runner):
+            invoke.clone_and_ground_repository(
+                client, "o/r", "token", pathlib.Path(workspace_root), artifact=1)
+            self.assertFalse(
+                (pathlib.Path(workspace_root) / "repo" / "src" / "config.py").exists(),
+                "the symlink must be removed, not merely skipped by the evidence scan")
 
     def test_clone_fetches_a_filtered_no_checkout_tree_not_full_history(self):
         """Review finding: an unrestricted clone downloads every reachable

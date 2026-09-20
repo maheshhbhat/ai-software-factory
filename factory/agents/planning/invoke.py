@@ -187,6 +187,20 @@ def clone_and_ground_repository(client: artifacts.GitHubStore, repo: str, token:
     tree = client._api(f"/git/trees/{commit_sha}?recursive=1")
     files = sorted(item["path"] for item in tree.get("tree", [])
                    if item.get("type") == "blob")
+    # Checked before any clone/checkout runs: --filter=blob:none only
+    # defers ordinary blob transfer, it does not bound it — the later
+    # checkout still fetches and writes every blob the target commit's
+    # tree references, with nothing else in this function limiting that.
+    # The recursive tree listing already reports each blob's size, so the
+    # same configured ceiling that bounds evidence content also bounds
+    # what checkout would be allowed to materialize.
+    total_blob_bytes = sum(item.get("size") or 0 for item in tree.get("tree", [])
+                           if item.get("type") == "blob")
+    if total_blob_bytes > max_repository_bytes:
+        raise InvocationError(
+            "repository read constraint failed: repository blob content "
+            f"exceeds {max_repository_bytes} bytes; the clone fallback "
+            "cannot bound what checkout would materialize")
     product_paths = [path for path in files if path.lower() == "product.md"]
     if len(product_paths) != 1:
         raise InvocationError("repository read constraint failed: product.md missing or ambiguous")
@@ -242,6 +256,16 @@ def clone_and_ground_repository(client: artifacts.GitHubStore, repo: str, token:
     subprocess.run(["git", "checkout", "--quiet", commit_sha], cwd=repo_dir,
                    env=clone_env, check=True,
                    capture_output=True, text=True, timeout=60)
+
+    # Every symlink in the checkout is removed outright, not just ones the
+    # evidence scan below happens to select: the prompt tells the model to
+    # read repository files directly from this checkout, and a tracked
+    # symlink to an absolute host path (a worker credential file, a procfs
+    # entry) would otherwise be exposed to it like any other repository
+    # file. Planning never needs a symlink to do its job.
+    for entry in repo_dir.rglob("*"):
+        if entry.is_symlink():
+            entry.unlink()
 
     # Only the categories repository_evidence() actually inspects — the
     # model itself reads whatever else it needs directly from the clone.
