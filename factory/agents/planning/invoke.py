@@ -185,6 +185,10 @@ def clone_and_ground_repository(client: artifacts.GitHubStore, repo: str, token:
     # rather than the branch — never the branch again, which can advance
     # between this lookup and any later call.
     tree = client._api(f"/git/trees/{commit_sha}?recursive=1")
+    if tree.get("truncated"):
+        raise InvocationError(
+            "repository read constraint failed: repository tree listing was "
+            "truncated by GitHub; the file index would be incomplete")
     files = sorted(item["path"] for item in tree.get("tree", [])
                    if item.get("type") == "blob")
     # NOTE: checkout still has no bound on total blob bytes materialized

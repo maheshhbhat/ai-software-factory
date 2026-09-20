@@ -481,6 +481,30 @@ class InvocationTests(unittest.TestCase):
         self.assertTrue(content_calls and all(f"ref={'f' * 40}" in p for p in content_calls),
                         f"content reads must pin ?ref= to the exact commit: {content_calls}")
 
+    def test_clone_rejects_a_truncated_tree_listing(self):
+        """Review finding: GitHub returns truncated: true when a
+        repository's tree exceeds its recursive-listing size limit. Using
+        that partial prefix as the complete file index would silently
+        under-report repository.files, and a scope/executor the model
+        legitimately found in the real checkout could then be wrongly
+        rejected by contract.py against an incomplete index."""
+        client = CloneFakeClient(files=["product.md"], contents={})
+        original_api = client._api
+
+        def truncated_api(path, method="GET", payload=None):
+            result = original_api(path, method=method, payload=payload)
+            if path.startswith("/git/trees/"):
+                result["truncated"] = True
+            return result
+
+        client._api = truncated_api
+        with tempfile.TemporaryDirectory() as workspace_root, \
+                mock.patch.object(invoke.subprocess, "run",
+                                  side_effect=fake_clone_runner({})), \
+                self.assertRaisesRegex(invoke.InvocationError, "truncated"):
+            invoke.clone_and_ground_repository(
+                client, "o/r", "token", pathlib.Path(workspace_root), artifact=1)
+
     def test_clone_evidence_fails_closed_when_oversized(self):
         """Review finding: the fallback's evidence scan had no size bound
         at all, removing exactly the protection the non-fallback path has
