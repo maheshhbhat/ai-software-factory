@@ -7,6 +7,7 @@ provider command syntax or maps provider diagnostics to shared failure reasons.
 
 from __future__ import annotations
 
+import contextlib
 import pathlib
 import json
 import os
@@ -84,8 +85,11 @@ def provider_environment(provider: str, environ=None) -> dict[str, str]:
 
 def claude_command(*, model: str, effort: str, payload: InvocationPayload,
                    budget_units: float) -> list[str]:
+    # `-p`/`--print` is a bare flag here, not a value-taking option: the
+    # prompt itself is never an argv element (see `invoke`'s `input=`) so a
+    # prompt of any size cannot hit the OS command-line length limit.
     permission = "acceptEdits" if payload.access == "workspace-write" else "dontAsk"
-    command = ["claude", "-p", payload.text, "--model", model, "--effort", effort,
+    command = ["claude", "-p", "--model", model, "--effort", effort,
             "--max-budget-usd", str(budget_units), "--permission-mode", permission,
             "--output-format", "stream-json", "--verbose", "--no-session-persistence"]
     if payload.output_schema is not None:
@@ -111,10 +115,13 @@ def codex_command(*, model: str, effort: str, payload: InvocationPayload) -> lis
         command += ["--output-schema", str(payload.schema_path)]
     if payload.output_path is not None:
         command += ["--output-last-message", str(payload.output_path)]
-    return command + ["--json", payload.text]
+    # `-` tells Codex to read the prompt from stdin (documented behavior)
+    # instead of taking it as an argv element (see `invoke`'s `input=`).
+    return command + ["--json", "-"]
 
 
-def muse_command(*, model: str, effort: str, payload: InvocationPayload) -> list[str]:
+def muse_command(*, model: str, effort: str, payload: InvocationPayload,
+                 prompt_path: pathlib.Path) -> list[str]:
     # `muse exec` is Meta's headless mode. There is no monetary budget flag;
     # the step cap is the only run bound the CLI offers, so the shared
     # executor's reserved-budget accounting is the real spend control
@@ -129,7 +136,10 @@ def muse_command(*, model: str, effort: str, payload: InvocationPayload) -> list
         command += ["--disable-approval"]
     if payload.network_access:
         command += ["--sandbox-network", "full"]
-    return command + [payload.text]
+    # The prompt is written to `prompt_path` by the caller and referenced by
+    # file, never embedded as an argv element, so its size cannot hit the OS
+    # command-line length limit.
+    return command + ["--prompt-file", str(prompt_path)]
 
 
 def cli_adapter(provider: str, *, cwd: pathlib.Path, environment: dict[str, str],
@@ -140,44 +150,61 @@ def cli_adapter(provider: str, *, cwd: pathlib.Path, environment: dict[str, str]
     def invoke(*, model, effort, timeout_seconds, budget_units, payload,
                working_directory=None):
         value = payload if isinstance(payload, InvocationPayload) else InvocationPayload(str(payload))
-        if provider == "anthropic":
-            command = claude_command(model=model, effort=effort, payload=value,
-                                     budget_units=budget_units)
-        elif provider == "meta":
-            command = muse_command(model=model, effort=effort, payload=value)
-        else:
-            command = codex_command(model=model, effort=effort, payload=value)
-        try:
-            result = runner(command, cwd=str(working_directory or cwd), env=environment,
-                            capture_output=True, text=True, timeout=timeout_seconds)
-        except FileNotFoundError as exc:
-            return AttemptResult("missing-executable", consumed_budget_units=0,
-                                 diagnostic=str(exc)[:500], process_started=False,
-                                 dollar_cost_unavailable_reason=
-                                 "provider-did-not-report-exact-cost")
-        except subprocess.TimeoutExpired as exc:
-            return AttemptResult("timeout", mutation_state=mutation_state(),
-                                 diagnostic=str(exc)[:500], process_started=True,
-                                 dollar_cost_unavailable_reason=
-                                 "provider-did-not-report-exact-cost")
-        output = result.stdout or ""
-        usage, exact_cost = reported_usage(output)
-        if result.returncode:
-            diagnostic = ((result.stderr or "") + "\n" + (result.stdout or ""))[-500:]
-            return AttemptResult(classify_failure(diagnostic, result.returncode),
-                                 consumed_budget_units=exact_cost,
-                                 mutation_state=mutation_state(), diagnostic=diagnostic,
-                                 usage=usage, exact_cost_usd=exact_cost,
-                                 dollar_cost_unavailable_reason=(None if exact_cost is not None
-                                     else "provider-did-not-report-exact-cost"))
-        if value.output_path is not None and value.output_path.exists():
-            written = value.output_path.read_text(encoding="utf-8")
-            if written.strip():
-                output = written
-        return AttemptResult(
-            "success", output, exact_cost, usage=usage, exact_cost_usd=exact_cost,
-            dollar_cost_unavailable_reason=(None if exact_cost is not None else
-                                             "provider-did-not-report-exact-cost"))
+        # Prompt payload is data, never a command-line argument — a large one
+        # can exceed the OS argument-list limit (observed live: ~1.16MB
+        # against a 1,048,576-byte ARG_MAX). Codex/Claude read it from
+        # stdin (`input=`, below); Muse reads it from a temp file that lives
+        # only for this call, cleaned up on every exit path via ExitStack —
+        # success, a provider failure, or the timeout/missing-executable
+        # branches below.
+        stdin_text = None
+        with contextlib.ExitStack() as stack:
+            if provider == "anthropic":
+                command = claude_command(model=model, effort=effort, payload=value,
+                                         budget_units=budget_units)
+                stdin_text = value.text
+            elif provider == "meta":
+                prompt_file = stack.enter_context(
+                    tempfile.NamedTemporaryFile("w", suffix=".prompt.txt", encoding="utf-8"))
+                prompt_file.write(value.text)
+                prompt_file.flush()
+                command = muse_command(model=model, effort=effort, payload=value,
+                                       prompt_path=pathlib.Path(prompt_file.name))
+            else:
+                command = codex_command(model=model, effort=effort, payload=value)
+                stdin_text = value.text
+            try:
+                result = runner(command, cwd=str(working_directory or cwd), env=environment,
+                                capture_output=True, text=True, timeout=timeout_seconds,
+                                input=stdin_text)
+            except FileNotFoundError as exc:
+                return AttemptResult("missing-executable", consumed_budget_units=0,
+                                     diagnostic=str(exc)[:500], process_started=False,
+                                     dollar_cost_unavailable_reason=
+                                     "provider-did-not-report-exact-cost")
+            except subprocess.TimeoutExpired as exc:
+                return AttemptResult("timeout", mutation_state=mutation_state(),
+                                     diagnostic=str(exc)[:500], process_started=True,
+                                     dollar_cost_unavailable_reason=
+                                     "provider-did-not-report-exact-cost")
+            output = result.stdout or ""
+            usage, exact_cost = reported_usage(output)
+            if result.returncode:
+                diagnostic = ((result.stderr or "") + "\n" + (result.stdout or ""))[-500:]
+                return AttemptResult(classify_failure(diagnostic, result.returncode),
+                                     consumed_budget_units=exact_cost,
+                                     mutation_state=mutation_state(), diagnostic=diagnostic,
+                                     usage=usage, exact_cost_usd=exact_cost,
+                                     dollar_cost_unavailable_reason=(None if exact_cost is not None
+                                         else "provider-did-not-report-exact-cost"))
+            if value.output_path is not None and value.output_path.exists():
+                written = value.output_path.read_text(encoding="utf-8")
+                if written.strip():
+                    output = written
+            return AttemptResult(
+                "success", output, exact_cost, usage=usage, exact_cost_usd=exact_cost,
+                dollar_cost_unavailable_reason=(None if exact_cost is not None else
+                                                 "provider-did-not-report-exact-cost"))
 
     def probe(*, model, timeout_seconds, effort="low"):
         # A minimal claude-fable-5 reply costs ~$0.15, so a 0.1 cap makes the
