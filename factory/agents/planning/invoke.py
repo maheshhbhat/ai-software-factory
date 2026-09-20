@@ -234,8 +234,13 @@ def clone_and_ground_repository(client: artifacts.GitHubStore, repo: str, token:
                     f"https://github.com/{repo}.git", "repo"],
                    cwd=workspace_root, env=clone_env, check=True,
                    capture_output=True, text=True, timeout=120)
+    # Same env as the clone above, not a PATH-only trim: with
+    # --filter=blob:none --no-checkout, this checkout is the step that
+    # actually fetches the target commit's blobs over the network, so it
+    # needs the same scoped credential header — and it is the step that
+    # runs the LFS smudge filter, so it needs the same skip-smudge flag.
     subprocess.run(["git", "checkout", "--quiet", commit_sha], cwd=repo_dir,
-                   env={"PATH": clone_env.get("PATH", "")}, check=True,
+                   env=clone_env, check=True,
                    capture_output=True, text=True, timeout=60)
 
     # Only the categories repository_evidence() actually inspects — the

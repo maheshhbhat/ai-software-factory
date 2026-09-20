@@ -549,6 +549,30 @@ class InvocationTests(unittest.TestCase):
                 client, "o/r", "token", pathlib.Path(workspace_root), artifact=1)
         self.assertEqual("1", captured["env"]["GIT_LFS_SKIP_SMUDGE"])
 
+    def test_checkout_carries_the_same_credential_and_lfs_env_as_the_clone(self):
+        """Review finding: with --no-checkout on the clone, the checkout
+        step is the one that actually fetches the target commit's blobs
+        over the network and runs the LFS smudge filter — but it ran with
+        a PATH-only environment, silently dropping both the scoped
+        credential header (breaking private-repository checkout) and
+        GIT_LFS_SKIP_SMUDGE (reopening the unbounded-LFS-download finding
+        this same PR already claimed to fix)."""
+        captured = {}
+
+        def runner(command, **kwargs):
+            if command[:2] == ["git", "checkout"]:
+                captured["env"] = kwargs["env"]
+            return fake_clone_runner({})(command, **kwargs)
+
+        client = CloneFakeClient(files=["product.md"], contents={})
+        with tempfile.TemporaryDirectory() as workspace_root, \
+                mock.patch.object(invoke.subprocess, "run", side_effect=runner):
+            invoke.clone_and_ground_repository(
+                client, "o/r", "token", pathlib.Path(workspace_root), artifact=1)
+        self.assertEqual("1", captured["env"]["GIT_LFS_SKIP_SMUDGE"])
+        self.assertEqual("http.https://github.com/.extraHeader",
+                         captured["env"]["GIT_CONFIG_KEY_0"])
+
     def test_clone_fetches_a_filtered_no_checkout_tree_not_full_history(self):
         """Review finding: an unrestricted clone downloads every reachable
         object even though the fallback only ever uses one commit's tree
