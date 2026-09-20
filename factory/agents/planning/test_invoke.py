@@ -479,6 +479,47 @@ class InvocationTests(unittest.TestCase):
             invoke.clone_and_ground_repository(
                 client, "o/r", "token", pathlib.Path(workspace_root), artifact=1)
 
+    def test_clone_evidence_checks_size_before_reading_file_content(self):
+        """Review finding: a single oversized file was fully read into
+        memory (read_text) before its size was ever checked against the
+        limit — the size check must gate the read, not follow it."""
+        huge_manifest = "x" * 600_000
+        client = CloneFakeClient(files=["product.md", "policy.json"], contents={})
+        with tempfile.TemporaryDirectory() as workspace_root, \
+                mock.patch.object(invoke.subprocess, "run",
+                                  side_effect=fake_clone_runner(
+                                      {"policy.json": huge_manifest})), \
+                mock.patch.object(
+                    pathlib.Path, "read_text",
+                    side_effect=AssertionError(
+                        "read_text must not run once the on-disk size alone "
+                        "exceeds the limit")), \
+                self.assertRaisesRegex(invoke.InvocationError, "evidence"):
+            invoke.clone_and_ground_repository(
+                client, "o/r", "token", pathlib.Path(workspace_root), artifact=1)
+
+    def test_clone_credential_header_is_scoped_to_github_not_global(self):
+        """Review finding: an unscoped http.extraHeader is inherited by
+        every HTTP request git makes for this process, including a Git
+        LFS smudge filter's request to a repository-controlled lfs.url —
+        leaking this factory token to that server. The header must be
+        scoped to the github.com URL prefix, which git-lfs also honors
+        since it reads the same git config."""
+        captured = {}
+
+        def runner(command, **kwargs):
+            if command[:2] == ["git", "clone"]:
+                captured["env"] = kwargs["env"]
+            return fake_clone_runner({})(command, **kwargs)
+
+        client = CloneFakeClient(files=["product.md"], contents={})
+        with tempfile.TemporaryDirectory() as workspace_root, \
+                mock.patch.object(invoke.subprocess, "run", side_effect=runner):
+            invoke.clone_and_ground_repository(
+                client, "o/r", "token", pathlib.Path(workspace_root), artifact=1)
+        self.assertEqual("http.https://github.com/.extraHeader",
+                         captured["env"]["GIT_CONFIG_KEY_0"])
+
     def test_campaign_executes_through_capacity_pool_then_reads_back(self):
         client, (state, registry) = Client(), capacity()
         runner = mock.Mock(return_value=Result(stdout=json.dumps(campaign_output())))

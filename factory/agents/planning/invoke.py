@@ -203,7 +203,15 @@ def clone_and_ground_repository(client: artifacts.GitHubStore, repo: str, token:
     repo_dir = workspace_root / "repo"
     auth_header = base64.b64encode(f"x-access-token:{token}".encode()).decode()
     clone_env = dict(os.environ)
-    clone_env.update({"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "http.extraHeader",
+    # Scoped to the github.com URL prefix, not a blanket http.extraHeader:
+    # an unscoped header is sent with every HTTP request git makes for this
+    # process, including a Git LFS smudge filter's request to whatever
+    # lfs.url a checked-out .lfsconfig names. A repository-controlled LFS
+    # server would then receive this factory token. Scoping the config key
+    # to https://github.com/ means git (and git-lfs, which reads the same
+    # config) only attaches it to requests against that URL.
+    clone_env.update({"GIT_CONFIG_COUNT": "1",
+                      "GIT_CONFIG_KEY_0": "http.https://github.com/.extraHeader",
                       "GIT_CONFIG_VALUE_0": f"Authorization: Basic {auth_header}"})
     obs.process_event("planning.repository.cloned", repo=repo, artifact=artifact,
                       commit_sha=commit_sha)
@@ -226,13 +234,15 @@ def clone_and_ground_repository(client: artifacts.GitHubStore, repo: str, token:
         local_path = repo_dir / path
         if not local_path.is_file():
             continue
-        text = local_path.read_text(encoding="utf-8", errors="replace")
-        evidence_total += len(text.encode())
+        # Checked against the file's size on disk before read_text() runs,
+        # so a single file already over the limit is never materialized in
+        # memory to find that out.
+        evidence_total += local_path.stat().st_size
         if evidence_total > DEFAULT_MAX_REPOSITORY_BYTES:
             raise InvocationError(
                 "repository read constraint failed: policy/test evidence content "
                 f"exceeds {DEFAULT_MAX_REPOSITORY_BYTES} bytes")
-        local_sources[path] = text
+        local_sources[path] = local_path.read_text(encoding="utf-8", errors="replace")
     evidence = repository_evidence(files, local_sources)
 
     return product, adrs, {"default_branch": branch, "files": files, "sources": {},
