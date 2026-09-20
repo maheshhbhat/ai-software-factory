@@ -213,10 +213,25 @@ def clone_and_ground_repository(client: artifacts.GitHubStore, repo: str, token:
     # config) only attaches it to requests against that URL.
     clone_env.update({"GIT_CONFIG_COUNT": "1",
                       "GIT_CONFIG_KEY_0": "http.https://github.com/.extraHeader",
-                      "GIT_CONFIG_VALUE_0": f"Authorization: Basic {auth_header}"})
+                      "GIT_CONFIG_VALUE_0": f"Authorization: Basic {auth_header}",
+                      # Planning reads text (product.md, ADRs, JSON/test
+                      # evidence) from the checkout; it never needs the
+                      # binary content an LFS pointer resolves to. Without
+                      # this, checkout runs the LFS smudge filter, which
+                      # downloads every tracked object the commit
+                      # references — an unbounded, repository-controlled
+                      # amount of outbound traffic and worker disk use.
+                      "GIT_LFS_SKIP_SMUDGE": "1"})
     obs.process_event("planning.repository.cloned", repo=repo, artifact=artifact,
                       commit_sha=commit_sha)
-    subprocess.run(["git", "clone", "--quiet", f"https://github.com/{repo}.git", "repo"],
+    # --filter=blob:none + --no-checkout: fetch the full commit/tree graph
+    # (needed so the later checkout can resolve commit_sha even if it is
+    # not the branch tip by the time this runs) but no blob content up
+    # front. The explicit checkout below then fetches only the blobs the
+    # one target commit's tree actually references, not the repository's
+    # full history of file content.
+    subprocess.run(["git", "clone", "--quiet", "--filter=blob:none", "--no-checkout",
+                    f"https://github.com/{repo}.git", "repo"],
                    cwd=workspace_root, env=clone_env, check=True,
                    capture_output=True, text=True, timeout=120)
     subprocess.run(["git", "checkout", "--quiet", commit_sha], cwd=repo_dir,
@@ -233,7 +248,12 @@ def clone_and_ground_repository(client: artifacts.GitHubStore, repo: str, token:
     local_sources, evidence_total = {}, 0
     for path in evidence_paths:
         local_path = repo_dir / path
-        if not local_path.is_file():
+        # is_symlink() checked without following: a symlink to a special
+        # file (e.g. a procfs path) can report stat() size 0 while still
+        # streaming unbounded content on read, defeating the size check
+        # below entirely. Rejected outright rather than resolved and
+        # validated, since evidence never needs to be a symlink.
+        if local_path.is_symlink() or not local_path.is_file():
             continue
         # Checked against the file's size on disk before read_text() runs,
         # so a single file already over the limit is never materialized in

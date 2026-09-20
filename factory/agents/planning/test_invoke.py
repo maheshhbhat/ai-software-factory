@@ -530,6 +530,74 @@ class InvocationTests(unittest.TestCase):
                 client, "o/r", "token", pathlib.Path(workspace_root), artifact=1,
                 max_repository_bytes=700_000)
 
+    def test_clone_disables_lfs_smudge(self):
+        """Review finding: without GIT_LFS_SKIP_SMUDGE, checkout runs the
+        LFS smudge filter and downloads every tracked object the commit
+        references — unbounded, repository-controlled outbound traffic
+        and disk use Planning never needs (it only reads text)."""
+        captured = {}
+
+        def runner(command, **kwargs):
+            if command[:2] == ["git", "clone"]:
+                captured["env"] = kwargs["env"]
+            return fake_clone_runner({})(command, **kwargs)
+
+        client = CloneFakeClient(files=["product.md"], contents={})
+        with tempfile.TemporaryDirectory() as workspace_root, \
+                mock.patch.object(invoke.subprocess, "run", side_effect=runner):
+            invoke.clone_and_ground_repository(
+                client, "o/r", "token", pathlib.Path(workspace_root), artifact=1)
+        self.assertEqual("1", captured["env"]["GIT_LFS_SKIP_SMUDGE"])
+
+    def test_clone_fetches_a_filtered_no_checkout_tree_not_full_history(self):
+        """Review finding: an unrestricted clone downloads every reachable
+        object even though the fallback only ever uses one commit's tree
+        — a repository with a long history or large historical binaries
+        can time out or exhaust worker disk before planning begins."""
+        captured = {}
+
+        def runner(command, **kwargs):
+            if command[:2] == ["git", "clone"]:
+                captured["command"] = command
+            return fake_clone_runner({})(command, **kwargs)
+
+        client = CloneFakeClient(files=["product.md"], contents={})
+        with tempfile.TemporaryDirectory() as workspace_root, \
+                mock.patch.object(invoke.subprocess, "run", side_effect=runner):
+            invoke.clone_and_ground_repository(
+                client, "o/r", "token", pathlib.Path(workspace_root), artifact=1)
+        self.assertIn("--filter=blob:none", captured["command"])
+        self.assertIn("--no-checkout", captured["command"])
+
+    def test_clone_evidence_rejects_symlinked_paths(self):
+        """Security finding: a symlink whose target can report a stat()
+        size that does not reflect what read() actually returns (as with
+        a procfs pseudo-file) would defeat the size check entirely. A
+        symlinked evidence path must be rejected outright, never stat'd
+        or read through, regardless of what its target is."""
+        client = CloneFakeClient(files=["product.md", "tests/exhaust.py"], contents={})
+
+        def runner(command, **kwargs):
+            if command[:2] == ["git", "clone"]:
+                (pathlib.Path(kwargs["cwd"]) / "repo").mkdir(parents=True, exist_ok=True)
+            elif command[:2] == ["git", "checkout"]:
+                repo_dir = pathlib.Path(kwargs["cwd"])
+                outside = repo_dir.parent / "outside_target.txt"
+                outside.write_text("innocuous", encoding="utf-8")
+                link_path = repo_dir / "tests" / "exhaust.py"
+                link_path.parent.mkdir(parents=True, exist_ok=True)
+                link_path.symlink_to(outside)
+            return Result(0, "", "")
+
+        with tempfile.TemporaryDirectory() as workspace_root, \
+                mock.patch.object(invoke.subprocess, "run", side_effect=runner), \
+                mock.patch.object(
+                    pathlib.Path, "read_text",
+                    side_effect=AssertionError(
+                        "a symlinked evidence path must never be read")):
+            invoke.clone_and_ground_repository(
+                client, "o/r", "token", pathlib.Path(workspace_root), artifact=1)
+
     def test_clone_credential_header_is_scoped_to_github_not_global(self):
         """Review finding: an unscoped http.extraHeader is inherited by
         every HTTP request git makes for this process, including a Git
