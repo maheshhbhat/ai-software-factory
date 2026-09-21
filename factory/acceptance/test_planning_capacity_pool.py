@@ -40,9 +40,9 @@ class PlanningCapacityPoolAcceptance(unittest.TestCase):
         state = CapacityState()
         capabilities = frozenset({"reason", "json"})
         registry = (
-            ModelCapacity("anthropic-balanced", "anthropic", Tier.BALANCED,
+            ModelCapacity("claude-opus-5", "anthropic", Tier.FLAGSHIP,
                           capabilities, prepaid_or_expiring=True),
-            ModelCapacity("gpt-5.6-terra", "openai", Tier.BALANCED, capabilities),
+            ModelCapacity("gpt-5.6-sol", "openai", Tier.FLAGSHIP, capabilities),
         )
         for item in registry:
             state.mark_healthy(item.provider, item.name, "test-probe")
@@ -66,8 +66,8 @@ class PlanningCapacityPoolAcceptance(unittest.TestCase):
                 VALUE, 100, 10, runner=runner, clock=Clock(0, 0))
         self.assertEqual(OUTPUT, result)
         self.assertEqual([50, 100], [timeout for _, timeout in calls])
-        self.assertIn("anthropic-balanced", calls[0][0])
-        self.assertIn("gpt-5.6-terra", calls[1][0])
+        self.assertIn("claude-opus-5", calls[0][0])
+        self.assertIn("gpt-5.6-sol", calls[1][0])
         self.assertIn('model_reasoning_effort="medium"', calls[1][0])
 
     def test_primary_timeout_leaves_only_reserved_logical_task_remainder(self):

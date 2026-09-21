@@ -7,7 +7,6 @@ from factory.capacity_pool.router import ModelCapacity, Tier, route
 
 class CapacityPolicyTests(unittest.TestCase):
     def test_normal_workloads_do_not_request_flagship(self):
-        self.assertEqual(Tier.BALANCED, policy.POLICIES["planning"].request().minimum_tier)
         self.assertEqual(Tier.BALANCED, policy.POLICIES["delivery"].request().minimum_tier)
         self.assertEqual(Tier.BALANCED, policy.POLICIES["review"].request().minimum_tier)
         self.assertEqual(Tier.BALANCED,
@@ -15,14 +14,25 @@ class CapacityPolicyTests(unittest.TestCase):
         self.assertEqual(Tier.ECONOMY, policy.POLICIES["bridge"].request().minimum_tier)
         self.assertEqual(Tier.ECONOMY, policy.POLICIES["readiness"].request().minimum_tier)
 
-    def test_checked_in_trigger_is_required_for_flagship(self):
-        request = policy.POLICIES["planning"].request(triggers={"architecture"})
+    def test_planning_requests_flagship_by_design(self):
+        """Planning moved to Flagship 2026-09-20: its Balanced-tier
+        candidates proved too thin in practice, so it routes to Flagship
+        (Opus, GPT-5.6-sol) directly rather than escalating per-invocation.
+        Unlike the other workloads, it has no escalation trigger at all —
+        it already requests the top tier normally."""
+        request = policy.POLICIES["planning"].request()
         self.assertEqual(Tier.FLAGSHIP, request.minimum_tier)
         with self.assertRaisesRegex(ValueError, "unsupported escalation"):
-            policy.POLICIES["planning"].request(triggers={"provider-failed"})
+            policy.POLICIES["planning"].request(triggers={"architecture"})
+
+    def test_checked_in_trigger_is_required_for_flagship(self):
+        request = policy.POLICIES["review"].request(triggers={"architecture"})
+        self.assertEqual(Tier.FLAGSHIP, request.minimum_tier)
+        with self.assertRaisesRegex(ValueError, "unsupported escalation"):
+            policy.POLICIES["review"].request(triggers={"provider-failed"})
 
     def test_failure_route_cannot_climb_tier(self):
-        request = policy.POLICIES["planning"].request()
+        request = policy.POLICIES["review"].request()
         registry = (
             ModelCapacity("terra", "openai", Tier.BALANCED, request.required_capabilities),
             ModelCapacity("sol", "openai", Tier.FLAGSHIP, request.required_capabilities),
@@ -37,14 +47,35 @@ class CapacityPolicyTests(unittest.TestCase):
         self.assertFalse(spark.capacity().available)
 
     def test_unverified_placeholders_require_config_and_healthy_probe(self):
+        # codex-spark remains a checked-in-but-unverified placeholder with
+        # no default at all; this is the path that resolves it from an
+        # env var alone.
         class Health:
             def __call__(self, provider, model):
-                return {"state": "healthy" if model == "verified-sonnet" else "unknown"}
+                return {"state": "healthy" if model == "verified-spark" else "unknown"}
         registry = policy.resolved_registry(
-            {"FACTORY_CAPACITY_ANTHROPIC_BALANCED_MODEL": "verified-sonnet"},
+            {"FACTORY_CAPACITY_OPENAI_SPARK_MODEL": "verified-spark"},
             health=Health())
-        sonnet = next(item for item in registry if item.name == "verified-sonnet")
-        self.assertTrue(sonnet.available)
+        spark = next(item for item in registry if item.name == "verified-spark")
+        self.assertTrue(spark.available)
+
+    def test_env_override_still_wins_over_the_verified_default(self):
+        """Review finding: anthropic-economy/anthropic-balanced were filled
+        in with real, verified model_ids on 2026-09-20 (Haiku, Sonnet), but
+        resolved_registry() checked entry.model_id before the env var --
+        an operator setting FACTORY_CAPACITY_ANTHROPIC_BALANCED_MODEL would
+        be silently ignored in favor of the hardcoded default."""
+        registry = policy.resolved_registry(
+            {"FACTORY_CAPACITY_ANTHROPIC_BALANCED_MODEL": "operator-chosen-sonnet"})
+        names = {item.name for item in registry}
+        self.assertIn("operator-chosen-sonnet", names)
+        self.assertNotIn("claude-sonnet-5", names)
+
+    def test_verified_default_still_applies_without_an_override(self):
+        registry = policy.resolved_registry({})
+        names = {item.name for item in registry}
+        self.assertIn("claude-sonnet-5", names)
+        self.assertIn("claude-haiku-4-5-20251001", names)
 
 
 if __name__ == "__main__":

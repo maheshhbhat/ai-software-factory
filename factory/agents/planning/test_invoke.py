@@ -75,7 +75,7 @@ class ProjectClient(Client):
 
 def capacity():
     state = CapacityState()
-    model = ModelCapacity("gpt-5.6-terra", "openai", Tier.BALANCED,
+    model = ModelCapacity("gpt-5.6-sol", "openai", Tier.FLAGSHIP,
                           frozenset({"reason", "json"}))
     state.mark_healthy(model.provider, model.name, "test-probe")
     return state, (model,)
@@ -250,6 +250,26 @@ class InvocationTests(unittest.TestCase):
             state.close()
         self.assertEqual((12, 13), result.stories)
         self.assertIn("project:awaiting-ready", client.get_issue(10)["labels"])
+
+    def test_architecture_labeled_project_does_not_crash_planning(self):
+        """Review finding: Planning's policy has no escalation_triggers any
+        more (it requests Flagship unconditionally), but run_model() still
+        passed labels-derived triggers into .request() -- an
+        architecture/high-complexity-labeled issue raised "unsupported
+        escalation trigger(s)" instead of just using the tier already
+        requested normally, crashing exactly the complex work that used
+        to escalate."""
+        client, (state, registry) = ProjectClient(), capacity()
+        client.issues[0]["labels"] = ["type:project", "project:planning", "architecture"]
+        try:
+            with mock.patch.object(invoke.artifacts, "GitHubStore", return_value=client):
+                result = invoke.execute(
+                    "o/r", 10, "token", 30, 2.5,
+                    runner=mock.Mock(return_value=Result(stdout=json.dumps(project_output()))),
+                    state=state, registry=registry)
+        finally:
+            state.close()
+        self.assertEqual((12, 13), result.stories)
 
     def test_invalid_output_writes_nothing_and_keeps_project_planning(self):
         client, (state, registry) = ProjectClient(), capacity()
