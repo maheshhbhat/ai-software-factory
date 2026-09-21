@@ -41,19 +41,23 @@ the evidence for it, not the decision.
 ## Model spend
 
 Only costs with a real, provider-reported `exact_cost_usd` value are given.
-Nothing here is estimated.
+Nothing here is estimated. Every figure below is reproducible from the raw
+`telemetry.jsonl` committed alongside this record under `runs/project64/`
+(one subdirectory per run, named identically to the phase it backs) — read
+each file's `capacity.route.attempt` record's `usage_receipt.exact_cost_usd`
+field directly rather than trusting this table.
 
-| Phase | Attempts | Total cost (USD) |
-|---|---|---|
-| Planning, Attempt #11 | 1 | $2.64 |
-| Planning, Attempts #1–#10 | 10 | not measured (occurred before this evidence window; each ran under the shared $15 Planning cap, but no per-attempt cost figures are available here) |
-| Delivery, Story #67 | 4 (1 engine success + 3 capacity-layer retries, see below) | $2.67 |
-| Delivery, Story #68 | 1 | $0.84 |
-| Delivery, Story #69 | 4 (all 4 failed at the capacity layer; the Story was ultimately delivered by hand, not by a 5th paid attempt) | $7.49 |
-| Independent Review, PR #70 | 2 (1 initial + 1 re-check after a fix) | $0.40 |
-| Independent Review, PR #73 | 1 | $0.17 |
-| Independent Review, PR #75 | 2 completed + 2 "replay" (no engine call, $0) | $0.43 |
-| **Total measured, Attempt #11 onward** | | **≈ $14.64** |
+| Phase | Attempts | Total cost (USD) | Evidence |
+|---|---|---|---|
+| Planning, Attempt #11 | 1 | $2.64 | `runs/project64/experimental-career-copilot-64-attempt11/telemetry.jsonl` |
+| Planning, Attempts #1–#10 | 10 | not measured (occurred before this evidence window; each ran under the shared $15 Planning cap, but no per-attempt cost figures are available here) | none preserved |
+| Delivery, Story #67 | 4 (1 engine success + 3 capacity-layer retries, see below) | $2.67 | `runs/project64/delivery-story-67-attempt1{,-retry,-retry2,-retry3}/telemetry.jsonl` |
+| Delivery, Story #68 | 1 | $0.84 | `runs/project64/delivery-story-68-attempt1/telemetry.jsonl` |
+| Delivery, Story #69 | 4 (all 4 failed at the capacity layer; the Story was ultimately delivered by hand, not by a 5th paid attempt) | $7.49 | `runs/project64/delivery-story-69-attempt1/telemetry.jsonl`, `-attempt1-retry`, `-attempt2`, `-instrumented` |
+| Independent Review, PR #70 | 2 (1 initial + 1 re-check after a fix) | $0.40 | `runs/project64/review-pr-70/telemetry.jsonl`, `review-pr-70-recheck/telemetry.jsonl` |
+| Independent Review, PR #73 | 1 | $0.17 | `runs/project64/review-pr-73/telemetry.jsonl` |
+| Independent Review, PR #75 | 2 completed + 2 "replay" (no engine call, $0, so no telemetry file exists for the replays) | $0.43 | `runs/project64/review-pr-75/telemetry.jsonl`, `review-pr-75-attempt2/telemetry.jsonl` |
+| **Total measured, Attempt #11 onward** | | **≈ $14.64** | sum of the files above |
 
 Not measured: Planning Attempts #1–#10's cost, and the cost of the earlier
 Factory-fix PRs (#689/#691/#694/#699/#701/#705) delivered before this
@@ -321,6 +325,25 @@ against the commit's check-runs, not against any PR's self-reported status.
 - **A hand-created Project's structural gap was invisible until the most
   expensive possible moment** — after Planning had already run and spent
   real budget, rather than at Project creation.
+
+## Measurement integrity
+
+`CLEAR — implementation can proceed`
+
+Checked before writing the recommendations below, per the retrospective
+skill's mandatory Measurement Integrity Check: searched open Factory issues
+for an active official qualification/benchmark/Rung run. None is in
+progress — the only Rung-related open items are Story #644 (independent
+root-cause review of five *past, already-failed* Rung 2 runs — retrospective
+analysis, not a live measurement) and #541/#451 (Rung 2 retrospective and
+starting-portfolio planning, both dormant). No evidence of a currently
+active controlled measurement that today's Delivery work on Project #64 or
+the recommendations below could contaminate.
+
+This does not by itself authorize implementing anything: per Mahesh's
+explicit instruction, no backlog remediation starts as part of this record
+or Project #64's acceptance. The recommendations below are queued findings,
+not authorized work.
 
 ## Concrete recommendations for the next real Factory run
 
