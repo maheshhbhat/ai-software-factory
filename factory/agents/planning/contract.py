@@ -510,11 +510,26 @@ def _repository_path_resolves(pattern: str, files: set[str]) -> bool:
 def _scope_resolves(pattern: str, files: set[str]) -> bool:
     normalized = pattern.rstrip("/")
     recursive_root = normalized[:-3].rstrip("/") if normalized.endswith("/**") else ""
-    parent = normalized.rsplit("/", 1)[0] if "/" in normalized else ""
-    new_file_beside_existing = (not re.search(r"[*?\[]", normalized)
-                                and (not parent or any(
-                                    path.startswith(parent + "/") for path in files)))
-    return (_repository_path_resolves(normalized, files) or new_file_beside_existing
+    # A concrete (non-glob) path that doesn't already exist is treated as
+    # this Story's own authorized declaration that it will create that
+    # file -- Story scope is declared intent, not a claim that the path
+    # already exists (a real, separately-checked claim is
+    # EXISTING_PATH_CLAIM's job, below). Previously this also required an
+    # existing sibling file in the same parent directory, which wrongly
+    # rejected the ordinary act of creating a Story's first file in a
+    # brand-new subdirectory (a real incident: Project #64 attempt #10,
+    # scope `tests/browser/test_x.py` with executor_source "create",
+    # rejected solely because no file existed yet under `tests/browser/`).
+    # A glob/wildcard pattern is unaffected by this and still must
+    # resolve against real files -- only a concrete path is ever treated
+    # as a to-be-created file. A "./"/"../"-prefixed pattern is excluded
+    # too: match_path() never special-cases that prefix (it splits on "/"
+    # and matches segment-by-segment), so "./app.js" is a malformed,
+    # non-canonical reference to an existing file, not a legitimate new
+    # one -- it must still fail exactly as before.
+    new_concrete_file = (not re.search(r"[*?\[]", normalized)
+                        and not normalized.startswith(("./", "../")))
+    return (_repository_path_resolves(normalized, files) or new_concrete_file
             or bool(recursive_root) and any(
                 path == recursive_root or path.startswith(recursive_root + "/")
                 or path.startswith(recursive_root + ".") for path in files))
