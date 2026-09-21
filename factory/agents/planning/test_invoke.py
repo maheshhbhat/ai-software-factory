@@ -252,6 +252,31 @@ class InvocationTests(unittest.TestCase):
         self.assertEqual((12, 13), result.stories)
         self.assertIn("project:awaiting-ready", client.get_issue(10)["labels"])
 
+    def test_evidence_persistence_failure_does_not_poison_model_health(self):
+        """Review finding: CapacityExecutor.execute() treats any exception
+        raised inside the validate() callback as schema-invalid and marks
+        the model's own health degraded. A local I/O failure persisting
+        evidence (a full or unwritable FACTORY_RUN_DIR) must never look
+        like the model produced bad output -- two such filesystem
+        failures would otherwise exclude an otherwise-healthy model from
+        every future workload."""
+        client, (state, registry) = ProjectClient(), capacity()
+        real_open = invoke.os.open
+        def failing_open(path, *args, **kwargs):
+            if "planning-output" in str(path):
+                raise OSError("disk full")
+            return real_open(path, *args, **kwargs)
+        try:
+            with mock.patch.object(invoke.artifacts, "GitHubStore", return_value=client), \
+                    mock.patch.object(invoke.os, "open", side_effect=failing_open):
+                result = invoke.execute(
+                    "o/r", 10, "token", 30, 2.5,
+                    runner=mock.Mock(return_value=Result(stdout=json.dumps(project_output()))),
+                    state=state, registry=registry)
+        finally:
+            state.close()
+        self.assertEqual((12, 13), result.stories)
+
     def test_architecture_labeled_project_does_not_crash_planning(self):
         """Review finding: Planning's policy has no escalation_triggers any
         more (it requests Flagship unconditionally), but run_model() still

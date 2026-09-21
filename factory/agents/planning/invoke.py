@@ -379,20 +379,40 @@ def run_model(value: dict, timeout: int, max_usd: float,
                 # gone before anyone could ever look at it, success or
                 # failure. Persisted here, at the one point every attempt
                 # that reaches validation passes through, before either
-                # parsing or contract validation can raise.
-                # Named per invocation, not a fixed filename: FACTORY_RUN_DIR
-                # is typically shared across many invocations (the poller
-                # retries a project:planning issue on later cycles into the
-                # same directory), so a fixed name would let a later retry
-                # silently erase the exact failing output this exists to
-                # preserve. 0o600: this can carry private issue/repository
-                # content that obs.redact() only partially scrubs.
-                evidence_name = (f"planning-output-{artifact if artifact is not None else 'na'}"
-                                 f"-{uuid.uuid4().hex[:12]}.json")
-                evidence_path = obs.run_directory() / evidence_name
-                evidence_path.parent.mkdir(parents=True, exist_ok=True)
-                evidence_path.write_text(obs.redact(raw), encoding="utf-8")
-                evidence_path.chmod(0o600)
+                # parsing or contract validation can raise. Best-effort,
+                # wrapped in its own try/except: CapacityExecutor.execute()
+                # treats any exception from this callback as schema-invalid
+                # and marks the model's own health degraded, so an I/O
+                # failure here (a full or unwritable FACTORY_RUN_DIR) must
+                # never propagate — that would let a purely local storage
+                # problem exclude an otherwise-healthy model from every
+                # future workload.
+                try:
+                    # Named per invocation, not a fixed filename:
+                    # FACTORY_RUN_DIR is typically shared across many
+                    # invocations (the poller retries a project:planning
+                    # issue on later cycles into the same directory), so a
+                    # fixed name would let a later retry silently erase the
+                    # exact failing output this exists to preserve.
+                    evidence_name = (
+                        f"planning-output-{artifact if artifact is not None else 'na'}"
+                        f"-{uuid.uuid4().hex[:12]}.json")
+                    evidence_path = obs.run_directory() / evidence_name
+                    evidence_path.parent.mkdir(parents=True, exist_ok=True)
+                    # Created with mode 0o600 from the moment it exists, not
+                    # chmod'd afterward: write-then-chmod leaves the file
+                    # world-readable (the umask-applied default, typically
+                    # 0o644) for the entire write, and a chmod that never
+                    # runs (a crash, an exception) leaves it that way
+                    # permanently. This can carry private issue/repository
+                    # content that obs.redact() only partially scrubs.
+                    descriptor = os.open(
+                        evidence_path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+                    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                        handle.write(obs.redact(raw))
+                except OSError as exc:
+                    obs.operational_log(
+                        "WARNING", "failed to persist planning output evidence", exc=exc)
                 parsed = _parse_output(raw)
                 contract.validate_output(altitude, parsed, value.get("repository"))
             material = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
