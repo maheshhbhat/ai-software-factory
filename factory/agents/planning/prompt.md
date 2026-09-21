@@ -109,7 +109,16 @@ Produce exactly one coherent project plan:
      is its observable success, and `failure` says how it reports failure. The
      executor must use a conventional test-file path or `.github/workflows/*.yml`;
      Delivery runs every automated action through its credential-free trusted
-     subprocess boundary after the canonical repository test command succeeds;
+     subprocess boundary after the canonical repository test command succeeds.
+     `action` must be exactly one directly executable, shell-free command or
+     operation — the subprocess boundary invokes it without a shell, so it must
+     not contain a chaining, pipeline, or control operator such as `&&`, `||`,
+     `;`, `|`, or `&`. Never chain a prerequisite or setup operation (installing
+     a browser binary, seeding data, starting a service) into the verification
+     `action` itself; setup belongs in the test's own fixture, the repository's
+     existing setup, or a separately authorized CI step consistent with the
+     Story's own design — the `action` names only the one command that runs
+     the check;
    - use a human record only when no deterministic executor is viable. It has
      exactly `type`, `scope`, `action`, `expected`, `failure`, and `reason`, with
      `type` equal to `human-bell`. State why automation is not viable in `reason`
