@@ -507,9 +507,7 @@ def _repository_path_resolves(pattern: str, files: set[str]) -> bool:
     return normalized in files or any(match_path(normalized, path) for path in files)
 
 
-def _scope_resolves(pattern: str, files: set[str]) -> bool:
-    normalized = pattern.rstrip("/")
-    recursive_root = normalized[:-3].rstrip("/") if normalized.endswith("/**") else ""
+def _is_new_concrete_file(pattern: str, normalized: str) -> bool:
     # A concrete (non-glob) path that doesn't already exist is treated as
     # this Story's own authorized declaration that it will create that
     # file -- Story scope is declared intent, not a claim that the path
@@ -522,13 +520,27 @@ def _scope_resolves(pattern: str, files: set[str]) -> bool:
     # rejected solely because no file existed yet under `tests/browser/`).
     # A glob/wildcard pattern is unaffected by this and still must
     # resolve against real files -- only a concrete path is ever treated
-    # as a to-be-created file. A "./"/"../"-prefixed pattern is excluded
-    # too: match_path() never special-cases that prefix (it splits on "/"
-    # and matches segment-by-segment), so "./app.js" is a malformed,
-    # non-canonical reference to an existing file, not a legitimate new
-    # one -- it must still fail exactly as before.
-    new_concrete_file = (not re.search(r"[*?\[]", normalized)
-                        and not normalized.startswith(("./", "../")))
+    # as a to-be-created file.
+    #
+    # The path must also be canonical: match_path() does exact,
+    # segment-by-segment matching against real repository-relative paths,
+    # so a pattern that isn't itself a real file path can never authorize
+    # the file Delivery actually creates, no matter how "concrete" it
+    # looks. Reject a trailing "/" (a directory reference, not a file --
+    # `pattern != normalized` catches this since normalized already had
+    # trailing slashes stripped), a leading "/" or any doubled "/"
+    # (produces an empty path segment), and any "." or ".." segment
+    # anywhere in the path, not only as a prefix (`tests/browser/../x.py`
+    # is exactly as non-canonical as `./app.js`).
+    if re.search(r"[*?\[]", normalized) or pattern != normalized:
+        return False
+    return all(segment not in ("", ".", "..") for segment in normalized.split("/"))
+
+
+def _scope_resolves(pattern: str, files: set[str]) -> bool:
+    normalized = pattern.rstrip("/")
+    recursive_root = normalized[:-3].rstrip("/") if normalized.endswith("/**") else ""
+    new_concrete_file = _is_new_concrete_file(pattern, normalized)
     return (_repository_path_resolves(normalized, files) or new_concrete_file
             or bool(recursive_root) and any(
                 path == recursive_root or path.startswith(recursive_root + "/")

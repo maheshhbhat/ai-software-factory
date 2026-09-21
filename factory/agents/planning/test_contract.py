@@ -517,6 +517,46 @@ class RepositoryCompatibilityTests(unittest.TestCase):
         self.assertIs(
             value, contract.validate_repository_compatibility(value, repository))
 
+    def test_new_directory_reference_without_a_file_name_still_fails(self):
+        """Review finding on the new-subdirectory fix (PR #705): a
+        trailing-slash directory reference such as `tests/browser/` was
+        being accepted as a "new concrete file", but match_path() does
+        exact segment matching -- `tests/browser/` can never authorize
+        the real file Delivery creates, e.g. `tests/browser/test_x.py`."""
+        story = {
+            "key": "browser_e2e", "title": "Add browser assurance",
+            "spec": "Add a headless Playwright browser test.",
+            "phase": "hardening", "depends_on": [], "hazard": False,
+            "acceptance_criteria": [self.criterion(
+                executor="tests/browser/test_x.py", source="create",
+                action="python3 -m pytest tests/browser/test_x.py")],
+            "operating_envelope_ids": [], "operating_envelope_checks": [],
+            "scope": ["requirements-dev.txt", "tests/browser/"],
+            "spend_cap": "$5 / 60 min",
+        }
+        value = {"altitude": "project", "stories": [story]}
+        repository = {"files": ["product.md", "app.js", "requirements-dev.txt"]}
+        with self.assertRaisesRegex(contract.ContractError, "does not resolve"):
+            contract.validate_repository_compatibility(value, repository)
+
+    def test_new_file_with_a_leading_slash_still_fails(self):
+        """Review finding on the new-subdirectory fix (PR #705): a
+        leading "/" makes the path absolute-looking, not repository-
+        relative, so `/tests/test_x.py` can never match the real
+        repository-relative path `tests/test_x.py`."""
+        value = self.plan(scope=["app.js", "/tests/test_x.py"])
+        with self.assertRaisesRegex(contract.ContractError, "does not resolve"):
+            contract.validate_repository_compatibility(value, self.repository())
+
+    def test_new_file_with_a_dot_dot_segment_still_fails(self):
+        """Review finding on the new-subdirectory fix (PR #705): a ".."
+        segment anywhere in the path (not only as a prefix) is exactly
+        as non-canonical as the already-rejected `./app.js` case."""
+        value = self.plan(
+            scope=["app.js", "tests/browser/../test_x.py"])
+        with self.assertRaisesRegex(contract.ContractError, "does not resolve"):
+            contract.validate_repository_compatibility(value, self.repository())
+
     def test_new_file_claimed_as_already_existing_still_fails(self):
         """The invariant this fix must not weaken: Story scope may
         authorize creating a new file, but a Story's own prose still
