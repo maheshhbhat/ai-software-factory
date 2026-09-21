@@ -162,6 +162,50 @@ Text fallback."""
         story["scope"] = ["src/browser-app.js", ".github/workflows/tests.yml"]
         self.assertIs(value, contract.validate_output(contract.Altitude.PROJECT, value))
 
+    def test_same_obligation_assigned_to_two_stories_is_rejected(self):
+        """Real finding from a live run: one obligation (OE-PROVIDER-1) was
+        assigned to three Stories, each covering only part of it -- a
+        backend Story, a browser Story, and a learning-record Story.
+        prompt.md requires exactly one Story per obligation, but nothing
+        in the validator checked assignment *count*: `used` is a set, so
+        duplicate assignments collapsed into one entry, indistinguishable
+        from a single, correct assignment."""
+        backend = {"key": "followup_registry_backend",
+                   "title": "Add server-validated contextual follow-ups",
+                   "spec": "Create the server-side follow-up registry.",
+                   "phase": "build", "depends_on": [], "hazard": False,
+                   "acceptance_criteria": ["HTTP serialization returns follow-ups"],
+                   "operating_envelope_ids": ["OE-PROVIDER-1"],
+                   "operating_envelope_checks": [{
+                       "id": "OE-PROVIDER-1",
+                       "check": "tests use fake tool results and fake chat clients"}],
+                   "scope": ["career_intelligence_mcp/followups.py"],
+                   "spend_cap": "$5 / 60 min"}
+        browser = {"key": "followup_chips_browser",
+                   "title": "Render follow-up chips in the browser chat flow",
+                   "spec": "Chip rendering and click handling in the existing chat UI.",
+                   "phase": "build", "depends_on": ["followup_registry_backend"],
+                   "hazard": False,
+                   "acceptance_criteria": ["Chrome renders chips with mocked responses"],
+                   "operating_envelope_ids": ["OE-PROVIDER-1"],
+                   "operating_envelope_checks": [{
+                       "id": "OE-PROVIDER-1",
+                       "check": "Playwright headless Chrome uses a mocked chat client"}],
+                   "scope": ["static/chat.js"], "spend_cap": "$5 / 60 min"}
+        value = {"altitude": "project", "acceptance_criteria": ["criterion"],
+                 "operating_envelope": [{
+                     "id": "OE-PROVIDER-1", "category": "external-provider",
+                     "requirement": ("Automated and browser checks use mocked chat "
+                                     "responses and do not require live provider "
+                                     "credentials."),
+                     "failure_condition": ("A planned test or browser check fails when "
+                                           "provider credentials are absent.")}],
+                 "adr": {}, "stories": [backend, browser], "expected_bells": 2,
+                 "risks": "risk", "digest": self.DIGEST}
+        with self.assertRaisesRegex(contract.ContractError,
+                                    "assigned to more than one Story"):
+            contract.validate_output(contract.Altitude.PROJECT, value)
+
     def test_named_browser_plan_blocks_raw_launchers_and_incomplete_assurance(self):
         story = {
             "key": "browser", "title": "Chrome browser assurance",
