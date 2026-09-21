@@ -529,12 +529,17 @@ def _is_new_concrete_file(pattern: str, normalized: str) -> bool:
     # looks. Reject a trailing "/" (a directory reference, not a file --
     # `pattern != normalized` catches this since normalized already had
     # trailing slashes stripped), a leading "/" or any doubled "/"
-    # (produces an empty path segment), and any "." or ".." segment
-    # anywhere in the path, not only as a prefix (`tests/browser/../x.py`
-    # is exactly as non-canonical as `./app.js`).
+    # (produces an empty path segment), any "." or ".." segment anywhere
+    # in the path, not only as a prefix (`tests/browser/../x.py` is
+    # exactly as non-canonical as `./app.js`), and any ".git" segment
+    # (review finding on this fix: git itself refuses to track a path
+    # through a `.git` directory, so `tests/.git/test_x.py` would pass
+    # this check yet never appear in the committed diff, letting
+    # Delivery believe a file exists that was silently never staged).
     if re.search(r"[*?\[]", normalized) or pattern != normalized:
         return False
-    return all(segment not in ("", ".", "..") for segment in normalized.split("/"))
+    return all(segment not in ("", ".", "..", ".git")
+               for segment in normalized.split("/"))
 
 
 def _scope_resolves(pattern: str, files: set[str]) -> bool:

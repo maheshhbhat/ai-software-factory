@@ -557,6 +557,16 @@ class RepositoryCompatibilityTests(unittest.TestCase):
         with self.assertRaisesRegex(contract.ContractError, "does not resolve"):
             contract.validate_repository_compatibility(value, self.repository())
 
+    def test_new_file_through_a_dot_git_segment_still_fails(self):
+        """Review finding on the new-subdirectory fix (PR #705): git
+        itself refuses to track a path through a `.git` directory, so
+        `tests/.git/test_x.py` would pass this check yet never appear
+        in the committed diff -- Delivery would believe a file exists
+        that was silently never staged."""
+        value = self.plan(scope=["app.js", "tests/.git/test_x.py"])
+        with self.assertRaisesRegex(contract.ContractError, "does not resolve"):
+            contract.validate_repository_compatibility(value, self.repository())
+
     def test_new_file_claimed_as_already_existing_still_fails(self):
         """The invariant this fix must not weaken: Story scope may
         authorize creating a new file, but a Story's own prose still
