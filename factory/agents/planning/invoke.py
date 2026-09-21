@@ -411,8 +411,17 @@ def run_model(value: dict, timeout: int, max_usd: float,
                     with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
                         handle.write(obs.redact(raw))
                 except OSError as exc:
-                    obs.operational_log(
-                        "WARNING", "failed to persist planning output evidence", exc=exc)
+                    # operational_log() itself writes into the same
+                    # FACTORY_RUN_DIR that just failed above -- a full or
+                    # unwritable directory fails this call exactly the same
+                    # way, and an unhandled OSError here would escape this
+                    # whole except block right back into validate(),
+                    # exactly what wrapping the write above was for.
+                    try:
+                        obs.operational_log(
+                            "WARNING", "failed to persist planning output evidence", exc=exc)
+                    except OSError:
+                        pass
                 parsed = _parse_output(raw)
                 contract.validate_output(altitude, parsed, value.get("repository"))
             material = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
