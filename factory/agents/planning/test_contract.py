@@ -162,6 +162,42 @@ Text fallback."""
         story["scope"] = ["src/browser-app.js", ".github/workflows/tests.yml"]
         self.assertIs(value, contract.validate_output(contract.Altitude.PROJECT, value))
 
+    def test_shared_multi_surface_obligation_wording_does_not_taint_a_backend_story(self):
+        """Real finding from a live run: one obligation's own wording can
+        legitimately span two surfaces at once ("automated and browser
+        checks use mocked data") because it's split across two different
+        Stories -- one backend, one browser. A backend Story whose own
+        check text never mentions a browser must not be rejected just
+        because the *shared* wording happens to mention one, describing
+        a different Story's half of the same obligation."""
+        story = {"key": "followup_registry_backend",
+                 "title": "Add server-validated contextual follow-ups",
+                 "spec": "Create the server-side follow-up registry and selector.",
+                 "phase": "build", "depends_on": [], "hazard": False,
+                 "acceptance_criteria": ["Chat and HTTP serialization return "
+                                        "suggested_followups correctly"],
+                 "operating_envelope_ids": ["OE-PROVIDER-1"],
+                 "operating_envelope_checks": [{
+                     "id": "OE-PROVIDER-1",
+                     "check": ("tests/test_followups.py and tests/test_chat.py use fake "
+                               "tool results and fake chat clients, so the checks fail if "
+                               "a live provider credential or network call is required")}],
+                 "scope": ["career_intelligence_mcp/followups.py",
+                          "tests/test_followups.py"],
+                 "spend_cap": "$5 / 60 min"}
+        value = {"altitude": "project", "acceptance_criteria": ["criterion"],
+                 "operating_envelope": [{
+                     "id": "OE-PROVIDER-1", "category": "external-provider",
+                     "requirement": ("Automated and browser checks use mocked chat "
+                                     "responses and do not require live provider "
+                                     "credentials."),
+                     "failure_condition": ("A planned test or browser check fails when "
+                                           "provider credentials are absent or attempts "
+                                           "a live call.")}],
+                 "adr": {}, "stories": [story], "expected_bells": 2,
+                 "risks": "risk", "digest": self.DIGEST}
+        self.assertIs(value, contract.validate_output(contract.Altitude.PROJECT, value))
+
     def test_named_browser_plan_blocks_raw_launchers_and_incomplete_assurance(self):
         story = {
             "key": "browser", "title": "Chrome browser assurance",

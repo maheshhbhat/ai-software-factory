@@ -289,7 +289,6 @@ def validate_output(altitude: Altitude, value: dict,
                             for field in ("requirement", "failure_condition"))):
                 raise ContractError("operating envelope entry is malformed")
         known = set(identifiers)
-        envelope_by_id = {item["id"]: item for item in envelope}
         used = set()
         for story in stories:
             obligations = story.get("operating_envelope_ids") if isinstance(story, dict) else None
@@ -351,10 +350,17 @@ def validate_output(altitude: Altitude, value: dict,
             has_term = lambda text, term: bool(re.search(  # noqa: E731 - local predicate
                 rf"(?<![A-Za-z0-9]){re.escape(term)}(?![A-Za-z0-9])", text))
             for check in checks:
-                obligation = envelope_by_id[check["id"]]
-                demanded = " ".join((obligation["requirement"],
-                                      obligation["failure_condition"],
-                                      check["check"])).lower()
+                # A Story's own check text only, not the operating-envelope
+                # obligation's own requirement/failure_condition wording:
+                # that wording is shared project-wide and can legitimately
+                # span multiple surfaces when one obligation is split
+                # across several Stories (a backend half and a browser
+                # half, say). Pulling it into every Story's own surface
+                # check meant a word like "browser" in the *shared*
+                # sentence — describing a *different* Story's half of the
+                # same obligation — could reject a Story whose own check
+                # never claimed anything about a browser at all.
+                demanded = check["check"].lower()
                 for surface, terms in surface_terms.items():
                     if (any(has_term(demanded, term) for term in terms)
                             and not any(has_term(story_surface, term) for term in terms)):
