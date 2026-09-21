@@ -547,6 +547,29 @@ class CanonicalPathTests(unittest.TestCase):
                        "hazard", "falsifiable", "read-back"):
             self.assertIn(phrase, prompt)
 
+    def test_prompt_states_the_verification_action_contract_automated_verification_command_enforces(self):
+        """Real finding from a live run: a Story's automated action chained
+        a prerequisite install step into its verification command with
+        `&&`. contract.py's automated_verification_command() already
+        rejects any SHELL_CONTROL_TOKENS in an action -- deterministically
+        and correctly -- but prompt.md never told the model that rule
+        existed, so a reasonable model had no way to know chaining was
+        forbidden. Checked against contract.SHELL_CONTROL_TOKENS directly,
+        not a hardcoded copy, so this fails if the two ever drift apart."""
+        prompt = pathlib.Path(__file__).with_name("prompt.md").read_text()
+        normalized = " ".join(prompt.split())
+        for token in contract.SHELL_CONTROL_TOKENS:
+            with self.subTest(token=token):
+                self.assertIn(f"`{token}`", normalized)
+        for phrase in (
+            "exactly one directly executable, shell-free command",
+            "without a shell",
+            "Never chain a prerequisite or setup operation",
+            "setup belongs in the test's own fixture",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, normalized)
+
     def test_prompt_limits_retired_story_replacement_to_one_authorized_story(self):
         prompt = pathlib.Path(__file__).with_name("prompt.md").read_text()
         normalized = " ".join(prompt.split())
