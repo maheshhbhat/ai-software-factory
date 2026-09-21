@@ -378,7 +378,17 @@ def run_model(value: dict, timeout: int, max_usd: float,
                 task_key="planning:" + hashlib.sha256(material).hexdigest(),
                 request=request, registry=available, payload=payload, validate=validate)
             if result.outcome != "success":
-                raise InvocationError(f"planning capacity failed: {result.outcome}")
+                # ExecutionResult.output carries the failing attempt's own
+                # diagnostic text on every non-success outcome (see
+                # CapacityExecutor._finish's callers) — surfaced here so a
+                # failure is diagnosable from this error alone, not just a
+                # coarse category with the real cause discarded. Redacted:
+                # a provider's own stderr/stdout can echo a credential (an
+                # auth failure is known to do this), and this text reaches
+                # a bare stderr print at the CLI boundary, not just a log.
+                raise InvocationError(
+                    f"planning capacity failed: {result.outcome}: "
+                    f"{obs.redact(result.output)}")
             return parsed
         finally:
             if owns_state:

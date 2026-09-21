@@ -118,9 +118,27 @@ class PlanningCapacityPoolAcceptance(unittest.TestCase):
             return Result(3, stderr="invalid command option")
 
         with mock.patch.dict(os.environ, {}, clear=True), \
-             self.assertRaisesRegex(invoke.InvocationError, "unknown-failure"):
+             self.assertRaisesRegex(invoke.InvocationError,
+                                    "unknown-failure.*invalid command option"):
             self.run_quietly(VALUE, 100, 10, runner=runner)
         self.assertEqual(["claude"], [command[0] for command in calls])
+
+    def test_surfaced_diagnostic_redacts_a_leaked_credential(self):
+        """Review finding: a provider's own stderr can echo a credential
+        (auth failures are known to do this), and the surfaced diagnostic
+        now reaches a bare stderr print at the CLI boundary. The real
+        secret value must never appear in the raised error, even though
+        the surrounding diagnostic text does."""
+        def runner(command, **kwargs):
+            return Result(3, stderr="auth failed: token sk-secret-leaked-value rejected")
+
+        with mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-secret-leaked-value"}), \
+             self.assertRaises(invoke.InvocationError) as caught:
+            self.run_quietly(VALUE, 100, 10, runner=runner)
+        message = str(caught.exception)
+        self.assertNotIn("sk-secret-leaked-value", message)
+        self.assertIn("[redacted]", message)
+        self.assertIn("auth failed", message)
 
 
 if __name__ == "__main__":
