@@ -14,6 +14,7 @@ import sys
 import tempfile
 import time
 import urllib.error
+import uuid
 
 HERE = pathlib.Path(__file__).resolve().parent
 ROOT = HERE.parents[2]
@@ -336,7 +337,8 @@ def _planning_triggers(value: dict) -> frozenset[str]:
 
 def run_model(value: dict, timeout: int, max_usd: float,
               runner=subprocess.run, clock=time.monotonic, *,
-              state: CapacityState | None = None, registry=None) -> dict:
+              state: CapacityState | None = None, registry=None,
+              repo: str | None = None, artifact: int | None = None) -> dict:
     altitude = contract.select_altitude(set((value.get("trigger") or {}).get("labels", [])))
     schema_value = contract.json_schema(altitude)
     prompt = (HERE.joinpath("prompt.md").read_text()
@@ -371,6 +373,62 @@ def run_model(value: dict, timeout: int, max_usd: float,
             parsed = None
             def validate(raw):
                 nonlocal parsed
+                # The model's own output otherwise lives only in a
+                # tempfile.NamedTemporaryFile that this function's own
+                # `with` block deletes the instant it returns or raises --
+                # gone before anyone could ever look at it, success or
+                # failure. Persisted here, at the one point every attempt
+                # that reaches validation passes through, before either
+                # parsing or contract validation can raise. Best-effort,
+                # wrapped in its own try/except: CapacityExecutor.execute()
+                # treats any exception from this callback as schema-invalid
+                # and marks the model's own health degraded, so an I/O
+                # failure here (a full or unwritable FACTORY_RUN_DIR) must
+                # never propagate — that would let a purely local storage
+                # problem exclude an otherwise-healthy model from every
+                # future workload.
+                try:
+                    # Named per invocation, not a fixed filename:
+                    # FACTORY_RUN_DIR is typically shared across many
+                    # invocations (the poller retries a project:planning
+                    # issue on later cycles into the same directory), so a
+                    # fixed name would let a later retry silently erase the
+                    # exact failing output this exists to preserve.
+                    # repo included, not just artifact: two different
+                    # repositories can share the same issue number, and
+                    # they typically share one FACTORY_RUN_DIR (one
+                    # poller/worker process), so artifact number alone
+                    # cannot disambiguate whose evidence this is.
+                    repo_slug = re.sub(r"[^A-Za-z0-9._-]+", "_", repo or "unknown-repo")
+                    evidence_name = (
+                        f"planning-output-{repo_slug}"
+                        f"-{artifact if artifact is not None else 'na'}"
+                        f"-{uuid.uuid4().hex[:12]}.json")
+                    evidence_path = obs.run_directory() / evidence_name
+                    evidence_path.parent.mkdir(parents=True, exist_ok=True)
+                    # Created with mode 0o600 from the moment it exists, not
+                    # chmod'd afterward: write-then-chmod leaves the file
+                    # world-readable (the umask-applied default, typically
+                    # 0o644) for the entire write, and a chmod that never
+                    # runs (a crash, an exception) leaves it that way
+                    # permanently. This can carry private issue/repository
+                    # content that obs.redact() only partially scrubs.
+                    descriptor = os.open(
+                        evidence_path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+                    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                        handle.write(obs.redact(raw))
+                except OSError as exc:
+                    # operational_log() itself writes into the same
+                    # FACTORY_RUN_DIR that just failed above -- a full or
+                    # unwritable directory fails this call exactly the same
+                    # way, and an unhandled OSError here would escape this
+                    # whole except block right back into validate(),
+                    # exactly what wrapping the write above was for.
+                    try:
+                        obs.operational_log(
+                            "WARNING", "failed to persist planning output evidence", exc=exc)
+                    except OSError:
+                        pass
                 parsed = _parse_output(raw)
                 contract.validate_output(altitude, parsed, value.get("repository"))
             material = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
@@ -418,7 +476,7 @@ def execute(repo: str, artifact: int, token: str, timeout: int, max_usd: float,
     key = (f"{artifact}:{state_version(client, issue)}:{altitude.value}:"
            f"prompt-{prompt_version()}:feedback-{feedback_version(feedback)}")
     output = run_model(value, timeout, max_usd, runner=runner,
-                       state=state, registry=registry)
+                       state=state, registry=registry, repo=repo, artifact=artifact)
     contract.validate_output(altitude, output, repository)
     artifacts.write(client, value["trigger"], key, output)
     verified = verify_with_retry(client, value["trigger"], key, altitude)
