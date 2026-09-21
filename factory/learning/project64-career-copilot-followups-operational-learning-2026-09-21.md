@@ -102,38 +102,53 @@ for the two formal bells above.
   `_scope_resolves` defect that wrongly rejected a Story's own declared
   creation of a new file in a new subdirectory). Each was fixed via its own
   narrow, hand-authored Story and gated PR before the next attempt.
-- **Attempt #11**: succeeded. Validated against `contract.py` after the
-  `_scope_resolves` fix, then found by human plan review to be missing two
-  explicit Issue #37 acceptance criteria (browser UAT across three answer
-  contexts; "New case" clearing chips) that Planning had not covered because
-  it was given Project #64's own restatement of Issue #37 rather than
-  Issue #37's authoritative text. Both gaps were corrected by hand in the
-  generated plan (not by re-running Planning) before activation. Logged as
-  a Factory backlog finding (ai-software-factory#710/#712-adjacent territory;
-  specifically the requirement-provenance gap, filed separately during this
-  run).
+- **Attempt #11**: the model's raw output was accepted (`capacity.route.attempt`:
+  `success`), but the Factory's own deterministic validation recorded
+  `capacity.route.final: schema-invalid` / `terminal_outcome:
+  validation-failed` — the already-known, human-reviewed OE-RESP-1
+  false-positive (backlog ai-software-factory#708: a keyword check misreads
+  "no additional network round trip" as a live-provider requirement). This
+  was **not** a formally successful Planning attempt in the Factory's own
+  telemetry; the plan was activated only by an explicit, narrowly-scoped
+  human override waiving that one pre-reviewed finding for this Project's
+  plan alone (see Supported overrides below), plus two coverage gaps
+  (browser UAT across three answer contexts; "New case" clearing chips)
+  corrected by hand in the generated plan before activation — not by
+  re-running Planning. Those two gaps existed because Planning was given
+  Project #64's own restatement of Issue #37 rather than Issue #37's
+  authoritative text; logged as a Factory backlog finding
+  (ai-software-factory#710/#712-adjacent territory; specifically the
+  requirement-provenance gap, filed separately during this run).
 
 ## Delivery attempts by Story
 
-- **Story #67**: 1 successful engine run, then 3 capacity-layer retries —
-  not because the AI's work was wrong, but because this machine had no
-  Python test tooling installed at all, and the Delivery worker has no
-  built-in way to detect a Python project's test command. Each retry
-  reused the same engine output via the Factory's recovery mechanism; no
-  further AI spend was needed once the environment was fixed.
+- **Story #67**: 4 engine invocations total (1 original + 3 retries), and
+  **every one of the 4 cost real money** ($1.64, $0.33, $0.30, $0.39 —
+  $2.67 total; `runs/project64/delivery-story-67-attempt1{,-retry,-retry2,
+  -retry3}/telemetry.jsonl`) — the Factory's recovery mechanism restores
+  prior work as a fresh starting point, it does not skip paying for the
+  agent invocation that inspects and revises it. None of the 4 failures
+  were a real implementation defect: this machine had no Python test
+  tooling installed at all, and the Delivery worker has no built-in way to
+  detect a Python project's test command, so each attempt's engine
+  succeeded but the worker's own post-engine test/verification step
+  failed for an environment reason, not a code reason, until the
+  environment was fixed.
 - **Story #68**: 1 successful attempt, no retries.
-- **Story #69**: 4 failed attempts, all at the capacity layer
-  (`ambiguous-mutation` / `unknown-failure`), none reaching a pull request.
-  The first three attempts' real failure reason is unrecoverable — the
-  Factory discards the diagnostic for this specific outcome (see backlog
-  below). The fourth attempt (run with instrumentation added specifically
-  to recover that diagnostic) succeeded at the engine level and reached the
-  Delivery worker's own test-running step, which failed with a real,
-  fully-captured error: 176 of 423 tests failing suite-wide. Story #69 was
-  ultimately delivered by hand: the AI's own already-correct fix (from
-  attempt 4) plus two additional fixes found and verified by the operator
-  were combined, tested locally and in real CI, and pushed as a PR — not
-  delivered by a 5th paid Delivery attempt.
+- **Story #69**: 4 engine invocations, none reaching a pull request. The
+  first 3 failed at the capacity layer itself (`ambiguous-mutation` /
+  `unknown-failure` — the engine process errored before finishing), and
+  that real failure reason is unrecoverable: the Factory discards the
+  diagnostic for this specific outcome (see backlog below). The 4th
+  invocation (run with instrumentation added specifically to recover that
+  diagnostic) succeeded cleanly at the engine level
+  (`capacity.route.final: success`) and reached the Delivery worker's own
+  post-engine test-running step instead, which is where the real failure
+  was found and fully captured: 176 of 423 tests failing suite-wide. Story
+  #69 was ultimately delivered by hand: the AI's own already-correct fix
+  (from the 4th invocation) plus two additional fixes found and verified
+  by the operator were combined, tested locally and in real CI, and pushed
+  as a PR — not delivered by a 5th paid Delivery attempt.
 
 ## Infrastructure failures discovered
 
