@@ -491,6 +491,48 @@ class RepositoryCompatibilityTests(unittest.TestCase):
                                     "existing repository path.*does not resolve"):
             contract.validate_repository_compatibility(value, self.repository())
 
+    def test_new_file_in_a_new_subdirectory_is_authorized_for_creation(self):
+        """Real finding from a live run (Project #64, attempt #10): a
+        Story explicitly declared `tests/browser/test_x.py` in its own
+        scope with executor_source "create" -- but the repository has no
+        `tests/browser/` directory at all yet, and _scope_resolves()
+        required an existing sibling file in the same directory before
+        treating a concrete path as an authorized new file. That
+        wrongly rejected the ordinary, correct act of creating a Story's
+        first file in a brand-new subdirectory."""
+        executor = "tests/browser/test_contextual_followups.py"
+        story = {
+            "key": "browser_e2e", "title": "Add browser assurance",
+            "spec": "Add a headless Playwright browser test.",
+            "phase": "hardening", "depends_on": [], "hazard": False,
+            "acceptance_criteria": [self.criterion(
+                executor=executor, source="create",
+                action=f"python3 -m pytest {executor}")],
+            "operating_envelope_ids": [], "operating_envelope_checks": [],
+            "scope": ["requirements-dev.txt", executor],
+            "spend_cap": "$5 / 60 min",
+        }
+        value = {"altitude": "project", "stories": [story]}
+        repository = {"files": ["product.md", "app.js", "requirements-dev.txt"]}
+        self.assertIs(
+            value, contract.validate_repository_compatibility(value, repository))
+
+    def test_new_file_claimed_as_already_existing_still_fails(self):
+        """The invariant this fix must not weaken: Story scope may
+        authorize creating a new file, but a Story's own prose still
+        cannot claim an unresolved path already exists -- even one in
+        the same new directory the Story is otherwise allowed to
+        create into."""
+        executor = "tests/browser/test_contextual_followups.py"
+        value = self.plan(
+            spec=("Reuse the existing implementation at "
+                  "`tests/browser/helpers.py`."),
+            scope=["app.js", "test/app.test.js", executor])
+        repository = {"files": ["product.md", "app.js", "test/app.test.js"]}
+        with self.assertRaisesRegex(contract.ContractError,
+                                    "existing repository path.*does not resolve"):
+            contract.validate_repository_compatibility(value, repository)
+
     def test_new_path_is_not_misclassified_by_later_existing_path_claim(self):
         value = self.plan(
             spec="Create src/new.py. Reuse existing src/base.py.",
