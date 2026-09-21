@@ -122,7 +122,13 @@ Produce exactly one coherent project plan:
      per assigned ID. Each `check` names the Story-local executable observation that fails when
      the obligation is unmet. If a check needs another Story's code, browser
      surface, scope, or later integration, split the Project envelope into atomic
-     IDs and assign the integrated check to the final assurance Story;
+     IDs and assign the integrated check to the final assurance Story. Never
+     assign the same `OE-*` ID to more than one Story: if satisfying one
+     requirement genuinely needs checks in two different Stories (a backend
+     check and a separately-scoped browser check, say), that requirement was
+     not atomic — write two narrower `OE-*` entries, one per Story, each
+     naming only the surface that Story's own check actually covers, rather
+     than one shared entry with wording that spans both;
    - attempt `0` and a per-invocation spend cap defaulting to exactly
      `$5 / 60 min`; use another bounded value only when the approved planning
      input explicitly requires it.
@@ -134,8 +140,9 @@ Produce exactly one coherent project plan:
    representative-scale, responsiveness, live-provider, work-bound, or graceful-
    degradation risk. Each entry needs a stable `OE-*` ID, a concrete requirement,
    and an input or observation that would make it fail. Each entry must be atomic
-   enough for every assigned Story to satisfy and test it independently. Every ID must be assigned
-   to at least one Story; do not invent an envelope entry when the risk is absent.
+   enough for exactly one assigned Story to satisfy and test it independently —
+   not multiple Stories each covering part of it. Every ID must be assigned to
+   exactly one Story; do not invent an envelope entry when the risk is absent.
    Replace the Project's `Risks / notes` with a non-empty `risks` string that
    reflects the final plan and all accepted review changes. Do not preserve a
    stale campaign uncertainty after the ADR or revised plan has settled it.
