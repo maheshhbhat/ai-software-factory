@@ -355,7 +355,7 @@ class InvocationTests(unittest.TestCase):
                                    state=state, registry=registry)
             finally:
                 state.close()
-            matches = list(pathlib.Path(run_dir).glob("planning-output-10-*.json"))
+            matches = list(pathlib.Path(run_dir).glob("planning-output-o_r-10-*.json"))
             self.assertEqual(1, len(matches),
                              "the raw output must be persisted, named for this artifact")
             self.assertEqual("{}", matches[0].read_text(encoding="utf-8"))
@@ -383,7 +383,7 @@ class InvocationTests(unittest.TestCase):
             with mock.patch.dict(os.environ, {"FACTORY_RUN_DIR": run_dir}):
                 make_run()
                 make_run()
-            matches = list(pathlib.Path(run_dir).glob("planning-output-10-*.json"))
+            matches = list(pathlib.Path(run_dir).glob("planning-output-o_r-10-*.json"))
             self.assertEqual(2, len(matches),
                              "a second attempt must not overwrite the first attempt's evidence")
 

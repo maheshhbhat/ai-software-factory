@@ -394,8 +394,15 @@ def run_model(value: dict, timeout: int, max_usd: float,
                     # issue on later cycles into the same directory), so a
                     # fixed name would let a later retry silently erase the
                     # exact failing output this exists to preserve.
+                    # repo included, not just artifact: two different
+                    # repositories can share the same issue number, and
+                    # they typically share one FACTORY_RUN_DIR (one
+                    # poller/worker process), so artifact number alone
+                    # cannot disambiguate whose evidence this is.
+                    repo_slug = re.sub(r"[^A-Za-z0-9._-]+", "_", repo or "unknown-repo")
                     evidence_name = (
-                        f"planning-output-{artifact if artifact is not None else 'na'}"
+                        f"planning-output-{repo_slug}"
+                        f"-{artifact if artifact is not None else 'na'}"
                         f"-{uuid.uuid4().hex[:12]}.json")
                     evidence_path = obs.run_directory() / evidence_name
                     evidence_path.parent.mkdir(parents=True, exist_ok=True)
