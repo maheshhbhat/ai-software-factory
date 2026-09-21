@@ -289,7 +289,10 @@ class InvocationTests(unittest.TestCase):
         """The model's own output otherwise lives only in a temp file this
         function's own `with` block deletes the instant it returns or
         raises -- gone before anyone could look at it, even on failure.
-        Must survive a schema-invalid failure, not just a success."""
+        Must survive a schema-invalid failure, not just a success. Named
+        per invocation and owner-only: it can carry private issue/
+        repository content obs.redact() only partially scrubs, and
+        FACTORY_RUN_DIR is typically shared across many invocations."""
         client, (state, registry) = ProjectClient(), capacity()
         with tempfile.TemporaryDirectory() as run_dir:
             try:
@@ -301,10 +304,37 @@ class InvocationTests(unittest.TestCase):
                                    state=state, registry=registry)
             finally:
                 state.close()
-            evidence = pathlib.Path(run_dir) / "planning-output.json"
-            self.assertTrue(evidence.exists(),
-                            "the raw output must be persisted even though validation failed")
-            self.assertEqual("{}", evidence.read_text(encoding="utf-8"))
+            matches = list(pathlib.Path(run_dir).glob("planning-output-10-*.json"))
+            self.assertEqual(1, len(matches),
+                             "the raw output must be persisted, named for this artifact")
+            self.assertEqual("{}", matches[0].read_text(encoding="utf-8"))
+            self.assertEqual(0o600, matches[0].stat().st_mode & 0o777)
+
+    def test_retried_planning_does_not_clobber_a_prior_attempt(self):
+        """Review finding: FACTORY_RUN_DIR is typically shared across many
+        invocations (the poller retries a project:planning issue on later
+        cycles into the same directory) -- a fixed filename would let a
+        later retry silently erase the exact failing output this exists
+        to preserve."""
+        run_dir_holder = {}
+        def make_run(comment_labels=None):
+            client, (state, registry) = ProjectClient(), capacity()
+            try:
+                with mock.patch.object(invoke.artifacts, "GitHubStore", return_value=client), \
+                        self.assertRaisesRegex(invoke.InvocationError, "schema-invalid"):
+                    invoke.execute("o/r", 10, "token", 30, 2.5,
+                                   runner=lambda *a, **k: Result(stdout="{}"),
+                                   state=state, registry=registry)
+            finally:
+                state.close()
+
+        with tempfile.TemporaryDirectory() as run_dir:
+            with mock.patch.dict(os.environ, {"FACTORY_RUN_DIR": run_dir}):
+                make_run()
+                make_run()
+            matches = list(pathlib.Path(run_dir).glob("planning-output-10-*.json"))
+            self.assertEqual(2, len(matches),
+                             "a second attempt must not overwrite the first attempt's evidence")
 
     def test_repository_contradiction_fails_before_artifact_write(self):
         client, (state, registry) = ProjectClient(), capacity()

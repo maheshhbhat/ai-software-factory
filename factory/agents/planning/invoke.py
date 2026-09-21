@@ -14,6 +14,7 @@ import sys
 import tempfile
 import time
 import urllib.error
+import uuid
 
 HERE = pathlib.Path(__file__).resolve().parent
 ROOT = HERE.parents[2]
@@ -336,7 +337,8 @@ def _planning_triggers(value: dict) -> frozenset[str]:
 
 def run_model(value: dict, timeout: int, max_usd: float,
               runner=subprocess.run, clock=time.monotonic, *,
-              state: CapacityState | None = None, registry=None) -> dict:
+              state: CapacityState | None = None, registry=None,
+              repo: str | None = None, artifact: int | None = None) -> dict:
     altitude = contract.select_altitude(set((value.get("trigger") or {}).get("labels", [])))
     schema_value = contract.json_schema(altitude)
     prompt = (HERE.joinpath("prompt.md").read_text()
@@ -378,9 +380,19 @@ def run_model(value: dict, timeout: int, max_usd: float,
                 # failure. Persisted here, at the one point every attempt
                 # that reaches validation passes through, before either
                 # parsing or contract validation can raise.
-                evidence_path = obs.run_directory() / "planning-output.json"
+                # Named per invocation, not a fixed filename: FACTORY_RUN_DIR
+                # is typically shared across many invocations (the poller
+                # retries a project:planning issue on later cycles into the
+                # same directory), so a fixed name would let a later retry
+                # silently erase the exact failing output this exists to
+                # preserve. 0o600: this can carry private issue/repository
+                # content that obs.redact() only partially scrubs.
+                evidence_name = (f"planning-output-{artifact if artifact is not None else 'na'}"
+                                 f"-{uuid.uuid4().hex[:12]}.json")
+                evidence_path = obs.run_directory() / evidence_name
                 evidence_path.parent.mkdir(parents=True, exist_ok=True)
                 evidence_path.write_text(obs.redact(raw), encoding="utf-8")
+                evidence_path.chmod(0o600)
                 parsed = _parse_output(raw)
                 contract.validate_output(altitude, parsed, value.get("repository"))
             material = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
@@ -428,7 +440,7 @@ def execute(repo: str, artifact: int, token: str, timeout: int, max_usd: float,
     key = (f"{artifact}:{state_version(client, issue)}:{altitude.value}:"
            f"prompt-{prompt_version()}:feedback-{feedback_version(feedback)}")
     output = run_model(value, timeout, max_usd, runner=runner,
-                       state=state, registry=registry)
+                       state=state, registry=registry, repo=repo, artifact=artifact)
     contract.validate_output(altitude, output, repository)
     artifacts.write(client, value["trigger"], key, output)
     verified = verify_with_retry(client, value["trigger"], key, altitude)
