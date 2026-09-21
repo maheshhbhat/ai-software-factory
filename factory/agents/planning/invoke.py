@@ -371,6 +371,16 @@ def run_model(value: dict, timeout: int, max_usd: float,
             parsed = None
             def validate(raw):
                 nonlocal parsed
+                # The model's own output otherwise lives only in a
+                # tempfile.NamedTemporaryFile that this function's own
+                # `with` block deletes the instant it returns or raises --
+                # gone before anyone could ever look at it, success or
+                # failure. Persisted here, at the one point every attempt
+                # that reaches validation passes through, before either
+                # parsing or contract validation can raise.
+                evidence_path = obs.run_directory() / "planning-output.json"
+                evidence_path.parent.mkdir(parents=True, exist_ok=True)
+                evidence_path.write_text(obs.redact(raw), encoding="utf-8")
                 parsed = _parse_output(raw)
                 contract.validate_output(altitude, parsed, value.get("repository"))
             material = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()

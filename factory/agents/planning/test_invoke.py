@@ -1,5 +1,6 @@
 import base64
 import json
+import os
 import pathlib
 import tempfile
 import unittest
@@ -283,6 +284,27 @@ class InvocationTests(unittest.TestCase):
             state.close()
         self.assertIn("project:planning", client.get_issue(10)["labels"])
         self.assertEqual({}, client.comments)
+
+    def test_raw_output_persists_even_when_validation_fails(self):
+        """The model's own output otherwise lives only in a temp file this
+        function's own `with` block deletes the instant it returns or
+        raises -- gone before anyone could look at it, even on failure.
+        Must survive a schema-invalid failure, not just a success."""
+        client, (state, registry) = ProjectClient(), capacity()
+        with tempfile.TemporaryDirectory() as run_dir:
+            try:
+                with mock.patch.object(invoke.artifacts, "GitHubStore", return_value=client), \
+                        mock.patch.dict(os.environ, {"FACTORY_RUN_DIR": run_dir}), \
+                        self.assertRaisesRegex(invoke.InvocationError, "schema-invalid"):
+                    invoke.execute("o/r", 10, "token", 30, 2.5,
+                                   runner=lambda *a, **k: Result(stdout="{}"),
+                                   state=state, registry=registry)
+            finally:
+                state.close()
+            evidence = pathlib.Path(run_dir) / "planning-output.json"
+            self.assertTrue(evidence.exists(),
+                            "the raw output must be persisted even though validation failed")
+            self.assertEqual("{}", evidence.read_text(encoding="utf-8"))
 
     def test_repository_contradiction_fails_before_artifact_write(self):
         client, (state, registry) = ProjectClient(), capacity()
