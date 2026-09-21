@@ -6,6 +6,7 @@ and whether the returned envelope is complete enough to write and verify.
 
 from __future__ import annotations
 
+import collections
 from dataclasses import dataclass
 from enum import Enum
 import json
@@ -290,6 +291,21 @@ def validate_output(altitude: Altitude, value: dict,
                 raise ContractError("operating envelope entry is malformed")
         known = set(identifiers)
         envelope_by_id = {item["id"]: item for item in envelope}
+        # Checked before the more detailed per-Story surface checks below,
+        # which compare a set built by `used.update(...)` -- two Stories
+        # claiming the same ID would collapse into one entry there,
+        # indistinguishable from a single, correct assignment. prompt.md
+        # requires exactly one Story per obligation; checked here
+        # deterministically rather than relying only on the model reading
+        # that instruction correctly every time.
+        assignment_counts = collections.Counter(
+            oid for story in stories if isinstance(story, dict)
+            for oid in (story.get("operating_envelope_ids") or [])
+            if isinstance(oid, str))
+        duplicated = sorted(oid for oid, count in assignment_counts.items() if count > 1)
+        if duplicated:
+            raise ContractError(
+                f"operating-envelope ID(s) assigned to more than one Story: {duplicated}")
         used = set()
         for story in stories:
             obligations = story.get("operating_envelope_ids") if isinstance(story, dict) else None
