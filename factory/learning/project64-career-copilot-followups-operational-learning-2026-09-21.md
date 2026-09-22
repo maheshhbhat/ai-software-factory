@@ -76,7 +76,7 @@ field directly rather than trusting this table.
 |---|---|---|---|
 | Planning, Attempt #11 | 1 | $2.64 | `runs/project64/experimental-career-copilot-64-attempt11/telemetry.jsonl` |
 | Planning, Attempts #1–#10 | 10 | not measured (occurred before this evidence window; each ran under the shared $15 Planning cap, but no per-attempt cost figures are available here) | none preserved |
-| Delivery, Story #67 | 4 engine invocations, all `capacity.route.final: success` — post-engine failures at different later stages (attempt1: no test command found before the "tests" stage even started; retry: failed the "tests" stage itself; retry2: passed "tests" but failed "acceptance-verification"; retry3: passed everything, PR opened) | $2.67 | `runs/project64/delivery-story-67-attempt1{,-retry,-retry2,-retry3}/telemetry.jsonl` |
+| Delivery, Story #67 | 4 engine invocations, all `capacity.route.final: success` — post-engine failures at different later stages (attempt1: no test command found before the "tests" stage even started; retry: failed the "tests" stage itself; retry2: passed "tests" but failed "acceptance-verification"; retry3: passed everything, PR opened) | $2.67 | telemetry: `runs/project64/delivery-story-67-attempt1{,-retry,-retry2,-retry3}/telemetry.jsonl`; real worker output for the 3 failures: `runs/project64/delivery-story-67-attempt1{,-retry,-retry2}/worker-output.log` |
 | Delivery, Story #68 | 1 | $0.84 | `runs/project64/delivery-story-68-attempt1/telemetry.jsonl` |
 | Delivery, Story #69 | 4 engine invocations — the first 3 failed at the capacity layer itself (engine errored, `ambiguous-mutation`/`unknown-failure`); the 4th succeeded at the capacity layer and failed at the Delivery worker's own post-engine "tests" stage instead. The Story was ultimately delivered by hand, not by a 5th paid attempt | $7.49 | `runs/project64/delivery-story-69-attempt1/telemetry.jsonl`, `-attempt1-retry`, `-attempt2`, `-instrumented` |
 | Independent Review, PR #70 | 2 (1 initial + 1 re-check after a fix) | $0.40 | `runs/project64/review-pr-70/telemetry.jsonl`, `review-pr-70-recheck/telemetry.jsonl` |
@@ -185,14 +185,23 @@ for the two formal bells above.
   diagnostic) succeeded cleanly at the engine level
   (`capacity.route.final: success`) and reached the Delivery worker's own
   post-engine test-running step instead, which is where the real failure
-  was found and fully captured: 176 of 423 tests failing suite-wide,
-  preserved verbatim at
-  `runs/project64/delivery-story-69-instrumented/worker-output.log` (the
-  real Delivery worker's own output for this exact invocation, including
-  the failing-test list and the `DeliveryError` diagnostic used to
-  root-cause the pytest-playwright/pytest-asyncio conflict and prioritize
-  ai-software-factory#712) — this is independently checkable, not taken on
-  this record's word alone. Story #69 was ultimately delivered by hand:
+  was found: 176 of 423 tests failing suite-wide. The exact Delivery
+  worker output for this invocation is preserved at
+  `runs/project64/delivery-story-69-instrumented/worker-output.log`, but
+  that output itself truncates the diagnostic text (it contains literal
+  "diagnostic middle omitted" placeholders and only a partial failing-test
+  list) — it is sufficient to confirm the 176/247 result and the
+  `DeliveryError` itself, but not sufficient alone for the full failing-test
+  list or root-cause detail. The **complete, untruncated** evidence for
+  those — the full failing-test list and the exact
+  `RuntimeError: Runner.run() cannot be called from a running event loop`
+  used to root-cause the pytest-playwright/pytest-asyncio conflict and
+  prioritize ai-software-factory#712 — is a separate, independent
+  reproduction of the same test suite under the same environment,
+  preserved at
+  `runs/project64/delivery-story-69-instrumented/local-reproduction-full-suite-run.log`.
+  This is independently checkable, not taken on this record's word alone.
+  Story #69 was ultimately delivered by hand:
   the AI's own already-correct fix (from the 4th invocation) plus two
   additional fixes found and verified by the operator were combined,
   tested locally and in real CI, and pushed as a PR — not delivered by a
