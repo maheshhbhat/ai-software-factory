@@ -439,12 +439,24 @@ not authorized work.
 gap is why Story #69's first three failures (of its real $7.49 spend, by
 far the larger waste this run) could not be diagnosed from any log at all,
 turning what should have been a five-minute read into a multi-hour
-instrumented investigation. Fixing it does not just help the Python
-test-command case below — it makes *every* future `ambiguous-mutation`
-failure, for any reason, diagnosable on the first occurrence. It is a
-small, low-risk, already-precedented change (an equivalent diagnostic-
-surfacing fix was made earlier this same session for a different capacity
-outcome), with no dependency on the other findings below.
+instrumented investigation. It is a small, low-risk, already-precedented
+change (an equivalent diagnostic-surfacing fix was made earlier this same
+session for a different capacity outcome), with no dependency on the other
+findings below.
+
+**A real limit on this fix, checked against the code, not assumed:**
+`factory/capacity_pool/providers/cli.py:193` already reduces the
+diagnostic to only the final 500 characters of combined stderr+stdout
+before `executor.py` ever sees it. Carrying that value through
+`ambiguous-mutation` (what #712 does) guarantees *some* diagnostic text
+survives, not that the causal error specifically does — if the real error
+occurs more than 500 characters before the end of the CLI's output (e.g.
+buried under trailing warnings, as Story #69's own pytest output was), the
+surfaced text could be non-empty and still not contain the useful part.
+This does not make #712 not worth doing (partial visibility is still a
+large improvement over none), but the claim that it makes *every* future
+`ambiguous-mutation` failure diagnosable is overstated; narrowed in
+Validation below.
 
 **Do not change yet:** the five secondary items below, including
 ai-software-factory#711 and #716. Fixing #711 is real and worth doing, but
@@ -494,10 +506,15 @@ where noted:**
 
 The next real Delivery attempt that fails with an `ambiguous-mutation`
 outcome, for any reason, will demonstrate whether the primary fix worked:
-the resulting `DeliveryError`/log should carry the real diagnostic text
-from the underlying CLI failure, not an empty string. A recurrence of
-today's exact symptom — a failure with no diagnostic text recoverable from
-any log — would falsify the fix.
+the resulting `DeliveryError`/log should carry non-empty diagnostic text
+from the underlying CLI failure (up to the final 500 characters of its
+combined stderr/stdout — the fix does not change that existing limit), not
+an empty string. A recurrence of today's exact symptom — a failure with no
+diagnostic text recoverable from any log at all — would falsify the fix.
+Whether that diagnostic tail actually contains the *causal* error (as
+opposed to trailing, unrelated output) is a separate, weaker guarantee
+this fix does not make; that limitation is real and is not itself what
+this validation checks.
 
 Separately, and only once ai-software-factory#711 is picked up: the next
 real Factory Delivery run against a **Python** repository specifically
