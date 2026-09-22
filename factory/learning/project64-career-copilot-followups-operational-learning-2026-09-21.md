@@ -416,9 +416,9 @@ where noted:**
    a cost curiosity; queued ahead of the items below despite the larger
    implementation effort, given its severity class.
 2. Fix ai-software-factory#711 (Python/pytest test-command detection) —
-   prevents recurrence for the next Python (or other non-Node, non-Factory)
-   Delivery run specifically; real, but smaller demonstrated cost impact
-   than #712 above.
+   prevents recurrence for the next Python Delivery run specifically (not
+   Ruby, Go, or another language the fix is not meant to cover); real, but
+   smaller demonstrated cost impact than #712 above.
 3. Validate a Project's canonical section structure before Planning runs
    against it (ai-software-factory#709/#710), so a hand-created or
    otherwise malformed Project fails cheaply at onboarding rather than
@@ -448,8 +448,9 @@ Separately, and only once ai-software-factory#711 is picked up: the next
 real Factory Delivery run against a **Python** repository specifically
 (not Ruby, Go, or another language the fix is not meant to cover) will
 demonstrate whether that fix worked: Delivery should reach the worker's
-own "tests" stage on its first engine invocation, with no
-`FACTORY_DELIVERY_TEST_CMD` operator override needed
-and no capacity-layer retry caused by a missing test command. A recurrence
-of today's exact failure ("repository declares no supported test command")
-on that next run would falsify the fix.
+own "tests" stage on its first engine invocation (`repository_test_command()`
+runs there, after the engine has already succeeded, not at the capacity
+layer), with no `FACTORY_DELIVERY_TEST_CMD` operator override needed and
+no post-engine Delivery retry caused by a missing test command. A
+recurrence of today's exact failure ("repository declares no supported
+test command") on that next run would falsify the fix.
