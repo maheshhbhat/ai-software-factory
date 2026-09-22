@@ -291,7 +291,9 @@ class TestEngineCredentialsAreValueRedacted(unittest.TestCase):
         import runlog
         from unittest import mock
         secrets = {"CLAUDE_CODE_OAUTH_TOKEN": "sk-ant-oat01-" + "a" * 40,
-                   "ANTHROPIC_API_KEY": "sk-ant-api03-" + "b" * 40}
+                   "ANTHROPIC_API_KEY": "sk-ant-api03-" + "b" * 40,
+                   "OPENAI_API_KEY": "sk-proj-" + "c" * 40,
+                   "META_API_KEY": "meta-key-" + "d" * 40}
         with mock.patch.dict(os.environ, secrets):
             for value in secrets.values():
                 cleaned = runlog.redact(f"engine said: token {value} rejected")
