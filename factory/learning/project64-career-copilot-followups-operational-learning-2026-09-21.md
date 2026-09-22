@@ -185,11 +185,18 @@ for the two formal bells above.
   diagnostic) succeeded cleanly at the engine level
   (`capacity.route.final: success`) and reached the Delivery worker's own
   post-engine test-running step instead, which is where the real failure
-  was found and fully captured: 176 of 423 tests failing suite-wide. Story
-  #69 was ultimately delivered by hand: the AI's own already-correct fix
-  (from the 4th invocation) plus two additional fixes found and verified
-  by the operator were combined, tested locally and in real CI, and pushed
-  as a PR — not delivered by a 5th paid Delivery attempt.
+  was found and fully captured: 176 of 423 tests failing suite-wide,
+  preserved verbatim at
+  `runs/project64/delivery-story-69-instrumented/worker-output.log` (the
+  real Delivery worker's own output for this exact invocation, including
+  the failing-test list and the `DeliveryError` diagnostic used to
+  root-cause the pytest-playwright/pytest-asyncio conflict and prioritize
+  ai-software-factory#712) — this is independently checkable, not taken on
+  this record's word alone. Story #69 was ultimately delivered by hand:
+  the AI's own already-correct fix (from the 4th invocation) plus two
+  additional fixes found and verified by the operator were combined,
+  tested locally and in real CI, and pushed as a PR — not delivered by a
+  5th paid Delivery attempt.
 
 ## Infrastructure failures discovered
 
