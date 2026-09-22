@@ -129,13 +129,16 @@ for the two formal bells above.
   $2.67 total; `runs/project64/delivery-story-67-attempt1{,-retry,-retry2,
   -retry3}/telemetry.jsonl`) — the Factory's recovery mechanism restores
   prior work as a fresh starting point, it does not skip paying for the
-  agent invocation that inspects and revises it. None of the 4 failures
-  were a real implementation defect: this machine had no Python test
-  tooling installed at all, and the Delivery worker has no built-in way to
-  detect a Python project's test command, so each attempt's engine
-  succeeded but the worker's own post-engine test/verification step
-  failed for an environment reason, not a code reason, until the
-  environment was fixed.
+  agent invocation that inspects and revises it. All 4 succeeded at the
+  capacity layer; 3 then failed at a later, post-engine stage (attempt1:
+  no test command found; retry: failed the "tests" stage; retry2: passed
+  "tests" but failed "acceptance-verification"), and the 4th (retry3)
+  passed every stage — tests and all five acceptance verifications — and
+  opened the PR. None of the 3 post-engine failures were a real
+  implementation defect: this machine had no Python test tooling installed
+  at all, and the Delivery worker has no built-in way to detect a Python
+  project's test command, so each failed for an environment reason, not a
+  code reason, until the environment was fixed.
 - **Story #68**: 1 successful attempt, no retries.
 - **Story #69**: 4 engine invocations, none reaching a pull request. The
   first 3 failed at the capacity layer itself (`ambiguous-mutation` /
@@ -273,9 +276,9 @@ hand-created-Project template gap, and the premature-review-verdict lock.
   otherwise discards; not persisted.
 - Story #69's final delivery was pushed by the operator directly (a real
   branch, a real PR, real CI, real Independent Review) rather than through
-  a 5th paid Delivery attempt, after four straight attempts failed at the
-  capacity layer and the underlying cause was fully root-caused and fixed
-  by hand.
+  a 5th paid Delivery attempt, after 3 attempts failed at the capacity
+  layer and a 4th failed at the Delivery worker's own post-engine test
+  stage, with the underlying cause fully root-caused and fixed by hand.
 
 ## Independent-review findings
 
@@ -340,7 +343,8 @@ against the commit's check-runs, not against any PR's self-reported status.
 ## What caused the most operational friction
 
 - **Story #69's cost and time were dominated by environment gaps, not code
-  quality.** Of the ~$7.49 spent on four failed Delivery attempts, the
+  quality.** Of the ~$7.49 spent across 4 Delivery invocations (3 capacity
+  failures, 1 that reached and failed a post-engine test stage), the
   actual defects found (two small test bugs) would ordinarily cost a
   fraction of that to fix — the expense came from this being the Factory's
   first-ever real Delivery run needing Python test tooling and a browser at
