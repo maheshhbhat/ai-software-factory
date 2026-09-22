@@ -27,6 +27,15 @@ Project #64 reached `project:awaiting-acceptance` at the point of writing.
 Acceptance itself is a separate, pending human decision — this document is
 the evidence for it, not the decision.
 
+**Terminal-state integrity, checked against each Story's real label
+timeline** (per the retrospective skill's required check): for all three
+Stories, `story:merged` is the last lifecycle label event on record, with
+no subsequent relabeling, reopening, or reuse, and each issue is `CLOSED`.
+Story #69's timeline additionally shows legitimate *pre-terminal* churn
+(claimed → in-review → reverted to ready by a premature review verdict →
+re-claimed → in-review → merged) — churn before reaching the terminal
+state, not a violation of it.
+
 ## Elapsed time
 
 - Measured: Planning Attempt #11 launched 2026-09-21T09:54:03Z; Project #64
@@ -115,9 +124,20 @@ for the two formal bells above.
   human override waiving that one pre-reviewed finding for this Project's
   plan alone (see Supported overrides below), plus two coverage gaps
   (browser UAT across three answer contexts; "New case" clearing chips)
-  corrected by hand in the generated plan before activation — not by
-  re-running Planning. Those two gaps existed because Planning was given
-  Project #64's own restatement of Issue #37 rather than Issue #37's
+  corrected by hand. **Both the original generated plan and the corrected,
+  activated plan are preserved in full**, so this claim is independently
+  checkable rather than taken on this record's word: the original at
+  `runs/project64/experimental-career-copilot-64-attempt11/planning-output-original.json`
+  shows the plan before correction, and the activated version at
+  `.../planning-output-corrected-activated.json` shows exactly the two
+  coverage-criteria additions made to Story #69 and nothing else changed.
+  Diffing the two files shows precisely the OE-RESP-1 finding this record
+  claims was waived (the same Story text triggers it in both, unchanged —
+  the waiver was applied at validation time, not by editing the plan) and
+  precisely the two added acceptance criteria, and nothing else. Both
+  corrections were made by hand — not by re-running Planning. The two
+  coverage gaps existed because Planning was given Project #64's own
+  restatement of Issue #37 rather than Issue #37's
   authoritative text; logged as a Factory backlog finding
   (ai-software-factory#710/#712-adjacent territory; specifically the
   requirement-provenance gap, filed separately during this run).
