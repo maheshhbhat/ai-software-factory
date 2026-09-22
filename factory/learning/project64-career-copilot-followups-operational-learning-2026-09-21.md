@@ -69,6 +69,42 @@ additional product or Factory work resulted — Delivery for all three
 Stories was already complete; the re-approval brings the record back into
 agreement with what was actually built and verified.
 
+**Governance-record exceptions accepted for this run.** Two governance
+requirements were not followed correctly during Project #64, both stemming
+from the same root cause: Delivery for Stories #67–#69 was driven by hand
+(direct calls into the dispatcher/worker/review modules) rather than through
+a running poller loop, since this run doubled as operational-learning
+evidence.
+
+1. **The approval-supersession above.** The Project-level checklist should
+   have carried both hand-corrected acceptance criteria before the *first*
+   `## Plan approval` was ever posted (backlogged as ai-software-factory#717
+   for the general pattern); instead the first approval covered 6 items and
+   had to be superseded by a second, corrected 8-item approval after
+   Delivery was already complete.
+2. **A touchlog gap.** `factory/runtime/continuation.py` only writes a
+   touchlog receipt when the real runtime processes a decision comment
+   through `continuation.run()`. That happened for the original Plan
+   approval (2026-09-21T10:30:15Z; receipt present in
+   `factory/touchlog/touchlog.jsonl`). It did not happen for the `## Plan
+   change` note or the second, superseding `## Plan approval` comment —
+   both were posted directly as GitHub comments, outside the poller loop
+   this hand-orchestrated run wasn't using, so neither has a touchlog
+   receipt. The GitHub comment is the only durable record of those two
+   decisions. Backlogged as ai-software-factory#718; no receipt has been
+   fabricated to fill the gap.
+
+Neither exception changes the product outcome: all three Stories are
+delivered, merged, tested, and independently reviewed (see Final product
+outcome, above, and Final CI/full-suite evidence, below). Both are
+governance-*record* limitations of this specific, hand-orchestrated
+experimental run, not defects in what was built or open questions about
+whether it works. Mahesh reviewed both findings in session and explicitly
+accepted them as known limitations of this experimental run rather than
+blockers to concluding it, instructing that they be backlogged (not fixed
+inline) and stated accurately here rather than remediated further as part
+of Project #64.
+
 ## Elapsed time
 
 - Measured: Planning Attempt #11 launched 2026-09-21T09:54:03Z (first
