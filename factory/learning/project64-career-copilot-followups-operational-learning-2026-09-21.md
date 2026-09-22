@@ -56,7 +56,7 @@ field directly rather than trusting this table.
 | Delivery, Story #69 | 4 engine invocations — the first 3 failed at the capacity layer itself (engine errored, `ambiguous-mutation`/`unknown-failure`); the 4th succeeded at the capacity layer and failed at the Delivery worker's own post-engine "tests" stage instead. The Story was ultimately delivered by hand, not by a 5th paid attempt | $7.49 | `runs/project64/delivery-story-69-attempt1/telemetry.jsonl`, `-attempt1-retry`, `-attempt2`, `-instrumented` |
 | Independent Review, PR #70 | 2 (1 initial + 1 re-check after a fix) | $0.40 | `runs/project64/review-pr-70/telemetry.jsonl`, `review-pr-70-recheck/telemetry.jsonl` |
 | Independent Review, PR #73 | 1 | $0.17 | `runs/project64/review-pr-73/telemetry.jsonl` |
-| Independent Review, PR #75 | 2 completed (real engine cost) + 2 "replay" (no engine call, $0 — evidence is a `review.preparing` process-event, not a telemetry file, since no capacity call happened) | $0.43 | completed: `runs/project64/review-pr-75/telemetry.jsonl`, `review-pr-75-attempt2/telemetry.jsonl`; replays: `runs/project64/review-pr-75-recheck/process-events.jsonl`, `review-pr-75-fresh/process-events.jsonl` |
+| Independent Review, PR #75 | 2 completed (real engine cost) + 2 further invocations reported "replay" in this session's own tool output at the time — no capacity-layer call, so no cost | $0.43 | completed: `runs/project64/review-pr-75/telemetry.jsonl`, `review-pr-75-attempt2/telemetry.jsonl`; the two "replay" calls: `review.preparing` fires unconditionally before `review/invoke.py`'s replay check, so the committed `runs/project64/review-pr-75-recheck/process-events.jsonl` and `review-pr-75-fresh/process-events.jsonl` prove only that each execution started, not its outcome — the "replay" result itself is this record's own contemporaneous observation, not independently preserved evidence |
 | **Total measured, Attempt #11 onward** | | **≈ $14.64** | sum of the files above |
 
 Not measured: Planning Attempts #1–#10's cost, and the cost of the earlier
@@ -362,27 +362,36 @@ not authorized work.
 
 ## Next improvement
 
-**Primary: fix ai-software-factory#711 (Python/pytest test-command
-detection in the Delivery worker).** Earliest preventable root cause: this
-is the Factory's first-ever Delivery run against a non-Node, non-Factory
-repository, and nothing in `repository_test_command()` recognizes a Python
-project at all. It was the single largest source of wasted attempts and
-spend this run ($2.67 across Story #67's 4 invocations, most of it
-attributable to this one gap rather than any code defect), and it is a
-narrow, self-contained, low-risk fix with no dependency on the other
-findings below.
+**Primary: fix ai-software-factory#712 (preserve the real diagnostic on an
+`ambiguous-mutation` outcome).** Earliest preventable root cause: this one
+gap is why Story #69's first three failures (of its real $7.49 spend, by
+far the larger waste this run) could not be diagnosed from any log at all,
+turning what should have been a five-minute read into a multi-hour
+instrumented investigation. Fixing it does not just help the Python
+test-command case below — it makes *every* future `ambiguous-mutation`
+failure, for any reason, diagnosable on the first occurrence. It is a
+small, low-risk, already-precedented change (an equivalent diagnostic-
+surfacing fix was made earlier this same session for a different capacity
+outcome), with no dependency on the other findings below.
 
-**Do not change yet:** the four secondary items below, and do not
-generalize the fix into a broader "detect any language's test command"
-framework — solve the demonstrated Python case first, per the
-retrospective skill's preference against premature generalization.
+**Do not change yet:** the four secondary items below, including
+ai-software-factory#711. Fixing #711 is real and worth doing, but it is
+narrower: it would have prevented only the genuinely wasted retry
+invocation(s) on Story #67 (the one that failed the "tests" stage outright
+— on the order of $0.33, not the invocation's full $2.67, since the first
+invocation's $1.64 was necessary productive work regardless, and the final
+successful invocation's cost was also necessary, not waste a detector
+would remove). Do not generalize either fix beyond its demonstrated case
+(Python for #711; the one `ambiguous-mutation` branch for #712) — solve
+the demonstrated problem first, per the retrospective skill's preference
+against premature generalization.
 
 **Secondary, queued, not prioritized further than their order below:**
 
-1. Fix ai-software-factory#712 (preserve the real diagnostic on
-   `ambiguous-mutation`) — a small, low-risk change with an
-   already-established precedent from an earlier fix this session, and the
-   highest investigation-time payoff of anything found today.
+1. Fix ai-software-factory#711 (Python/pytest test-command detection) —
+   prevents recurrence for the next Python (or other non-Node, non-Factory)
+   Delivery run specifically; real, but smaller demonstrated cost impact
+   than #712 above.
 2. Validate a Project's canonical section structure before Planning runs
    against it (ai-software-factory#709/#710), so a hand-created or
    otherwise malformed Project fails cheaply at onboarding rather than
@@ -401,10 +410,19 @@ retrospective skill's preference against premature generalization.
 
 ## Validation
 
-The next real Factory Delivery run against a Python (or other non-Node,
-non-Factory) repository will demonstrate whether the primary fix worked:
-Delivery should reach the worker's own "tests" stage on its first engine
-invocation, with no `FACTORY_DELIVERY_TEST_CMD` operator override needed
+The next real Delivery attempt that fails with an `ambiguous-mutation`
+outcome, for any reason, will demonstrate whether the primary fix worked:
+the resulting `DeliveryError`/log should carry the real diagnostic text
+from the underlying CLI failure, not an empty string. A recurrence of
+today's exact symptom — a failure with no diagnostic text recoverable from
+any log — would falsify the fix.
+
+Separately, and only once ai-software-factory#711 is picked up: the next
+real Factory Delivery run against a **Python** repository specifically
+(not Ruby, Go, or another language the fix is not meant to cover) will
+demonstrate whether that fix worked: Delivery should reach the worker's
+own "tests" stage on its first engine invocation, with no
+`FACTORY_DELIVERY_TEST_CMD` operator override needed
 and no capacity-layer retry caused by a missing test command. A recurrence
 of today's exact failure ("repository declares no supported test command")
 on that next run would falsify the fix.
