@@ -63,8 +63,10 @@ Not measured: Planning Attempts #1–#10's cost, and the cost of the earlier
 Factory-fix PRs (#689/#691/#694/#699/#701/#705) delivered before this
 evidence window. Career Copilot Project #64's approved plan carried a $5/60min
 spend cap per Story; Story #69 exceeded that cap (~$7.49 against $5) across
-its four failed attempts before being completed by hand instead of a further
-paid attempt.
+its four invocations before being completed by hand instead of a further
+paid attempt. **This overrun is not incidental — it is a real, confirmed
+Factory control gap, not just a cost fact; see Infrastructure failures
+below (ai-software-factory#716).**
 
 ## Human interventions / bells
 
@@ -191,6 +193,17 @@ for the two formal bells above.
    pushing a new (empty) commit. Backlogged: ai-software-factory#713
    (corrected once in this same thread after an initial misdiagnosis — see
    that issue's comment history).
+6. **A Story's spend cap is not enforced cumulatively across retries.**
+   `factory/spec/capacity-pool-integration-plan.md` states the intended
+   design explicitly: Story budget applies "across all attempts" and
+   "never reset[s]." The actual code does not do this —
+   `admission.delivery_request()` re-parses the Story's full declared
+   budget fresh on every call, with nothing tracking how much prior
+   reservations already consumed. This is a real governance gap, not just
+   a cost curiosity: nothing today would have stopped Story #69's 4
+   invocations from consuming up to 4x its declared cap even if none of
+   them had been an operator-authorized decision. Confirmed against both
+   the spec and `admission.py` directly. Backlogged: ai-software-factory#716.
 
 ## Product/test implementation failures discovered
 
@@ -374,34 +387,44 @@ small, low-risk, already-precedented change (an equivalent diagnostic-
 surfacing fix was made earlier this same session for a different capacity
 outcome), with no dependency on the other findings below.
 
-**Do not change yet:** the four secondary items below, including
-ai-software-factory#711. Fixing #711 is real and worth doing, but it is
-narrower: it would have prevented only the genuinely wasted retry
+**Do not change yet:** the five secondary items below, including
+ai-software-factory#711 and #716. Fixing #711 is real and worth doing, but
+it is narrower: it would have prevented only the genuinely wasted retry
 invocation(s) on Story #67 (the one that failed the "tests" stage outright
 — on the order of $0.33, not the invocation's full $2.67, since the first
 invocation's $1.64 was necessary productive work regardless, and the final
 successful invocation's cost was also necessary, not waste a detector
-would remove). Do not generalize either fix beyond its demonstrated case
-(Python for #711; the one `ambiguous-mutation` branch for #712) — solve
-the demonstrated problem first, per the retrospective skill's preference
-against premature generalization.
+would remove). #716 (spend cap not enforced cumulatively) is genuinely
+more severe in kind — it is an authorization-boundary gap, not just a
+cost/diagnosability one — but is architecturally larger (it needs
+cumulative-spend tracking across reservations, not a single small code
+change), so it is queued rather than primary; it should not wait
+indefinitely given its severity. Do not generalize any of these fixes
+beyond its demonstrated case (Python for #711; the one `ambiguous-mutation`
+branch for #712) — solve the demonstrated problem first, per the
+retrospective skill's preference against premature generalization.
 
-**Secondary, queued, not prioritized further than their order below:**
+**Secondary, queued, not prioritized further than their order below except
+where noted:**
 
-1. Fix ai-software-factory#711 (Python/pytest test-command detection) —
+1. Fix ai-software-factory#716 (Story spend cap not enforced cumulatively
+   across Delivery retries) — a real authorization-boundary gap, not just
+   a cost curiosity; queued ahead of the items below despite the larger
+   implementation effort, given its severity class.
+2. Fix ai-software-factory#711 (Python/pytest test-command detection) —
    prevents recurrence for the next Python (or other non-Node, non-Factory)
    Delivery run specifically; real, but smaller demonstrated cost impact
    than #712 above.
-2. Validate a Project's canonical section structure before Planning runs
+3. Validate a Project's canonical section structure before Planning runs
    against it (ai-software-factory#709/#710), so a hand-created or
    otherwise malformed Project fails cheaply at onboarding rather than
    after a paid Planning attempt.
-3. Decide and document the intended relationship between Independent
+4. Decide and document the intended relationship between Independent
    Review timing and required-check completion (ai-software-factory#713):
    either the operator convention should be "never trigger review before
    required checks complete," or a stale `findings` verdict should be
    revisable once its stated missing evidence later appears.
-4. Revisit whether Planning's `_scope_resolves` (and similar validators)
+5. Revisit whether Planning's `_scope_resolves` (and similar validators)
    should keep trying to predict Git/filesystem/parser edge cases at all
    (ai-software-factory#706/#707) — three consecutive review rounds each
    found a new one this session, which is itself evidence the approach does
