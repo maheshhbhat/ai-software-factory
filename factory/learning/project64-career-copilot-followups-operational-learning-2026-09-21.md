@@ -414,8 +414,11 @@ against the commit's check-runs, not against any PR's self-reported status.
   so no AI spend was wasted re-deriving code that was already right.
 - The standing discipline of stopping to verify a claim against actual
   execution evidence — rather than accepting a summary or a generic error
-  label — is what turned an unexplainable "unknown failure" into a fully
-  understood, fixed, and verified root cause for Story #69.
+  label — is what turned the 4th invocation's unexplainable "unknown
+  failure" into a fully understood, fixed, and verified root cause (the
+  pytest-playwright/pytest-asyncio conflict). The first 3 invocations'
+  cause remains genuinely unknown — this discipline recovered evidence for
+  one failure mode, not all four.
 - The bounded-correction discipline (never silently widening scope; always
   stopping to report and let the human decide) correctly prevented at least
   one wrong "fix" (an incorrect `contract.py` change earlier in the session,
