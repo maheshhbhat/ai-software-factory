@@ -36,6 +36,22 @@ Story #69's timeline additionally shows legitimate *pre-terminal* churn
 re-claimed → in-review → merged) — churn before reaching the terminal
 state, not a violation of it.
 
+**A real acceptance-evidence gap was found and fixed while writing this
+record.** Diffing the preserved original and corrected Planning artifacts
+(see Planning attempts, below) against the *live* Project #64 issue body
+showed that the two hand-corrected coverage gaps (three-context browser
+UAT; "New case" clearing chips) had been added to Story #69's own
+`acceptance_criteria` before activation, but never to the plan's
+Project-level `acceptance_criteria` array — the exact array
+`write_project()` publishes as the Project's own `### Falsifiable
+acceptance criteria` checklist, which is what a formal acceptance decision
+quotes verbatim. Project #64 could have been accepted without its own
+checklist ever asking whether those two behaviors were verified, even
+though both are implemented and passing in the merged E2E suite. **Fixed
+directly on the live Project #64 issue** — both criteria now appear in its
+checklist. The general pattern (a Story-level correction not propagated to
+the Project level) is backlogged as ai-software-factory#717.
+
 ## Elapsed time
 
 - Measured: Planning Attempt #11 launched 2026-09-21T09:54:03Z; Project #64
@@ -329,9 +345,12 @@ on the final merged commit — confirmed directly against the GitHub check-run
 API, not inferred. It proves: chips render and a click round-trips as a new
 user message; three distinct answer contexts render three distinct,
 allowlist-valid chip sets; "New case" clears chips; and the page produces
-zero console errors, zero failed/non-2xx requests, and no non-localhost
-network traffic (including an explicit favicon check), all with no
-live-provider credential present.
+zero console errors, zero failed/non-2xx requests, and no *unapproved*
+non-localhost network traffic (an explicit exemption exists for the page's
+own Google Fonts request, which is intercepted and never actually reaches
+the network — a real green run proves no request outside that one named
+exemption, not the literal absence of any non-localhost traffic), including
+an explicit favicon check, all with no live-provider credential present.
 
 ## Final CI / full-suite evidence
 
