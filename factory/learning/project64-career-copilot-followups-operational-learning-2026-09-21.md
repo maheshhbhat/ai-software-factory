@@ -51,12 +51,12 @@ field directly rather than trusting this table.
 |---|---|---|---|
 | Planning, Attempt #11 | 1 | $2.64 | `runs/project64/experimental-career-copilot-64-attempt11/telemetry.jsonl` |
 | Planning, Attempts #1–#10 | 10 | not measured (occurred before this evidence window; each ran under the shared $15 Planning cap, but no per-attempt cost figures are available here) | none preserved |
-| Delivery, Story #67 | 4 (1 engine success + 3 capacity-layer retries, see below) | $2.67 | `runs/project64/delivery-story-67-attempt1{,-retry,-retry2,-retry3}/telemetry.jsonl` |
+| Delivery, Story #67 | 4 engine invocations, all `capacity.route.final: success` — post-engine failures at different later stages (attempt1: no test command found before the "tests" stage even started; retry: failed the "tests" stage itself; retry2: passed "tests" but failed "acceptance-verification"; retry3: passed everything, PR opened) | $2.67 | `runs/project64/delivery-story-67-attempt1{,-retry,-retry2,-retry3}/telemetry.jsonl` |
 | Delivery, Story #68 | 1 | $0.84 | `runs/project64/delivery-story-68-attempt1/telemetry.jsonl` |
-| Delivery, Story #69 | 4 (all 4 failed at the capacity layer; the Story was ultimately delivered by hand, not by a 5th paid attempt) | $7.49 | `runs/project64/delivery-story-69-attempt1/telemetry.jsonl`, `-attempt1-retry`, `-attempt2`, `-instrumented` |
+| Delivery, Story #69 | 4 engine invocations — the first 3 failed at the capacity layer itself (engine errored, `ambiguous-mutation`/`unknown-failure`); the 4th succeeded at the capacity layer and failed at the Delivery worker's own post-engine "tests" stage instead. The Story was ultimately delivered by hand, not by a 5th paid attempt | $7.49 | `runs/project64/delivery-story-69-attempt1/telemetry.jsonl`, `-attempt1-retry`, `-attempt2`, `-instrumented` |
 | Independent Review, PR #70 | 2 (1 initial + 1 re-check after a fix) | $0.40 | `runs/project64/review-pr-70/telemetry.jsonl`, `review-pr-70-recheck/telemetry.jsonl` |
 | Independent Review, PR #73 | 1 | $0.17 | `runs/project64/review-pr-73/telemetry.jsonl` |
-| Independent Review, PR #75 | 2 completed + 2 "replay" (no engine call, $0, so no telemetry file exists for the replays) | $0.43 | `runs/project64/review-pr-75/telemetry.jsonl`, `review-pr-75-attempt2/telemetry.jsonl` |
+| Independent Review, PR #75 | 2 completed (real engine cost) + 2 "replay" (no engine call, $0 — evidence is a `review.preparing` process-event, not a telemetry file, since no capacity call happened) | $0.43 | completed: `runs/project64/review-pr-75/telemetry.jsonl`, `review-pr-75-attempt2/telemetry.jsonl`; replays: `runs/project64/review-pr-75-recheck/process-events.jsonl`, `review-pr-75-fresh/process-events.jsonl` |
 | **Total measured, Attempt #11 onward** | | **≈ $14.64** | sum of the files above |
 
 Not measured: Planning Attempts #1–#10's cost, and the cost of the earlier
@@ -360,28 +360,51 @@ explicit instruction, no backlog remediation starts as part of this record
 or Project #64's acceptance. The recommendations below are queued findings,
 not authorized work.
 
-## Concrete recommendations for the next real Factory run
+## Next improvement
 
-1. Fix ai-software-factory#711 (Python/pytest test-command detection)
-   before running Delivery against another non-Node, non-Factory
-   repository — this was the single largest source of wasted attempts
-   today.
-2. Fix ai-software-factory#712 (preserve the real diagnostic on
+**Primary: fix ai-software-factory#711 (Python/pytest test-command
+detection in the Delivery worker).** Earliest preventable root cause: this
+is the Factory's first-ever Delivery run against a non-Node, non-Factory
+repository, and nothing in `repository_test_command()` recognizes a Python
+project at all. It was the single largest source of wasted attempts and
+spend this run ($2.67 across Story #67's 4 invocations, most of it
+attributable to this one gap rather than any code defect), and it is a
+narrow, self-contained, low-risk fix with no dependency on the other
+findings below.
+
+**Do not change yet:** the four secondary items below, and do not
+generalize the fix into a broader "detect any language's test command"
+framework — solve the demonstrated Python case first, per the
+retrospective skill's preference against premature generalization.
+
+**Secondary, queued, not prioritized further than their order below:**
+
+1. Fix ai-software-factory#712 (preserve the real diagnostic on
    `ambiguous-mutation`) — a small, low-risk change with an
    already-established precedent from an earlier fix this session, and the
    highest investigation-time payoff of anything found today.
-3. Validate a Project's canonical section structure before Planning runs
+2. Validate a Project's canonical section structure before Planning runs
    against it (ai-software-factory#709/#710), so a hand-created or
    otherwise malformed Project fails cheaply at onboarding rather than
    after a paid Planning attempt.
-4. Decide and document the intended relationship between Independent
+3. Decide and document the intended relationship between Independent
    Review timing and required-check completion (ai-software-factory#713):
    either the operator convention should be "never trigger review before
    required checks complete," or a stale `findings` verdict should be
    revisable once its stated missing evidence later appears.
-5. Revisit whether Planning's `_scope_resolves` (and similar validators)
+4. Revisit whether Planning's `_scope_resolves` (and similar validators)
    should keep trying to predict Git/filesystem/parser edge cases at all
    (ai-software-factory#706/#707) — three consecutive review rounds each
    found a new one this session, which is itself evidence the approach does
    not converge, matching the decision already reached mid-run to keep that
    validator deliberately minimal.
+
+## Validation
+
+The next real Factory Delivery run against a Python (or other non-Node,
+non-Factory) repository will demonstrate whether the primary fix worked:
+Delivery should reach the worker's own "tests" stage on its first engine
+invocation, with no `FACTORY_DELIVERY_TEST_CMD` operator override needed
+and no capacity-layer retry caused by a missing test command. A recurrence
+of today's exact failure ("repository declares no supported test command")
+on that next run would falsify the fix.
