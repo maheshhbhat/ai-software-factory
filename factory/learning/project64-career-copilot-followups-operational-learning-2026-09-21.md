@@ -54,9 +54,12 @@ the Project level) is backlogged as ai-software-factory#717.
 
 ## Elapsed time
 
-- Measured: Planning Attempt #11 launched 2026-09-21T09:54:03Z; Project #64
-  reached `project:awaiting-acceptance` (all three Stories merged) at
-  2026-09-21T16:53:57Z. **Elapsed: ~7 hours.**
+- Measured: Planning Attempt #11 launched 2026-09-21T09:54:03Z (first
+  `planning.repository.max_bytes_configured` process event, preserved at
+  `runs/project64/experimental-career-copilot-64-attempt11/process-events.jsonl`);
+  Project #64's real `project:awaiting-acceptance` label event landed at
+  2026-09-21T16:59:36Z (from the Project's own GitHub label timeline, not
+  a proxy). **Elapsed: ~7 hours.**
 - Not measured: total wall-clock time for the full run, including Planning
   Attempts #1–#10 and the preceding Factory capacity-pool/`contract.py`
   fixes (PRs #689, #691, #694, #699, #701, #705). Those occurred earlier in
@@ -329,8 +332,10 @@ hand-created-Project template gap, and the premature-review-verdict lock.
 - Story #69's final delivery was pushed by the operator directly (a real
   branch, a real PR, real CI, real Independent Review) rather than through
   a 5th paid Delivery attempt, after 3 attempts failed at the capacity
-  layer and a 4th failed at the Delivery worker's own post-engine test
-  stage, with the underlying cause fully root-caused and fixed by hand.
+  layer (cause unknown — diagnostic discarded) and a 4th failed at the
+  Delivery worker's own post-engine test stage, whose cause *was* fully
+  root-caused (the pytest-playwright/pytest-asyncio conflict) and fixed by
+  hand.
 
 ## Independent-review findings
 
@@ -405,10 +410,18 @@ against the commit's check-runs, not against any PR's self-reported status.
   first-ever real Delivery run needing Python test tooling and a browser at
   all, with no built-in support for either.
 - **A discarded diagnostic turned a five-minute problem into a two-hour
-  investigation.** Had `ambiguous-mutation`'s real error text been
-  preserved (ai-software-factory#712), the pytest-playwright /
-  pytest-asyncio conflict driving Story #69's repeated failures would have
-  been visible on the very first attempt.
+  investigation.** The pytest-playwright/pytest-asyncio conflict is
+  confirmed as the cause of the *4th* invocation's post-engine test
+  failure only (its engine succeeded; the conflict was found and
+  reproduced at the later "tests" stage). What actually crashed the
+  *first three* invocations' engine processes remains genuinely unknown —
+  `ambiguous-mutation`'s real error text was discarded for all three, and
+  nothing preserved here establishes that the same conflict caused them
+  too. Had `ambiguous-mutation`'s real error text been preserved
+  (ai-software-factory#712), *whatever* caused those three crashes would
+  have been visible on the first occurrence, rather than requiring the
+  separate instrumented reproduction that eventually diagnosed the 4th
+  invocation's distinct, later-stage failure.
 - **A hand-created Project's structural gap was invisible until the most
   expensive possible moment** — after Planning had already run and spent
   real budget, rather than at Project creation.
