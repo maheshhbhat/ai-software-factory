@@ -52,6 +52,23 @@ directly on the live Project #64 issue** — both criteria now appear in its
 checklist. The general pattern (a Story-level correction not propagated to
 the Project level) is backlogged as ai-software-factory#717.
 
+**That edit itself triggered a second, more significant finding.** Per this
+repository's own governance rule (`factory/spec/state-schema.md`'s
+approval-binding rule, also enforced deterministically in
+`factory/runtime/continuation.py`), editing the `### Falsifiable acceptance
+criteria` section after an approval invalidates that approval — the live
+checklist no longer matched the 6-item checklist quoted in the original
+`## Plan approval` comment. Mahesh's prior approval was superseded by this
+record's own correction. Resolved in session: a `## Plan change` comment
+was posted on Project #64 documenting the original 6 items, the two
+additions (approved by Mahesh before Delivery began, per Issue #37's
+authoritative text), and the resulting supersession; Mahesh then gave a
+fresh, explicit re-approval of the corrected 8-item checklist, recorded as
+a new `## Plan approval` comment that supersedes the earlier one. No
+additional product or Factory work resulted — Delivery for all three
+Stories was already complete; the re-approval brings the record back into
+agreement with what was actually built and verified.
+
 ## Elapsed time
 
 - Measured: Planning Attempt #11 launched 2026-09-21T09:54:03Z (first
