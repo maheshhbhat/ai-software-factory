@@ -1,0 +1,166 @@
+{
+  "altitude": "project",
+  "acceptance_criteria": [
+    "In the hosted chat (chat.html), after a substantive answered turn that used advisor tools (e.g. a transitions comparison), between 2 and 4 clickable follow-up prompt chips appear below the reply, and clicking one sends that chip's text as the user's next chat message without retyping.",
+    "Follow-up prompts are drawn only from a fixed static allowlist whose entries map 1:1 onto the twelve shipped advisor tools; an automated allowlist-membership test fails if the derivation can emit any string outside that allowlist or if an allowlist entry references a tool not registered in tool_dispatch.",
+    "A turn that ends in an error reply, the fallback reply, or a rate-limited response shows no follow-up chips, and the chat surface still renders and accepts input normally.",
+    "The assistant's reply prose is unchanged by this feature: no menu phrasing is added to reply text, and the existing handback-guard and chat tests stay green.",
+    "Headless-Chromium E2E evidence via pytest-playwright on the CI ubuntu runner shows the chips render after a stubbed answered turn, a chip click round-trips as a new user message, and the page produces zero page-generated console errors and zero failed page requests (a failed request fails the test naming the failed URL, including /favicon.ico), with no live provider call and no OPENROUTER_API_KEY present.",
+    "The full applicable automated test suite (pytest -q, the repository's canonical test command run by .github/workflows/tests.yml) passes on the merged result."
+  ],
+  "operating_envelope": [
+    {
+      "id": "OE-SCALE-1",
+      "category": "representative-input",
+      "requirement": "A representative heavy turn whose tool calls span many of the twelve advisor tools still yields at most 4 follow-up prompts, keeping the chip row bounded on desktop and mobile widths.",
+      "failure_condition": "Any derivation input produces 5 or more follow-up prompts."
+    },
+    {
+      "id": "OE-DEGRADE-1",
+      "category": "degradation",
+      "requirement": "When a turn has no successful tool results (error-only turn, no-tool turn, or the fallback reply), follow-up derivation returns an empty list so the client renders no chips and degrades to today's behavior.",
+      "failure_condition": "An error-only or no-tool turn yields a non-empty follow-up list."
+    },
+    {
+      "id": "OE-RESP-1",
+      "category": "responsiveness",
+      "requirement": "Follow-up prompts arrive inline in the same /api/chat JSON response that carries the reply; rendering them requires no additional endpoint or network round trip.",
+      "failure_condition": "The client must issue any HTTP request beyond the existing single /api/chat POST to obtain or render follow-ups."
+    },
+    {
+      "id": "OE-PROVIDER-1",
+      "category": "external-provider",
+      "requirement": "The browser E2E suite runs against a locally served webapp with a stubbed chat backend, with OPENROUTER_API_KEY unset, and issues no request to any live model or government-data provider.",
+      "failure_condition": "The E2E suite fails without a live API key, or any request during the E2E run targets a non-localhost host."
+    }
+  ],
+  "adr": {
+    "title": "Deterministic allowlist-derived follow-up prompts, shared across both chat backends, with pytest-playwright browser assurance",
+    "context": "Issue #37 asks for contextual, clickable follow-up prompts after a useful answer, drawn only from capabilities the product actually supports, preserving 'answer first, then reveal relevant supported capabilities' (CAREER_ADVISOR_PROTOCOL.md rule 11 already forbids operator-style menus in reply prose). product.md standing constraint 5 forbids implying unsupported capabilities. The repository has two chat backends (chat.py OpenRouter tool-loop and chat_cli.py) that both return ChatReply and already share per-turn tool-result extraction via chat_extract.extract_candidates_and_plan; the frontend already renders server-supplied clickable choices (renderCandidates in static/chat.js) that disable when stale. Prompt-only behavioral fixes have historically regressed and required code guards (issues #52 handback_guard, #60 current_occupation_guard). There is no browser-test tooling in requirements-dev.txt or .github/workflows/tests.yml, no favicon in static/, and the webapp is a free-tier, no-persistence surface. Project #64 requires browser/E2E evidence for any hosted-chat change.",
+    "decision": "Derive follow-ups deterministically on the server, not from the model: a new small module (career_intelligence_mcp/followups.py) maps the turn's tool-call results plus established session state onto 0-4 prompt strings taken from a static literal allowlist whose entries map 1:1 onto the twelve tools registered in tool_dispatch, so no string outside the allowlist can ever be emitted. Both backends surface it through a new ChatReply.followups field populated alongside the existing shared chat_extract call; webapp.py passes it through as ChatResponse.followups in the same /api/chat response; static/chat.js renders it as clickable chips below the reply, reusing the candidate-picker pattern (click sends the text; stale chips disable). Reply prose is untouched. Add explicit /favicon.ico handling (a successful response) to the webapp surface. Browser assurance uses route 2 of the planning contract: authorize the established pytest-playwright dependency (headless Chromium, CI's ubuntu-latest runner, browser install as its own CI step), running the webapp locally with a stubbed chat backend, capturing page console errors and failed page requests. Story issues live in the product repository (product stories belong with product code); the factory merge gate for this private repository is only the existing Tests workflow required check \u2014 no cross-repository factory gate exists and none is claimed.",
+    "alternatives": [
+      "Model-generated follow-up suggestions (ask the LLM to propose next prompts): rejected \u2014 it can invent unsupported capabilities, violating product.md constraint 5, and prompt-only behavior has demonstrably regressed before (issues #52/#60 needed code guards).",
+      "Prompt-only change instructing the model to append a menu of options to its reply text: rejected \u2014 CAREER_ADVISOR_PROTOCOL.md rule 11 explicitly forbids operator-style menus in prose, and it is untestable deterministically.",
+      "A homemade browser driver (raw Chromium process, CDP, --dump-dom): rejected \u2014 the planning contract forbids invented drivers, and no such mechanism exists in this repository.",
+      "Skipping browser evidence and relying on TestClient-level tests only: rejected \u2014 Project #64's finish line and product.md both require browser/E2E evidence for hosted-chat changes.",
+      "Placing generated planning artifacts in the factory repository: rejected \u2014 product stories belong with product code; the trigger and this plan keep them in career-intelligence-mcp."
+    ],
+    "consequences": [
+      "Positive: unsupported capabilities structurally cannot appear as follow-ups \u2014 output is a subset of a reviewed static allowlist, enforced by tests asserting allowlist membership and allowlist-to-tool mapping.",
+      "Positive: both chat backends get identical follow-up behavior through the existing shared extraction seam, with no new subsystem, persistence, or protocol.",
+      "Positive: the repository gains its first reusable headless-browser E2E harness, plus favicon/failed-request assurance for the hosted chat.",
+      "Negative: a new dev dependency (pytest-playwright) and a browser-install CI step add roughly 1-2 minutes to CI runs.",
+      "Negative: deterministic chips are less context-sensitive than model-chosen suggestions; wording comes from a fixed allowlist the owner should eyeball at acceptance.",
+      "Negative: adding a future advisor tool requires updating the allowlist; the allowlist-to-dispatch mapping test turns a forgotten update into a visible failure rather than silent drift."
+    ]
+  },
+  "stories": [
+    {
+      "key": "followup-derivation",
+      "title": "Deterministic follow-up derivation shared by both chat backends",
+      "spec": "Add career_intelligence_mcp/followups.py: a pure function that takes the turn's ordered (tool_name, result_dict) pairs (the same list chat_extract.extract_candidates_and_plan consumes) plus the session's established_current_occupation, and returns 0-4 follow-up prompt strings selected from a static literal allowlist. Each allowlist entry is a plain-language prompt (no O*NET/SOC/endpoint terminology, per product.md) mapped 1:1 to one of the twelve tools registered in tool_dispatch (e.g. after find_career_transitions: certifications, training options, licenses, full transition plan; after build_career_transition_plan: job centers, employing industries). Suppress suggestions for capabilities already exercised this turn, and return [] for error-only turns, no-tool turns, and the fallback reply. Add ChatReply.followups (Optional[list], default None) in chat.py; populate it in chat.py's send_message next to the existing chat_extract call, and in chat_cli.py's send_message via the same shared derivation, so both backends behave identically. Reply prose is never modified. Proof obligation for the supported-only claim \u2014 Claim: every emitted follow-up names a shipped capability. Domain: all reachable outputs of the derivation function for any input. Invariant: outputs are selected by membership from a static literal allowlist; there is no dynamic string construction path. Skipped-value justification: since output is a subset of the allowlist, inputs not directly tested cannot produce a string outside it. Bound: allowlist size is at most 12 entries (one per registered tool), reviewed exhaustively by test. Falsification: a test asserting every allowlist entry's mapped tool name is in tool_dispatch's registered tool set, and a fuzz-style test asserting derivation output is a subset of the allowlist for varied inputs. Acceptance-to-scope mapping: career_intelligence_mcp/followups.py owns the derivation behavior; chat.py and chat_cli.py own the ChatReply plumbing; tests/test_followups.py (new) proves derivation properties; tests/test_chat.py and tests/test_chat_cli.py (existing files, new cases) prove backend wiring.",
+      "phase": "build",
+      "depends_on": [],
+      "hazard": false,
+      "acceptance_criteria": [
+        "Given a turn whose tool calls include a successful find_career_transitions result, the derivation returns between 2 and 4 prompts, each a member of the static allowlist || VERIFY {\"type\":\"automated\",\"scope\":\"career_intelligence_mcp/followups.py\",\"executor\":\"tests/test_followups.py\",\"executor_source\":\"create\",\"action\":\"pytest -q tests/test_followups.py\",\"expected\":\"the transitions-turn test asserts 2-4 allowlisted prompts and the command exits 0\",\"failure\":\"an assertion fails and pytest exits nonzero\"}",
+        "The derivation's output is a subset of the static allowlist for varied inputs, and each allowlist entry's mapped tool name is registered in tool_dispatch || VERIFY {\"type\":\"automated\",\"scope\":\"career_intelligence_mcp/followups.py\",\"executor\":\"tests/test_followups.py\",\"executor_source\":\"create\",\"action\":\"pytest -q tests/test_followups.py\",\"expected\":\"the allowlist-membership and allowlist-to-dispatch mapping tests pass and the command exits 0\",\"failure\":\"a prompt outside the allowlist or an unmapped allowlist entry fails an assertion and pytest exits nonzero\"}",
+        "For an error-only turn, a turn with no tool calls, and the fallback reply, the derivation returns an empty list || VERIFY {\"type\":\"automated\",\"scope\":\"career_intelligence_mcp/followups.py\",\"executor\":\"tests/test_followups.py\",\"executor_source\":\"create\",\"action\":\"pytest -q tests/test_followups.py\",\"expected\":\"the degraded-turn tests assert an empty list and the command exits 0\",\"failure\":\"a non-empty list is returned for a degraded turn and pytest exits nonzero\"}",
+        "chat.py's send_message populates ChatReply.followups from the turn's tool results without altering reply text, candidates, or plan behavior || VERIFY {\"type\":\"automated\",\"scope\":\"career_intelligence_mcp/chat.py\",\"executor\":\"tests/test_chat.py\",\"executor_source\":\"existing\",\"action\":\"pytest -q tests/test_chat.py\",\"expected\":\"new followups wiring cases and existing chat tests pass and the command exits 0\",\"failure\":\"a wiring or regression assertion fails and pytest exits nonzero\"}",
+        "chat_cli.py's send_message populates ChatReply.followups via the same shared derivation || VERIFY {\"type\":\"automated\",\"scope\":\"career_intelligence_mcp/chat_cli.py\",\"executor\":\"tests/test_chat_cli.py\",\"executor_source\":\"existing\",\"action\":\"pytest -q tests/test_chat_cli.py\",\"expected\":\"new followups wiring cases and existing chat_cli tests pass and the command exits 0\",\"failure\":\"a wiring or regression assertion fails and pytest exits nonzero\"}"
+      ],
+      "operating_envelope_ids": [
+        "OE-SCALE-1",
+        "OE-DEGRADE-1"
+      ],
+      "operating_envelope_checks": [
+        {
+          "id": "OE-SCALE-1",
+          "check": "tests/test_followups.py drives a turn whose tool results span many of the twelve tools and asserts at most 4 prompts are returned"
+        },
+        {
+          "id": "OE-DEGRADE-1",
+          "check": "tests/test_followups.py asserts the derivation returns an empty list for error-only, no-tool, and fallback turns"
+        }
+      ],
+      "scope": [
+        "career_intelligence_mcp/followups.py",
+        "career_intelligence_mcp/chat.py",
+        "career_intelligence_mcp/chat_cli.py",
+        "career_intelligence_mcp/chat_extract.py",
+        "tests/test_followups.py",
+        "tests/test_chat.py",
+        "tests/test_chat_cli.py"
+      ],
+      "spend_cap": "$5 / 60 min"
+    },
+    {
+      "key": "chat-ui-followups",
+      "title": "Surface follow-up chips in the hosted chat and add favicon handling",
+      "spec": "Pass ChatReply.followups through webapp.py as a new optional ChatResponse.followups field in the same /api/chat JSON response (no new endpoint). In static/chat.js, render a non-empty followups list as clickable chip buttons appended below the assistant reply, reusing the established renderCandidates pattern: clicking a chip sends its exact text as the next user message via the existing sendMessage flow; chips participate in setBusy() disabling; previously rendered chips are disabled (not removed) once a new message is sent, so the transcript stays honest without stale clickable choices. Style the chips in static/chat.css consistent with the existing candidate-btn/starter-prompt look; no changes to reply prose rendering. Add explicit favicon handling to webapp.py: a route for /favicon.ico returning a successful response (a declared small icon or an intentional 200/204 empty response), so browser-generated asset requests do not fail. This Story owns and explicitly accepts the browser-visible chip rendering and click-to-send behavior; its in-browser proof is delegated to the dependent browser-e2e-followups assurance Story, while server-observable behavior is proven here. Acceptance-to-scope mapping: career_intelligence_mcp/webapp.py owns the API passthrough and favicon behavior; career_intelligence_mcp/static/chat.js, chat.css, and chat.html own the chip UI behavior; tests/test_webapp.py (existing file, new cases) proves the API passthrough and favicon responses.",
+      "phase": "build",
+      "depends_on": [
+        "followup-derivation"
+      ],
+      "hazard": false,
+      "acceptance_criteria": [
+        "POST /api/chat returns a followups list inline in the same JSON body when the turn produced follow-ups, and omits or nulls it otherwise, with existing response fields unchanged || VERIFY {\"type\":\"automated\",\"scope\":\"career_intelligence_mcp/webapp.py\",\"executor\":\"tests/test_webapp.py\",\"executor_source\":\"existing\",\"action\":\"pytest -q tests/test_webapp.py\",\"expected\":\"the followups passthrough cases and existing webapp tests pass and the command exits 0\",\"failure\":\"a passthrough or regression assertion fails and pytest exits nonzero\"}",
+        "GET /favicon.ico returns a successful (2xx) response from the webapp || VERIFY {\"type\":\"automated\",\"scope\":\"career_intelligence_mcp/webapp.py\",\"executor\":\"tests/test_webapp.py\",\"executor_source\":\"existing\",\"action\":\"pytest -q tests/test_webapp.py\",\"expected\":\"the favicon test asserts a 2xx status and the command exits 0\",\"failure\":\"a non-2xx favicon response fails the assertion and pytest exits nonzero\"}",
+        "Error, fallback, and rate-limited /api/chat responses carry no followups content || VERIFY {\"type\":\"automated\",\"scope\":\"career_intelligence_mcp/webapp.py\",\"executor\":\"tests/test_webapp.py\",\"executor_source\":\"existing\",\"action\":\"pytest -q tests/test_webapp.py\",\"expected\":\"the degraded-response cases assert no followups content and the command exits 0\",\"failure\":\"followups appear on a degraded response and pytest exits nonzero\"}"
+      ],
+      "operating_envelope_ids": [
+        "OE-RESP-1"
+      ],
+      "operating_envelope_checks": [
+        {
+          "id": "OE-RESP-1",
+          "check": "tests/test_webapp.py asserts followups arrive inline in the single /api/chat JSON response body, with no additional endpoint added to the app"
+        }
+      ],
+      "scope": [
+        "career_intelligence_mcp/webapp.py",
+        "career_intelligence_mcp/static/chat.js",
+        "career_intelligence_mcp/static/chat.css",
+        "career_intelligence_mcp/static/chat.html",
+        "tests/test_webapp.py"
+      ],
+      "spend_cap": "$5 / 60 min"
+    },
+    {
+      "key": "browser-e2e-followups",
+      "title": "Headless-browser E2E assurance for follow-up chips via pytest-playwright",
+      "spec": "Authorize and add the established pytest-playwright dependency to requirements-dev.txt, add a dedicated Playwright Chromium browser-install step to .github/workflows/tests.yml (on the existing ubuntu-latest runner), and create tests/e2e/test_chat_followups.py. The E2E fixture starts the FastAPI webapp locally (uvicorn in a thread or subprocess on a localhost port) with chat.send_message stubbed to return a canned substantive ChatReply carrying 2-4 allowlisted followups \u2014 no OPENROUTER_API_KEY, no live provider or government-data call. The headless Chromium test loads /chat.html, submits a message, asserts the reply and 2-4 follow-up chips render, clicks a chip, and asserts the chip's text is sent as the next user message and appears in the transcript. Throughout, the test records page console errors and failed page requests (page 'console' type=error and 'requestfailed'/non-2xx response events) and fails naming the failed URL \u2014 including /favicon.ico. Browser install is a separate CI step, never chained into a verification action. This is a final assurance Story: it promises verification only; the chip behavior it checks is owned and accepted by chat-ui-followups, so its scope is test/CI/manifest paths plus pytest.ini if an e2e marker or path registration is needed. Hazard: true \u2014 scope touches the dependency manifest and CI workflow. Acceptance-to-scope mapping: tests/e2e/test_chat_followups.py proves the browser behavior; requirements-dev.txt and .github/workflows/tests.yml own the authorized tooling; pytest.ini owns test discovery configuration.",
+      "phase": "ship",
+      "depends_on": [
+        "chat-ui-followups"
+      ],
+      "hazard": true,
+      "acceptance_criteria": [
+        "Headless Chromium via pytest-playwright loads /chat.html against the locally served stubbed webapp, sees 2-4 follow-up chips after an answered turn, clicks one, and observes that chip's text sent as the next user message in the transcript || VERIFY {\"type\":\"automated\",\"scope\":\"tests/e2e/test_chat_followups.py\",\"executor\":\"tests/e2e/test_chat_followups.py\",\"executor_source\":\"create\",\"action\":\"pytest -q tests/e2e/test_chat_followups.py\",\"expected\":\"the chip render and click-round-trip assertions pass and the command exits 0\",\"failure\":\"a chip fails to render or the click does not send its text, an assertion fails, and pytest exits nonzero\"}",
+        "During the E2E run, zero page-generated console errors and zero failed page requests occur; any failed request fails the test naming the failed URL, including /favicon.ico || VERIFY {\"type\":\"automated\",\"scope\":\"tests/e2e/test_chat_followups.py\",\"executor\":\"tests/e2e/test_chat_followups.py\",\"executor_source\":\"create\",\"action\":\"pytest -q tests/e2e/test_chat_followups.py\",\"expected\":\"the console-error and failed-request captures are empty and the command exits 0\",\"failure\":\"a console error or failed request is reported with its URL and pytest exits nonzero\"}",
+        "The E2E suite passes with OPENROUTER_API_KEY unset and the chat backend stubbed, issuing no request to a non-localhost host || VERIFY {\"type\":\"automated\",\"scope\":\"tests/e2e/test_chat_followups.py\",\"executor\":\"tests/e2e/test_chat_followups.py\",\"executor_source\":\"create\",\"action\":\"pytest -q tests/e2e/test_chat_followups.py\",\"expected\":\"the suite passes in an environment without the API key and the non-localhost request capture is empty\",\"failure\":\"the suite errors for want of a key or records an external request and pytest exits nonzero\"}",
+        "Browser UAT demonstrates at least three distinct answer contexts \u2014 a career-change/transitions turn, a training turn, and a Skills Matcher-results turn \u2014 each rendering a different valid chip set drawn from the allowlist || VERIFY {\"type\": \"automated\", \"scope\": \"tests/e2e/test_chat_followups.py\", \"executor\": \"tests/e2e/test_chat_followups.py\", \"executor_source\": \"create\", \"action\": \"pytest -q tests/e2e/test_chat_followups.py\", \"expected\": \"three stubbed-turn scenarios each render a distinct, allowlist-valid chip set and the command exits 0\", \"failure\": \"a scenario is missing, reuses an identical chip set across contexts, or produces a chip outside the allowlist, and pytest exits nonzero\"}",
+        "Triggering \"New case\" clears any rendered follow-up chips along with the rest of the conversation || VERIFY {\"type\": \"automated\", \"scope\": \"tests/e2e/test_chat_followups.py\", \"executor\": \"tests/e2e/test_chat_followups.py\", \"executor_source\": \"create\", \"action\": \"pytest -q tests/e2e/test_chat_followups.py\", \"expected\": \"after clicking New case following an answered turn with chips, no follow-up chips remain visible and the command exits 0\", \"failure\": \"a follow-up chip remains visible after New case is triggered and pytest exits nonzero\"}"
+      ],
+      "operating_envelope_ids": [
+        "OE-PROVIDER-1"
+      ],
+      "operating_envelope_checks": [
+        {
+          "id": "OE-PROVIDER-1",
+          "check": "tests/e2e/test_chat_followups.py runs with OPENROUTER_API_KEY unset against the stubbed local webapp and fails if any recorded page or backend request targets a non-localhost host"
+        }
+      ],
+      "scope": [
+        "requirements-dev.txt",
+        ".github/workflows/tests.yml",
+        "tests/e2e/**",
+        "pytest.ini"
+      ],
+      "spend_cap": "$5 / 60 min"
+    }
+  ],
+  "expected_bells": 2,
+  "risks": "Grounded at commit a79372cd537d8acac1caf7c76d8c7e5a48c4810a. (1) Highest product risk: chip wording is owner-visible product copy drawn from a fixed allowlist; the owner should eyeball the allowlist text at outcome acceptance \u2014 tests prove supportedness and bounds, not tone. (2) pytest-playwright is a new dev dependency and CI browser-install step (~1-2 min per run, hazard-labeled Story); this is the contract's route-2 authorization since the repository has no existing browser tooling. (3) The E2E stubs the chat backend, so it proves the web surface end to end but deliberately not live OpenRouter model behavior; live-model conduct remains covered by the existing eval suite and is unchanged because derivation is deterministic and reply prose is untouched. (4) Issue #64's operational-learning record follows the factory/learning/ pattern in the ai-software-factory repository and is produced by the owner/factory after the run; it is intentionally not a product Story here, since the product repository has no factory/learning/ path and the trigger forbids new telemetry infrastructure. (5) Merge governance: this private product repository's only required check is the Tests workflow (tests green); no cross-repository factory gate exists and none is claimed \u2014 flagged per the planning contract's must-not-be-silent list. (6) Issue #37's body was not inlined in the invocation; its requirement is planned from the trigger's authoritative restatement (answer first, then reveal supported capabilities, clickable prompts) plus repository evidence \u2014 if #37 contains additional constraints beyond that restatement, the owner should raise them at the plan-approval bell.",
+  "digest": "## Plan in plain language\n\nAfter the Career Advisor gives a real answer, the chat page will show a small row of 2 to 4 clickable suggestion buttons under the reply \u2014 things like checking certifications, training options, or building a full transition plan. Clicking one sends that question for you, so you never have to guess what the advisor can do next. The suggestions are picked by simple server code from a fixed, reviewed list that matches exactly what the product already supports today \u2014 the AI model does not invent them, so it can never advertise something the product cannot do. The advisor's answer text itself does not change, and when a turn fails or is rate-limited, no suggestions appear. The plan also adds a proper favicon response and, for proof, a real headless-browser test (using the established Playwright tool in CI) that loads the chat page, sees the buttons, clicks one, and checks that the page produced no console errors and no failed requests. Two human decisions are expected: approving this plan, and accepting the finished outcome. One choice for the owner to watch at acceptance: the exact wording of the suggestion buttons.\n\n## How the plan works\n\n```mermaid\nflowchart LR\n  U[User message] --> A[/api/chat/]\n  A --> B[chat backend tool loop]\n  B --> T[Advisor tool results]\n  T --> D[followups.py: deterministic allowlist derivation]\n  D --> R[ChatReply.followups]\n  R --> A2[/api/chat JSON response/]\n  A2 --> C[chat.js renders clickable chips]\n  C -->|chip click| U\n```\n\nIn text: a user message hits /api/chat; the chat backend runs its normal tool loop; the turn's tool results feed a new deterministic derivation module (followups.py) that selects 0-4 prompts from a static allowlist mapped 1:1 to the twelve shipped tools; the prompts ride back inline on the same /api/chat response; chat.js renders them as clickable chips; clicking a chip sends its text as the next user message. Both backends (chat.py and chat_cli.py) use the same derivation. Error, fallback, and rate-limited turns carry no follow-ups.\n\n## Story dependencies\n\n```mermaid\nflowchart LR\n  followup-derivation --> chat-ui-followups --> browser-e2e-followups\n```\n\nIn text: `followup-derivation` (build) has no dependencies and creates the shared deterministic derivation plus ChatReply plumbing in both backends. `chat-ui-followups` (build) depends on `followup-derivation` and adds the /api/chat passthrough, favicon handling, and the chip UI. `browser-e2e-followups` (ship, hazard: touches requirements-dev.txt and the CI workflow) depends on `chat-ui-followups` and adds pytest-playwright plus the headless-Chromium E2E that proves chips render, a click round-trips, and the page has zero console errors and zero failed requests including /favicon.ico, all without a live provider key. Unresolved choices surfaced, not decided silently: chip copy is owner-reviewable at acceptance; the operational-learning record for run #64 lives factory-side (factory/learning/ pattern), not as a product Story; and this repository's merge gate remains its Tests required check only \u2014 no cross-repository factory gate exists."
+}
