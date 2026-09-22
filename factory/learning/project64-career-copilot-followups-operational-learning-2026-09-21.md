@@ -117,10 +117,15 @@ below (ai-software-factory#716).**
 
 **Formal Factory bells (the two-heading mechanism this repository recognizes):**
 
-1. **Plan approval** — one bell, given in conversation, transcribed and
-   posted on Project #64, with the two Issue #37 gaps Planning missed
-   (multi-context browser UAT, "New case" clearing chips) corrected before
-   posting.
+1. **Plan approval** — **two** bells, not one: the original approval (6-item
+   checklist, the two Issue #37 gaps already corrected before posting), and
+   a second, superseding approval after this record's own review found that
+   a later checklist edit (adding the two gap-correction criteria at the
+   Project level) had invalidated the first approval under this
+   repository's own governance rule. Mahesh gave a fresh, explicit
+   re-approval of the corrected 8-item checklist; see Final product outcome
+   above and Project #64's own `## Plan change` / second `## Plan approval`
+   comments for the full record.
 2. **Acceptance** — pending; this document is offered as its evidence, not
    as the decision.
 
@@ -419,13 +424,24 @@ against the commit's check-runs, not against any PR's self-reported status.
 
 ## What caused the most operational friction
 
-- **Story #69's cost and time were dominated by environment gaps, not code
-  quality.** Of the ~$7.49 spent across 4 Delivery invocations (3 capacity
-  failures, 1 that reached and failed a post-engine test stage), the
-  actual defects found (two small test bugs) would ordinarily cost a
-  fraction of that to fix — the expense came from this being the Factory's
-  first-ever real Delivery run needing Python test tooling and a browser at
-  all, with no built-in support for either.
+- **What is confirmed does not point to code quality, but the dominant
+  cause of Story #69's cost is honestly unknown, not "environment gaps."**
+  Of the ~$7.49 spent across 4 Delivery invocations, only the 4th's cost
+  (~$1.64) and its confirmed cause (the pytest-playwright/pytest-asyncio
+  conflict — a real environment/tooling gap, not a code defect) are
+  established. The first 3 invocations (~$5.86, the larger share) crashed
+  at the capacity/engine layer with their diagnostic discarded; their true
+  cause is unconfirmed and could in principle be something else entirely.
+  What *is* confirmed either way: the two actual code defects found (the
+  Google Fonts exemption bug, the favicon/`page.route()` interaction) are
+  small and would ordinarily cost a fraction of $7.49 to fix — so whatever
+  the first 3 failures' real cause turns out to be, it was not those two
+  defects. This being the Factory's first-ever real Delivery run needing
+  Python test tooling and a browser at all, with no built-in support for
+  either, remains a real, separately confirmed friction point (see Story
+  #67, which had none of Story #69's mystery failures and still needed 3
+  environment-caused retries) — it is just not established as *the*
+  dominant cause of Story #69's specific total.
 - **A discarded diagnostic turned a five-minute problem into a two-hour
   investigation.** The pytest-playwright/pytest-asyncio conflict is
   confirmed as the cause of the *4th* invocation's post-engine test
