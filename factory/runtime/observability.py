@@ -64,7 +64,7 @@ def redact(value):
         return value
     text = value
     for name in ("GITHUB_TOKEN", "GH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN",
-                 "ANTHROPIC_API_KEY", "OPENAI_API_KEY"):
+                 "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "META_API_KEY"):
         secret = os.environ.get(name, "")
         if secret and len(secret) >= 8:
             text = text.replace(secret, "[redacted]")

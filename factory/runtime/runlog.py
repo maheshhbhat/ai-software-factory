@@ -113,8 +113,8 @@ def redact(value):
     # The engine credentials joined this list with #330: engine stderr now
     # rides into errors, launch records, and poison reports, and an engine
     # refused mid-authentication is exactly the case that echoes its token.
-    for name in ("GITHUB_TOKEN", "GH_TOKEN",
-                 "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"):
+    for name in ("GITHUB_TOKEN", "GH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN",
+                 "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "META_API_KEY"):
         secret = os.environ.get(name, "")
         if secret and len(secret) >= 8:
             text = text.replace(secret, REDACTED)

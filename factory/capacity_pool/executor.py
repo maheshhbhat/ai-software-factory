@@ -167,7 +167,8 @@ class CapacityExecutor:
                       "consumed_budget_units": consumed,
                       "mutation_state": attempt.mutation_state,
                       "terminal_outcome": terminal,
-                      "usage_receipt": usage_receipt}
+                      "usage_receipt": usage_receipt,
+                      "diagnostic": attempt.diagnostic[:500]}
             records.append(record)
             self.emit(metric="capacity.route.attempt", **record)
             if attempt.succeeded:
@@ -187,8 +188,8 @@ class CapacityExecutor:
                 affected_model = "*" if attempt.failure_scope == "provider" else step.model
                 self.state.mark_failure(step.provider, affected_model, reason)
             if attempt.mutation_state not in {"none", "pre-mutation"}:
-                return self._finish("ambiguous-mutation", "", records, consumed,
-                                    terminal_outcome=terminal)
+                return self._finish("ambiguous-mutation", attempt.diagnostic[:500],
+                                    records, consumed, terminal_outcome=terminal)
             if attempt.outcome in plan.stop_on or attempt.outcome not in plan.fallback_on:
                 if attempt.outcome in {
                     "malformed-output", "schema-invalid", "unsafe-output",

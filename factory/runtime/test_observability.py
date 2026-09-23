@@ -131,6 +131,24 @@ class ObservabilityTests(unittest.TestCase):
         serialised = json.dumps(obs.read_records("operation"))
         self.assertNotIn(secret, serialised); self.assertIn("[redacted]", serialised)
 
+    def test_every_provider_credential_is_redacted_from_telemetry(self):
+        """Every name in cli.py's PROVIDER_ENVIRONMENT must be covered here --
+        a provider diagnostic persisted to telemetry (e.g. a Delivery
+        ambiguous-mutation record) is the one place a live credential could
+        otherwise reach a durable, shared file unredacted."""
+        secrets = {"ANTHROPIC_API_KEY": "sk-ant-api03-" + "a" * 40,
+                   "OPENAI_API_KEY": "sk-proj-" + "b" * 40,
+                   "META_API_KEY": "meta-key-" + "c" * 40}
+        with mock.patch.dict(os.environ, secrets):
+            for name, secret in secrets.items():
+                with self.subTest(provider_credential=name):
+                    obs.telemetry("capacity.route.attempt",
+                                  diagnostic=f"auth rejected: {secret}")
+        serialised = json.dumps(obs.read_records("telemetry"))
+        for secret in secrets.values():
+            self.assertNotIn(secret, serialised)
+        self.assertIn("[redacted]", serialised)
+
 
 if __name__ == "__main__":
     unittest.main()

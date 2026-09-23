@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
+import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from factory.capacity_pool.executor import CapacityExecutor
 from factory.capacity_pool.providers import AttemptResult, ProviderAdapter
+from factory.capacity_pool.providers.cli import cli_adapter
 from factory.capacity_pool.router import ModelCapacity, RouteRequest, Tier
 from factory.capacity_pool.state import CapacityState
+from factory.runtime import observability as obs
 
 
 CAPS = frozenset({"reason", "json"})
@@ -168,6 +173,93 @@ class CapacityExecutorTests(unittest.TestCase):
                                   registry=self.registry(), payload={})
         self.assertEqual("ambiguous-mutation", result.outcome)
         self.assertFalse(called)
+
+    def test_ambiguous_mutation_diagnostic_is_preserved(self):
+        result = CapacityExecutor({
+            "openai": ProviderAdapter("openai", lambda **_: AttemptResult(
+                "timeout", mutation_state="ambiguous",
+                diagnostic="playwright bridge left the event loop unusable")),
+        }, self.state).execute(
+            task_key="ambiguous-diagnostic", request=self.request(),
+            registry=self.registry()[:1], payload={})
+        self.assertEqual("ambiguous-mutation", result.outcome)
+        self.assertEqual(
+            "playwright bridge left the event loop unusable", result.output)
+
+    def test_ambiguous_mutation_diagnostic_survives_a_real_failing_subprocess(self):
+        """Not a mocked AttemptResult: a real OS process writes to stderr,
+        exits nonzero, and that text must still be readable in the executor's
+        result -- proving the whole cli.py -> executor.py path, not just the
+        one line changed in executor.py."""
+        marker = "real-subprocess-diagnostic-4f1c"
+
+        def runner(command, **kwargs):
+            return subprocess.run(
+                ["/bin/sh", "-c", f"echo {marker} 1>&2; exit 1"],
+                capture_output=True, text=True, timeout=kwargs.get("timeout"))
+
+        adapter = cli_adapter("openai", cwd=Path("."), environment={},
+                              runner=runner, mutation_state=lambda: "ambiguous")
+        result = CapacityExecutor({"openai": adapter}, self.state).execute(
+            task_key="real-subprocess", request=self.request(),
+            registry=self.registry()[:1], payload={})
+        self.assertEqual("ambiguous-mutation", result.outcome)
+        self.assertIn(marker, result.output)
+
+    def test_ambiguous_mutation_diagnostic_is_bounded(self):
+        oversized = "x" * 900
+        result = CapacityExecutor({
+            "openai": ProviderAdapter("openai", lambda **_: AttemptResult(
+                "timeout", mutation_state="ambiguous", diagnostic=oversized)),
+        }, self.state).execute(
+            task_key="ambiguous-bounded", request=self.request(),
+            registry=self.registry()[:1], payload={})
+        self.assertEqual(500, len(result.output))
+
+    def test_every_attempt_carries_a_diagnostic_field_in_telemetry(self):
+        emitted = []
+        executor = CapacityExecutor({
+            "openai": ProviderAdapter("openai", lambda **_: AttemptResult(
+                "timeout", mutation_state="ambiguous", diagnostic="crashed mid-write")),
+        }, self.state, telemetry=lambda **fields: emitted.append(fields))
+        executor.execute(task_key="telemetry-diagnostic", request=self.request(),
+                         registry=self.registry()[:1], payload={})
+        attempt_records = [f for f in emitted if f.get("metric") == "capacity.route.attempt"]
+        self.assertEqual(1, len(attempt_records))
+        self.assertEqual("crashed mid-write", attempt_records[0]["diagnostic"])
+
+    def test_successful_attempt_telemetry_is_otherwise_unchanged(self):
+        emitted = []
+        executor = CapacityExecutor({
+            "openai": ProviderAdapter("openai", lambda **_: AttemptResult(
+                "success", "ok", consumed_budget_units=1)),
+        }, self.state, telemetry=lambda **fields: emitted.append(fields))
+        result = executor.execute(task_key="telemetry-success", request=self.request(),
+                                  registry=self.registry()[:1], payload={})
+        self.assertEqual("success", result.outcome)
+        attempt_records = [f for f in emitted if f.get("metric") == "capacity.route.attempt"]
+        self.assertEqual(1, len(attempt_records))
+        self.assertEqual("", attempt_records[0]["diagnostic"])
+
+    def test_diagnostic_secret_is_redacted_before_it_reaches_persisted_telemetry(self):
+        secret = "sk-ant-live-integrationsecretvalue12345"
+        with tempfile.TemporaryDirectory() as run_dir, mock.patch.dict(
+                os.environ, {"FACTORY_RUN_DIR": run_dir,
+                            "ANTHROPIC_API_KEY": secret,
+                            "FACTORY_LOG_LEVEL": "CRITICAL"}):
+            executor = CapacityExecutor({
+                "openai": ProviderAdapter("openai", lambda **_: AttemptResult(
+                    "timeout", mutation_state="ambiguous",
+                    diagnostic=f"auth header sent: Bearer {secret}")),
+            }, self.state, telemetry=lambda **fields: obs.telemetry(
+                fields.pop("metric"), **fields))
+            executor.execute(task_key="telemetry-secret", request=self.request(),
+                             registry=self.registry()[:1], payload={})
+            records = obs.read_records("telemetry")
+        attempt_records = [r for r in records if r.get("metric") == "capacity.route.attempt"]
+        self.assertEqual(1, len(attempt_records))
+        self.assertNotIn(secret, attempt_records[0]["diagnostic"])
+        self.assertIn("[redacted]", attempt_records[0]["diagnostic"])
 
     def test_validation_failure_is_a_stop(self):
         executor = CapacityExecutor({
